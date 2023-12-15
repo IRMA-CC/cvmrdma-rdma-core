@@ -46,6 +46,7 @@
 #include <util/udma_barrier.h>
 
 #include "pvrdma.h"
+#include "cvmrdma/debug.h"
 
 int pvrdma_alloc_qp_buf(struct pvrdma_device *dev, struct ibv_qp_cap *cap,
 			enum ibv_qp_type type, struct pvrdma_qp *qp)
@@ -362,6 +363,7 @@ int pvrdma_modify_qp(struct ibv_qp *ibqp, struct ibv_qp_attr *attr,
 		     int attr_mask)
 {
 	struct ibv_modify_qp cmd;
+	struct pvrdma_context * ctxt = to_vctx(ibqp->context);
 	struct pvrdma_qp *qp = to_vqp(ibqp);
 	int ret;
 
@@ -378,6 +380,31 @@ int pvrdma_modify_qp(struct ibv_qp *ibqp, struct ibv_qp_attr *attr,
 		if (ibqp->send_cq != ibqp->recv_cq)
 			pvrdma_cq_clean(to_vcq(ibqp->send_cq), qp->qp_handle);
 		pvrdma_init_qp_queue(qp);
+	}
+
+	/* The RPC object need to be connected to send, but in not required for receive (the RPC server
+	   is already running). However, since the user passes the QPN in the INIT->RTR transition,
+	   connect at this step.
+	*/
+	if((attr_mask & IBV_QP_STATE) && (attr->qp_state == IBV_QPS_RTR))
+	{
+		switch(ibqp->qp_type)
+		{
+			case IBV_QPT_RC:
+			case IBV_QPT_UC: {
+				assert(attr_mask & IBV_QP_DEST_QPN);
+				uint32_t dest_qpn = attr->dest_qp_num;
+
+				/* Blocking: get the qp notifier capability from the remote over the network */
+				qp->remote_qnc = get_qp_notification_client(ctxt->network_client_connection, ctxt->network_client_cap, dest_qpn);
+
+				break;
+			}
+			default: {
+				fprintf(stderr, "modify_qp: unsupported QP type\n");
+				return -1;
+			}
+		}
 	}
 
 	return ret;
