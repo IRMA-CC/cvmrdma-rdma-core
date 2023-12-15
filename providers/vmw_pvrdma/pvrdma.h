@@ -64,6 +64,7 @@
 #include "cvmrdma/bounce_metadata.h" /* bounce metadata per PD */
 #include "cvmrdma/cvmrdma_network_client.h" /* IP based RPCs client, per context */
 #include "cvmrdma/cvmrdma_network_server.h" /* IP based RPCs server, per context */
+#include "cvmrdma/cvmrdma_cq_server.h" /* Each CQ holds a CQ server thread */
 
 #define PFX "pvrdma: "
 
@@ -144,6 +145,9 @@ struct pvrdma_cq {
 	uint32_t			cqe_cnt;
 	uint32_t			offset;
 	uint32_t			cqn;
+
+	CQServer cvmrdma_cq_server;
+	pthread_t cvmrdma_cq_server_thread;
 };
 
 struct pvrdma_srq {

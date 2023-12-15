@@ -250,8 +250,21 @@ struct ibv_cq *pvrdma_create_cq(struct ibv_context *context, int cqe,
 	cq->cqn = resp.cqn;
 	cq->cqe_cnt = cq->ibv_cq.cqe;
 
+	/* Initialize the CQ polling server */
+	cq_server_context_init(&cq->cvmrdma_cq_server, &cq->ibv_cq);
+
+	/* And run the server loop in another thread */
+	ret = cq_server_run(&cq->cvmrdma_cq_server, &cq->cvmrdma_cq_server_thread);
+	if(ret)
+	{
+		fprintf(stderr, "Failed to start CQ server %d\n", ret);
+		goto cq_server_context_destroy;
+	}
+
 	return &cq->ibv_cq;
 
+cq_server_context_destroy:
+	cq_server_context_destroy(&cq->cvmrdma_cq_server);
 err_buf:
 	pvrdma_free_buf(&cq->buf);
 err:
