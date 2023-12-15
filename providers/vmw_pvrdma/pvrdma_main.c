@@ -154,15 +154,38 @@ static struct verbs_context *pvrdma_alloc_context(struct ibv_device *ibdev,
 	context = verbs_init_and_alloc_context(ibdev, cmd_fd, context, ibv_ctx,
 					       RDMA_DRIVER_VMW_PVRDMA);
 	if (!context)
-		return NULL;
+		goto err;
 
 	if (pvrdma_init_context_shared(context, ibdev, cmd_fd)) {
-		verbs_uninit_context(&context->ibv_ctx);
-		free(context);
-		return NULL;
+		goto uninit_and_free;
 	}
 
+	/* Start an RPC server here,  */
+	context->network_server = cvmrdma_start_network_server();
+
+	/* Connect to the remote's RPC server
+	   XXX: make configurable with an env var !*/
+	char const * server_addr = getenv("PVRDMA_REMOTE_ADDR");
+	if(! server_addr)
+	{
+		fprintf(stderr, "ERROR: No environment variable PVRDMA_REMOTE_ADDR.\n");
+		goto uninit_and_free;
+	}
+	context->network_client_connection = cvmrdma_start_session(server_addr);
+
+	/* Get the root capability to the remote's RPC's API */
+	context->network_client_cap = cvmrdma_client_init(context->network_client_connection);
+	
+
 	return &context->ibv_ctx;
+
+// close_server:
+//    TODO: close network server
+uninit_and_free:
+	verbs_uninit_context(&context->ibv_ctx);
+	free(context);
+err:
+	return NULL;
 }
 
 static void pvrdma_free_context(struct ibv_context *ibctx)
