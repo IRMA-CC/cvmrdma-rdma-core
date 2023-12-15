@@ -190,12 +190,19 @@ struct pvrdma_qp {
 	uint32_t			qp_handle;
 
 	QPNotificationClient * remote_qnc;
+	uint32_t tx_ctr;
 };
 
 struct pvrdma_ah {
 	struct ibv_ah			ibv_ah;
 	struct pvrdma_av		av;
 };
+
+
+struct pvrdma_mr {
+	struct verbs_mr vmr;
+};
+
 
 static inline unsigned long align(unsigned long val, unsigned long align)
 {
