@@ -136,23 +136,79 @@ int pvrdma_free_pd(struct ibv_pd *pd)
 struct ibv_mr *pvrdma_reg_mr(struct ibv_pd *pd, void *addr, size_t length,
 			     uint64_t hca_va, int access)
 {
-	struct verbs_mr *vmr;
+	struct pvrdma_mr *pmr;
+	struct pvrdma_pd *ppd;
 	struct ibv_reg_mr cmd;
 	struct ib_uverbs_reg_mr_resp resp;
+	int bounce_prots;
+	void *bounce;
 	int ret;
 
-	vmr = malloc(sizeof(*vmr));
-	if (!vmr)
-		return NULL;
+	ppd = to_vpd(pd);
 
-	ret = ibv_cmd_reg_mr(pd, addr, length, hca_va, access, vmr, &cmd,
-			     sizeof(cmd), &resp, sizeof(resp));
-	if (ret) {
-		free(vmr);
-		return NULL;
+	pmr = malloc(sizeof(*pmr));
+	if (!pmr)
+		goto err;
+
+	/* CVM: TODO
+	   - pass do_bounce to kernel
+	   - let kernel allocate unprotected pages for bounce buffer, and register them instead
+	   - get fd from kernel, mmap it
+	   - keep track of pair (lkey, bounce addr)
+
+	   ----- OR -------
+	   - allocate memory here for bounce buf: should be in unprotected memory! eg with special
+	     syscall get and fd and mmap it
+	   - register it as MR
+	   - keep track of (lkey, bounce addr)
+
+	 */
+
+	/* access is access to the original buffer:
+	   - to read from the original buffer, we must write to the bounce buffer
+	   - to write to the original buffer, we must read the bounce buffer
+	*/
+
+	/* LOCAL_READ is always enabled (as source of SEND/WRITE)*/
+	bounce_prots = PROT_WRITE;
+
+	/* LOCAL_WRITE: for destination of recv
+	   REMOTE_WRITE: for destination of write */
+	if ((access & IBV_ACCESS_LOCAL_WRITE) ||
+	    (access & IBV_ACCESS_REMOTE_WRITE))
+		bounce_prots |= PROT_READ;
+
+	/* TODO: allocate the bounce buffer in unencrypted memory */
+	bounce = mmap(0, length, bounce_prots,
+		      MAP_ANONYMOUS | MAP_SHARED_VALIDATE, -1, 0);
+	if (bounce == MAP_FAILED) {
+		goto free_vmr;
 	}
 
-	return &vmr->ibv_mr;
+	/* reg_mr the _bounce_ buffer */
+	ret = ibv_cmd_reg_mr(pd, bounce, length, hca_va, access, &pmr->vmr,
+			     &cmd, sizeof(cmd), &resp, sizeof(resp));
+	if (ret) {
+		goto free_bounce;
+	}
+
+	/* Make this bounce MR's metadata available through its lkey or rkey */
+	register_bounce_mr(ppd->bounce_metadata,
+		pmr->vmr.ibv_mr.lkey,
+		pmr->vmr.ibv_mr.rkey,
+		hca_va,
+		addr,
+		bounce
+	);
+
+	return &pmr->vmr.ibv_mr;
+
+free_bounce:
+	munmap(bounce, length);
+free_vmr:
+	free(pmr);
+err:
+		return NULL;
 }
 
 int pvrdma_dereg_mr(struct verbs_mr *vmr)
@@ -162,6 +218,9 @@ int pvrdma_dereg_mr(struct verbs_mr *vmr)
 	ret = ibv_cmd_dereg_mr(vmr);
 	if (ret)
 		return ret;
+
+	/* TODO: delete bounce metadata.
+	   XXX: do it before dereg to avoid a race */
 
 	free(vmr);
 
