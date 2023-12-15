@@ -60,6 +60,7 @@
 
 #include "pvrdma-abi.h"
 #include "pvrdma_ring.h"
+#include "cvmrdma/bounce_metadata.h" /* bounce metadata per PD */
 
 #define PFX "pvrdma: "
 
@@ -120,6 +121,8 @@ struct pvrdma_buf {
 struct pvrdma_pd {
 	struct ibv_pd			ibv_pd;
 	uint32_t			pdn;
+
+	PdBounceMetadata * bounce_metadata;
 };
 
 struct pvrdma_cq {

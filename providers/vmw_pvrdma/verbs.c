@@ -84,21 +84,40 @@ struct ibv_pd *pvrdma_alloc_pd(struct ibv_context *context)
 {
 	struct ibv_alloc_pd cmd;
 	struct user_pvrdma_alloc_pd_resp resp;
+	PdBounceMetadata * bounce_metadata;
 	struct pvrdma_pd *pd;
 
 	pd = malloc(sizeof(*pd));
 	if (!pd)
-		return NULL;
+	{
+		goto err;
+	}
+
+	bounce_metadata = bounce_metadata_alloc();
+	if(! bounce_metadata)
+	{
+		fprintf(stderr, "Failed to allocated bounce metadata storage.\n");
+		goto free_pd;
+	}
+
 
 	if (ibv_cmd_alloc_pd(context, &pd->ibv_pd, &cmd, sizeof(cmd),
 			     &resp.ibv_resp, sizeof(resp))) {
-		free(pd);
-		return NULL;
+		goto free_metadata;
 	}
 
+
 	pd->pdn = resp.pdn;
+	pd->bounce_metadata = bounce_metadata;
 
 	return &pd->ibv_pd;
+
+free_metadata:
+	bounce_metadata_destroy(bounce_metadata);
+free_pd:
+	free(pd);
+err:
+	return NULL;
 }
 
 int pvrdma_free_pd(struct ibv_pd *pd)
