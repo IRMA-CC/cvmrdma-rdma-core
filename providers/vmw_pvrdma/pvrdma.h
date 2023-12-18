@@ -188,8 +188,6 @@ struct pvrdma_qp {
 	struct pvrdma_wq		rq;
 	int				is_srq;
 	uint32_t			qp_handle;
-
-	QPNotificationClient * remote_qnc;
 };
 
 struct pvrdma_ah {
