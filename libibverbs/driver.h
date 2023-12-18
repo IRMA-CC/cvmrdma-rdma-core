@@ -294,6 +294,13 @@ struct verbs_device {
 	struct list_node entry;
 	struct verbs_sysfs_dev *sysfs;
 	uint64_t core_support;
+
+	struct {
+		struct verbs_context *(*alloc_context)(struct ibv_device *device,
+						int cmd_fd,
+						void *private_data);
+		void (*uninit_device)(struct verbs_device *device);
+	} cvmrdma;
 };
 
 struct verbs_counters {

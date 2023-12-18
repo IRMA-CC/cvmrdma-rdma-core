@@ -116,3 +116,46 @@ struct verbs_context_ops cvmrdma_ops {
     // .reg_dmabuf_mr = cmvrdma_reg_dmabuf_mr,
     .reg_mr = cmvrdma_reg_mr
 };
+
+
+
+static struct verbs_context *cvmrdma_alloc_context(struct ibv_device *ibdev,
+						  int cmd_fd,
+						  void *private_data)
+{
+    struct verbs_device * vdev = verbs_get_device(ibdev);
+
+    /* Allocate provider context */
+    struct verbs_context * context = vdev->cvmrdma.alloc_context(ibdev, cmd_fd, private_data);
+    if(! context) {
+		goto err;
+    }
+	/* Start an RPC server here,  */
+	context->cvmrdma.network_server = cvmrdma_start_network_server();
+
+	/* Connect to the remote's RPC server */
+	char const * server_addr = getenv("PVRDMA_REMOTE_ADDR");
+	if(! server_addr)
+	{
+		fprintf(stderr, "ERROR: No environment variable PVRDMA_REMOTE_ADDR.\n");
+		goto uninit_and_free;
+	}
+	context->cvmrdma.network_client_connection = cvmrdma_start_session(server_addr);
+
+	/* Get the root capability to the remote's RPC's API */
+	context->cvmrdma.network_client_cap = cvmrdma_client_init(context->cvmrdma.network_client_connection);
+	
+
+	return &context->context;
+
+// close_server:
+//    TODO: close network server
+uninit_and_free:
+	context->cvmrdma.free_context(context->context);
+err:
+	return NULL;
+}
+
+struct verbs_device_ops cvmrdma_device_ops {
+    .alloc_context = cvmrdma_alloc_context,
+}

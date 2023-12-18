@@ -57,6 +57,8 @@
 #include "ibverbs.h"
 #include <infiniband/cmd_write.h>
 
+#include "cvmrdma/cvmrdma_ops.h"
+
 int abi_ver;
 
 static uint32_t verbs_log_level;
@@ -389,7 +391,22 @@ static struct verbs_device *try_driver(const struct verbs_device_ops *ops,
 		return NULL;
 	}
 
-	vdev->ops = ops;
+	/* CVMRDMA: the verbs device does not directly expose the provider's device ops,
+	   instead a an additional CVM aware layer calls into them.
+	   
+	   First save the provider operations for the CVM layer:   
+	*/
+
+	vdev->cvmrdma.alloc_context = ops->alloc_context;
+	vdev->cvmrdma.uninit_device = ops->uninit_device;
+
+	/* Then register the CVM wrappers as the device operations
+	   XXX; this adds a layer of function pointers, although these function pointers
+	   could be replaced by static function calls. I.e: this could be optimized by changing
+	   the call sites to calls to CVM-aware functions, but this is more work for potentially
+	   little gain.
+	*/
+	vdev->ops = cvmrdma_device_ops;
 
 	atomic_init(&vdev->refcount, 1);
 	dev = &vdev->device;
