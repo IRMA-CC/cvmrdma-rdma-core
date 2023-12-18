@@ -48,6 +48,9 @@
 #include <util/util.h>
 #include "ibverbs.h"
 
+
+#include "cvmrdma/cvmrdma_ops.h"
+
 static pthread_mutex_t dev_list_lock = PTHREAD_MUTEX_INITIALIZER;
 static struct list_head device_list = LIST_HEAD_INIT(device_list);
 
