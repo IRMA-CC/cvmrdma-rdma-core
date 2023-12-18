@@ -210,8 +210,6 @@ struct ibv_qp *pvrdma_create_qp(struct ibv_pd *pd,
 				struct ibv_qp_init_attr *attr)
 {
 	struct pvrdma_device *dev = to_vdev(pd->context->device);
-	struct pvrdma_context * ctxt = to_vctx(pd->context);
-	struct pvrdma_pd * ppd = to_vpd(pd);
 	struct user_pvrdma_create_qp cmd;
 	struct user_pvrdma_create_qp_resp resp = {};
 	struct pvrdma_qp *qp;
@@ -299,26 +297,6 @@ struct ibv_qp *pvrdma_create_qp(struct ibv_pd *pd,
 		qp->sq_signal_bits = htobe32(PVRDMA_WQE_CTRL_CQ_UPDATE);
 	else
 		qp->sq_signal_bits = 0;
-
-
-	/* Add this QP to the CQ server. This gives us one end of the notification
-	   channel ; the RPC server will push notifications there */
-	struct ibv_cq * send_cq = attr->send_cq;
-	assert(send_cq);
-	struct pvrdma_cq * send_pcq = to_vcq(send_cq);
-
-	NotificationQueue * nq = cq_server_add_qp(&send_pcq->cvmrdma_cq_server, qp->ibv_qp.qp_num);
-
-	/* Create the corresponding RPC object. Plus the end of the notification channel here.
-	   No risk of a race: we haven't returned the QPN to the user yet, the remote cannot possibly
-	   know it yet.
-	*/
-	cvmrdma_server_register_qp(ctxt->network_server, ppd->bounce_metadata, nq, qp->ibv_qp.qp_num);
-
-	/* We can only get the capability to the remote QP once we know its QPN, this will be done
-	   in modify_qp */
-	qp->remote_qnc = NULL;
-	qp->tx_ctr = 0;
 
 	return &qp->ibv_qp;
 
