@@ -60,10 +60,7 @@
 
 #include "pvrdma-abi.h"
 #include "pvrdma_ring.h"
-
 #include "cvmrdma/bounce_metadata.h" /* bounce metadata per PD */
-#include "cvmrdma/cvmrdma_network_client.h" /* IP based RPCs client, per context */
-#include "cvmrdma/cvmrdma_network_server.h" /* IP based RPCs server, per context */
 
 #define PFX "pvrdma: "
 
@@ -114,13 +111,6 @@ struct pvrdma_context {
 	int				max_sge;
 	int				max_cqe;
 	struct pvrdma_qp		**qp_tbl;
-
-	/* Server and client for IP based RPCs
-	   XXX: for qpn->ring rkey requests, it would make more sense to have a single
-	   server for the whole machine; i.e a standalone process. */
-	CVMRDMAServer * network_server;
-	ClientSession * network_client_connection;
-	CVMRDMAClient * network_client_cap;
 };
 
 struct pvrdma_buf {
