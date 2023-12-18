@@ -160,6 +160,153 @@ err:
     return ret;
 }
 
+
+
+// HACKY: very ad-hoc message, at least use a header
+struct cvmrdma_ring_message {
+   uint64_t hca_va;
+   uint64_t length;
+   uint32_t rkey;
+};
+static int post_send_do_bounce(struct ibv_qp *ibqp, struct ibv_send_wr *wr, struct ibv_send_wr **bad_wr)
+{
+    struct verbs_qp * qp = (struct verbs_qp *)ibqp;
+	struct ibv_pd * pd = ibqp->pd;
+	struct verbs_context * ctx = verbs_get_ctx(ibqp->context);
+
+	if(ibqp->qp_type != IBV_QPT_RC)
+	{
+		fprintf(stderr, "ERROR: for now CVMRDMA only supports RC\n");
+		return EINVAL;
+	}
+
+
+	for(struct ibv_send_wr * this_wr = wr ; this_wr != NULL ; this_wr = this_wr->next)
+	{
+		switch(this_wr->opcode)
+		{
+			case IBV_WR_RDMA_WRITE:{
+				/* Prepare the bounce buffer. We have to encrypt the data
+				from the user regions into the bounce MRs. */
+
+				if(wr->num_sge != 1)
+				{
+					fprintf(stderr, "ERROR: for now CVMRDMA only supports 1 sge per WR\n");
+					*bad_wr = this_wr;
+					return EINVAL;
+				}
+
+				struct ibv_sge sge = wr->sg_list[0];
+				uint32_t rkey = this_wr->wr.rdma.rkey;
+
+				/* Before doing anything, we can already notify the remote of the upcoming write */
+				remote_qp_notify_write_rpc(
+					ctx->cvmrdma.network_client_connection, qp->remote_qnc,
+					ntohl(this_wr->imm_data),
+					sge.addr,
+					sge.length,
+					rkey
+				);
+
+				/* Identify the local MR from the lkey and find the corresponding bounce buffer */
+				struct bounce_entry bounce_info = get_bounce_metadata_for_lkey(pd->bounce_metadata, sge.lkey);
+				size_t offt = sge.addr - bounce_info.hca_va;
+
+				void * user_start = bounce_info.user_buffer + offt;
+				void * bounce_start = bounce_info.bounce_buffer + offt;
+
+				/* Compute the nonce to use for the encryption from the counter*/
+				uint32_t nonce_counter = qp->tx_ctr++;
+				unsigned char nonce[3] = {
+					0x0000FFu & nonce_counter,
+					0x00FF00u & nonce_counter,
+					0xFF0000u & nonce_counter
+				};
+
+				/* HACK: fake mac to check transmission */
+				unsigned char mac[2] = {0x20, 0x10};
+
+
+        		DEBUG("Encrypting 0x%" PRIx32 " B from %p to %p with nonce %x %x %x\n", sge.length, user_start, bounce_start, nonce[0], nonce[1], nonce[2]);
+
+				/* TODO: encrypt instead of copy! Populate mac */
+				memcpy(bounce_start, user_start, sge.length);
+
+				DEBUG("mac = %x %x\n", mac[0], mac[1]);
+
+				/* After the bounce, the sg-list in the WR is valid.
+				   We need to notify the remote of the incoming payload and send the MAC.
+
+				   Do both by
+				   - for IMM: changing WRITE to WRITE_WITH_IMM and send the MAC as immediate.
+				   - for WRITE_WITH_IMM: replace the immediate with the MAC
+				
+					The actual immediate has already been sent with the RPC.
+				*/
+				
+				__be32 mac_imm = mac[0] & (mac[1] << 8);
+
+				this_wr->opcode = IBV_WR_RDMA_WRITE_WITH_IMM;
+				this_wr->imm_data = mac_imm;
+
+
+				break;
+			}
+			default: {
+				fprintf(stderr, "ERROR: for now CVMRDMA only supports WRITE\n");
+				*bad_wr = this_wr;
+				return EINVAL;
+			}
+		}
+
+	}
+
+	return 0;
+}
+
+
+int pvrdma_post_send(struct ibv_qp *ibqp, struct ibv_send_wr *wr,
+		     struct ibv_send_wr **bad_wr)
+{
+    struct verbs_context * vctxt = verbs_get_ctx(ibqp->context);
+    int ret = 0;
+
+    /*
+	CVMRDMA: do the bounce and modify the WRs to use the bounce buffers
+    
+    on WRITE
+	- RPC send the dest hca_addr, rkey, imm (before starting encryption, to
+	  give IP based RPC a head start)
+	- find the local (base_addr, bounce_addr) for lkey
+	- xchachapoly1305 the plaintext region to the bounce buffer,
+	  keeping the same offset
+	- change WRITE into WRITE_WITH_IMM to notify the remote.
+	- send the MAC as the immediate.
+	*/
+
+	ret = post_send_do_bounce(qp, wr, bad_wr);
+	if(ret < 0)
+	{
+		return ret;
+	}
+
+    ret = vctxt->cvmrdma.post_send(ibqp, wr, bad_wr);
+
+    return ret;
+
+/* XXX: do error handling here, if the send fails then things are
+   a bit tricky: the remote has already been notified of the incoming
+   WRITE, but the WRITE will not happen ... The remote will wait forever.
+
+    TODO:
+    1. either send the capnp notif only in case of success
+    2. or send a notification cancelling the WRITE
+
+   The bounce will be overwritten later and do not need to be rolled back
+   */
+}
+
+
         uint64_t hca_va, int access)
 {
     struct verbs_context * vctxt = verbs_get_ctx(pd->context);
