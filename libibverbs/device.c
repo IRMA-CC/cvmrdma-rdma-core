@@ -325,6 +325,7 @@ struct ibv_context *verbs_open_device(struct ibv_device *device, void *private_d
 	struct verbs_device *verbs_device = verbs_get_device(device);
 	int cmd_fd = -1;
 	struct verbs_context *context_ex;
+	const struct verbs_context_ops *ops;
 	int ret;
 
 	if (verbs_device->sysfs) {
@@ -345,6 +346,37 @@ struct ibv_context *verbs_open_device(struct ibv_device *device, void *private_d
 	context_ex = verbs_device->ops->alloc_context(device, cmd_fd, private_data);
 	if (!context_ex)
 		return NULL;
+
+	/*
+		CVMRDMA: the provider has set up the context's function pointers.
+		We will wrap these operations into CVM aware ones
+
+		First, we save the provider's function that the wrapper will call into
+	*/
+
+
+	ops = get_ops(context);
+
+	context_ex.provider_ops.alloc_pd = ops->alloc_pd;
+	context_ex.provider_ops.create_cq = ops->create_cq;
+	context_ex.provider_ops.create_qp = ops->create_qp;
+	context_ex.provider_ops.dealloc_pd = ops->dealloc_pd;
+	context_ex.provider_ops.dereg_mr = ops->dereg_mr;
+	context_ex.provider_ops.destroy_qp = ops->destroy_qp;
+	context_ex.provider_ops.free_context = ops->free_context;
+	context_ex.provider_ops.modify_qp = ops->modify_qp;
+	context_ex.provider_ops.poll_cq = ops->poll_cq;
+	context_ex.provider_ops.post_recv = ops->post_recv;
+	context_ex.provider_ops.post_send = ops->post_send;
+	context_ex.provider_ops.reg_dmabuf_mr = ops->reg_dmabuf_mr;
+	context_ex.provider_ops.reg_mr = ops->reg_mr;
+
+
+	/*
+		Then, we can replace the provider's ops by the one from the wrapper.
+	*/
+
+	verbs_set_ops(context_ex, cvmrdma_ops);
 
 	set_lib_ops(context_ex);
 	if (verbs_device->sysfs) {
