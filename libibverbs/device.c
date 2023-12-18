@@ -365,6 +365,7 @@ struct ibv_context *verbs_open_device(struct ibv_device *device, void *private_d
 	context_ex.provider_ops.create_qp = ops->create_qp;
 	context_ex.provider_ops.dealloc_pd = ops->dealloc_pd;
 	context_ex.provider_ops.dereg_mr = ops->dereg_mr;
+	context_ex.provider_ops.destroy_cq = ops->destroy_cq;
 	context_ex.provider_ops.destroy_qp = ops->destroy_qp;
 	context_ex.provider_ops.free_context = ops->free_context;
 	context_ex.provider_ops.modify_qp = ops->modify_qp;

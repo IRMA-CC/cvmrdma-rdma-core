@@ -2154,6 +2154,7 @@ struct verbs_context {
 						struct ibv_qp_init_attr *attr);
 		int (*dealloc_pd)(struct ibv_pd *pd);
 		int (*dereg_mr)(struct verbs_mr *vmr);
+		int (*destroy_cq)(struct ibv_cq *cq);
 		int (*destroy_qp)(struct ibv_qp *qp);
 		void (*free_context)(struct ibv_context *context);
 		int (*modify_qp)(struct ibv_qp *qp, struct ibv_qp_attr *attr,

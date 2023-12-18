@@ -47,6 +47,8 @@
 #include <infiniband/cmd_ioctl.h>
 #include <sys/types.h>
 
+#include "cvmrdma/cvmrdma_cq_server.h" /* Each CQ holds a CQ server thread */
+
 struct verbs_device;
 
 enum {
@@ -171,6 +173,9 @@ struct verbs_cq {
 		struct ibv_cq cq;
 		struct ibv_cq_ex cq_ex;
 	};
+
+	CQServer cvmrdma_cq_server;
+	pthread_t cvmrdma_cq_server_thread;
 };
 
 enum ibv_flow_action_type {
