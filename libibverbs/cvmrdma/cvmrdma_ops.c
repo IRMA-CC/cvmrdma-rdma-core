@@ -34,6 +34,73 @@ err:
 }
 
 
+struct ibv_mr *cmvrdma_reg_mr(struct ibv_pd *pd, void *addr, size_t length,
+        uint64_t hca_va, int access)
+{
+    struct verbs_context * vctxt = verbs_get_ctx(pd->context);
+
+	int bounce_prots;
+	void *bounce;
+    struct ibv_mr * ibmr;
+    struct verbs_mr * vmr;
+    /* CVM
+       - allocate memory here for bounce buf: should be in unprotected memory! eg with special
+	     syscall get and fd and mmap it
+	   - register it as MR
+	   - keep track of (lkey, bounce addr)
+    
+        e.g: with a dmabuf
+    */
+
+    /* `access` is access to the original buffer, wheraes bounce_prots is for the bounce buffer:
+	   - to read from the original buffer, we must write to the bounce buffer
+	   - to write to the original buffer, we must read the bounce buffer
+	*/
+
+    /* LOCAL_READ is always enabled (as source of SEND/WRITE)*/
+	bounce_prots = PROT_WRITE;
+
+	/* LOCAL_WRITE: for destination of recv
+	   REMOTE_WRITE: for destination of write */
+	if ((access & IBV_ACCESS_LOCAL_WRITE) ||
+	    (access & IBV_ACCESS_REMOTE_WRITE))
+		bounce_prots |= PROT_READ;
+
+	/* TODO: allocate the bounce buffer in unencrypted memory */
+	bounce = mmap(0, length, bounce_prots,
+		      MAP_ANONYMOUS | MAP_SHARED_VALIDATE, -1, 0);
+	if (bounce == MAP_FAILED) {
+		goto err;
+	}
+
+    /* reg_mr the bounce buffer as the MR through the provider */
+    ibmr = vctxt->cvmrdma.reg_mr(pd, bounce, length, hca_va, access);
+    if(! mr)
+    {
+        goto free_bounce;
+    }
+
+    vmr = verbs_get_mr(ibmr);
+
+	/* Make this bounce MR's metadata available through its lkey or rkey */
+	register_bounce_mr(pd->bounce_metadata,
+		ibmr.lkey,
+		ibmr.rkey,
+		hca_va,
+		addr,
+		bounce
+	);
+
+
+
+free_bounce:
+	munmap(bounce, length);
+err:
+    return NULL;
+
+}
+
+
 struct verbs_context_ops cvmrdma_ops {
     .alloc_pd = cvmrdma_alloc_pd,
     // .create_cq = cvmrdma_create_cq,
@@ -47,5 +114,5 @@ struct verbs_context_ops cvmrdma_ops {
     // .post_recv = cmvrdma_post_recv,
     // .post_send = cmvrdma_post_send,
     // .reg_dmabuf_mr = cmvrdma_reg_dmabuf_mr,
-    // .reg_mr = cmvrdma_reg_mr
+    .reg_mr = cmvrdma_reg_mr
 };
