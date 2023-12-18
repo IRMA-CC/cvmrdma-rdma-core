@@ -19,6 +19,12 @@ publish_internal_headers(infiniband
 configure_file("libibverbs.map.in"
   "${CMAKE_CURRENT_BINARY_DIR}/libibverbs.map" @ONLY)
 
+
+capnp_generate_cpp(CAPNP_SRCS CAPNP_HDRS cvmrdma/cvmrdma.capnp)
+add_custom_target(generate_capnp DEPENDS ${CAPNP_SRCS} ${CAPNP_HDRS})
+get_filename_component(CAPNP_HDRS_DIR ${CAPNP_HDRS} DIRECTORY)
+
+
 rdma_library(ibverbs "${CMAKE_CURRENT_BINARY_DIR}/libibverbs.map"
   # See Documentation/versioning.md
   1 1.14.${PACKAGE_VERSION}
@@ -54,13 +60,43 @@ rdma_library(ibverbs "${CMAKE_CURRENT_BINARY_DIR}/libibverbs.map"
   static_driver.c
   sysfs.c
   verbs.c
+
+
+  cvmrdma/bounce_metadata.cpp
+  cvmrdma/cvmrdma_cq_server.c
+  cvmrdma/cvmrdma_network_client.cpp
+  cvmrdma/cvmrdma_network_server.cpp
+  cvmrdma/notification_queue.cpp
+  cvmrdma/cvmrdma_ops.c
+
+  
+  ${CAPNP_SRCS}
   )
+
+add_dependencies(ibverbs generate_capnp)
+
+
+target_include_directories(ibverbs
+PRIVATE
+  ${CAPNP_HDRS_DIR}
+)
+
+
 target_link_libraries(ibverbs LINK_PRIVATE
   ${NL_LIBRARIES}
   ${CMAKE_THREAD_LIBS_INIT}
   ${CMAKE_DL_LIBS}
   kern-abi
+
+  CapnProto::capnp-rpc
   )
+
+
+target_compile_features(ibverbs
+PUBLIC
+  cxx_std_20
+)
+
 
 function(ibverbs_finalize)
   if (ENABLE_STATIC)
