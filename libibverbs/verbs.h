@@ -2138,31 +2138,30 @@ struct verbs_context {
 	struct {
 		/* Providers ops. Original ops in the provider that we may call
 		   from the CVMRDMA wrapper. */
-		struct {
-			struct ibv_pd *(*alloc_pd)(struct ibv_context *context);
-			struct ibv_cq *(*create_cq)(struct ibv_context *context, int cqe,
-							struct ibv_comp_channel *channel,
-							int comp_vector);
-			struct ibv_qp *(*create_qp)(struct ibv_pd *pd,
-							struct ibv_qp_init_attr *attr);
-			int (*dealloc_pd)(struct ibv_pd *pd);
-			int (*dereg_mr)(struct verbs_mr *vmr);
-			int (*destroy_qp)(struct ibv_qp *qp);
-			void (*free_context)(struct ibv_context *context);
-			int (*modify_qp)(struct ibv_qp *qp, struct ibv_qp_attr *attr,
-					int attr_mask);
+		struct ibv_pd *(*alloc_pd)(struct ibv_context *context);
+		struct ibv_cq *(*create_cq)(struct ibv_context *context, int cqe,
+						struct ibv_comp_channel *channel,
+						int comp_vector);
+		struct ibv_qp *(*create_qp)(struct ibv_pd *pd,
+						struct ibv_qp_init_attr *attr);
+		int (*dealloc_pd)(struct ibv_pd *pd);
+		int (*dereg_mr)(struct verbs_mr *vmr);
+		int (*destroy_qp)(struct ibv_qp *qp);
+		void (*free_context)(struct ibv_context *context);
+		int (*modify_qp)(struct ibv_qp *qp, struct ibv_qp_attr *attr,
+				int attr_mask);
 
-			int (*poll_cq)(struct ibv_cq *cq, int num_entries, struct ibv_wc *wc);
-			int (*post_recv)(struct ibv_qp *qp, struct ibv_recv_wr *wr,
-					struct ibv_recv_wr **bad_wr);
-			int (*post_send)(struct ibv_qp *qp, struct ibv_send_wr *wr,
-					struct ibv_send_wr **bad_wr);
-			struct ibv_mr *(*reg_dmabuf_mr)(struct ibv_pd *pd, uint64_t offset,
-							size_t length, uint64_t iova,
-							int fd, int access);
-			struct ibv_mr *(*reg_mr)(struct ibv_pd *pd, void *addr, size_t length,
-						uint64_t hca_va, int access);
-		} provider_ops;
+		int (*poll_cq)(struct ibv_cq *cq, int num_entries, struct ibv_wc *wc);
+		int (*post_recv)(struct ibv_qp *qp, struct ibv_recv_wr *wr,
+				struct ibv_recv_wr **bad_wr);
+		int (*post_send)(struct ibv_qp *qp, struct ibv_send_wr *wr,
+				struct ibv_send_wr **bad_wr);
+		struct ibv_mr *(*reg_dmabuf_mr)(struct ibv_pd *pd, uint64_t offset,
+						size_t length, uint64_t iova,
+						int fd, int access);
+		struct ibv_mr *(*reg_mr)(struct ibv_pd *pd, void *addr, size_t length,
+					uint64_t hca_va, int access);
+
 	} cvmrdma;
 
 	/* verbs_context */
