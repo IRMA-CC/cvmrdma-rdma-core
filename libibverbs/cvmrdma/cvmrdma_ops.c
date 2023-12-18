@@ -1,6 +1,14 @@
 #include "cvmrdma_ops.h"
 
 
+#include "bounce_metadata.h"
+#include "cvmrdma_cq_server.h"
+#include "cvmrdma_network_client.h"
+#include "cvmrdma_network_server.h"
+#include "notification_queue.h"
+
+#include "debug.h"
+
 struct ibv_pd * cvmrdma_alloc_pd(struct ibv_context *context)
 {
     struct verbs_context * vctxt = verbs_get_ctx(pd->context);
@@ -28,7 +36,7 @@ struct ibv_pd * cvmrdma_alloc_pd(struct ibv_context *context)
 free_metadata:
 	bounce_metadata_destroy(bounce_metadata);
 free_pd:
-	free(pd);
+	vctxt->cvmrdma.dealloc_pd(pd);
 err:
 	return NULL;
 }
@@ -307,6 +315,8 @@ int pvrdma_post_send(struct ibv_qp *ibqp, struct ibv_send_wr *wr,
 }
 
 
+
+struct ibv_mr *cvmrdma_reg_mr(struct ibv_pd *pd, void *addr, size_t length,
         uint64_t hca_va, int access)
 {
     struct verbs_context * vctxt = verbs_get_ctx(pd->context);
@@ -347,7 +357,7 @@ int pvrdma_post_send(struct ibv_qp *ibqp, struct ibv_send_wr *wr,
 
     /* reg_mr the bounce buffer as the MR through the provider */
     ibmr = vctxt->cvmrdma.reg_mr(pd, bounce, length, hca_va, access);
-    if(! mr)
+    if(! ibmr)
     {
         goto free_bounce;
     }
@@ -377,17 +387,17 @@ struct verbs_context_ops cvmrdma_ops {
     .alloc_pd = cvmrdma_alloc_pd,
     .create_cq = cvmrdma_create_cq,
     .create_qp = cvmrdma_create_qp,
-    // .dealloc_pd = cmvrdma_dealloc_pd,
-    // .dereg_mr = cmvrdma_dereg_mr,
-    // .destroy_cq = cmvrdma_destroy_cq,
-    // .destroy_qp = cmvrdma_destroy_qp,
-    // .free_context = cmvrdma_free_context,
+    // .dealloc_pd = cvmrdma_dealloc_pd,
+    // .dereg_mr = cvmrdma_dereg_mr,
+    // .destroy_cq = cvmrdma_destroy_cq,
+    // .destroy_qp = cvmrdma_destroy_qp,
+    // .free_context = cvmrdma_free_context,
     .modify_qp = cvmrdma_modify_qp,
-    // .poll_cq = cmvrdma_poll_cq,
-    // .post_recv = cmvrdma_post_recv,
-    // .post_send = cmvrdma_post_send,
-    // .reg_dmabuf_mr = cmvrdma_reg_dmabuf_mr,
-    .reg_mr = cmvrdma_reg_mr
+    // .poll_cq = cvmrdma_poll_cq,
+    // .post_recv = cvmrdma_post_recv,
+    .post_send = cvmrdma_post_send,
+    // .reg_dmabuf_mr = cvmrdma_reg_dmabuf_mr,
+    .reg_mr = cvmrdma_reg_mr
 };
 
 
