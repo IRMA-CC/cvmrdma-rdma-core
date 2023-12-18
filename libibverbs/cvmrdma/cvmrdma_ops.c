@@ -69,7 +69,97 @@ err:
 }
 
 
-struct ibv_mr *cmvrdma_reg_mr(struct ibv_pd *pd, void *addr, size_t length,
+struct ibv_qp *cvmrdma_create_qp(struct ibv_pd *pd,
+				struct ibv_qp_init_attr *attr)
+{
+    struct verbs_context * vctxt = verbs_get_ctx(pd->context);
+
+    struct ibv_qp * qp = vctxt->cvmrdma.create_qp(pd, attr);
+    if(! qp)
+    {
+        goto err;
+    }
+
+	struct verbs_qp *vqp = (struct verbs_qp *)qp;
+
+	/* Add this QP to the CQ server. This gives us one end of the notification
+	   channel ; the RPC server will push notifications there */
+	struct ibv_cq * send_cq = attr->send_cq;
+	assert(send_cq);
+	struct pvrdma_cq * send_pcq = to_vcq(send_cq);
+
+	NotificationQueue * nq = cq_server_add_qp(&send_pcq->cvmrdma_cq_server, qp->ibv_qp.qp_num);
+    if(! nq)
+    {
+        fprintf(stderr, "failed to register QP on CQ server\n");
+        goto free_qp;
+    }
+
+	/* Create the corresponding RPC object. Pass the end of the notification channel here.
+	   No risk of a race: we haven't returned the QPN to the user yet, the remote cannot possibly
+	   know it yet.
+	*/
+	cvmrdma_server_register_qp(ctxt->network_server, ppd->bounce_metadata, nq, qp->ibv_qp.qp_num);
+
+	/* We can only get the capability to the remote QP once we know its QPN, this will be done
+	   in modify_qp */
+	vqp->remote_qnc = NULL;
+	vqp->tx_ctr = 0;
+
+	return qp;
+
+free_qp:
+    vctxt->cvmrdma.destroy_qp(qp);
+err:
+	return NULL;
+
+
+}
+
+int cvmrdma_modify_qp(struct ibv_qp *ibqp, struct ibv_qp_attr *attr,
+		     int attr_mask)
+{
+    struct verbs_context * vctxt = verbs_get_ctx(ibqp->context);
+    int ret = 0;
+
+    ret = vctxt->cvmrdma.modify_qp(ibqp, attr, attr_mask);
+    if(ret)
+    {
+        goto err;
+    }
+
+
+	/* The RPC object need to be connected to send, but this is not required for receive (the RPC server
+	   is already running). However, since the user passes the QPN in the INIT->RTR transition,
+	   connect at this step.
+	*/
+	if((attr_mask & IBV_QP_STATE) && (attr->qp_state == IBV_QPS_RTR))
+	{
+		switch(ibqp->qp_type)
+		{
+			case IBV_QPT_RC:
+			case IBV_QPT_UC: {
+				assert(attr_mask & IBV_QP_DEST_QPN);
+				uint32_t dest_qpn = attr->dest_qp_num;
+
+				/* Blocking: get the qp notifier capability from the remote over the network */
+				qp->remote_qnc = get_qp_notification_client(vctxt->cvmrdma.network_client_connection, vctxt->cvmrdma.network_client_cap, dest_qpn);
+
+				break;
+			}
+			default: {
+				fprintf(stderr, "modify_qp: unsupported QP type\n");
+				return -1;
+			}
+		}
+	}
+
+    return 0;
+
+err:
+    return ret;
+}
+
         uint64_t hca_va, int access)
 {
     struct verbs_context * vctxt = verbs_get_ctx(pd->context);
@@ -139,13 +229,13 @@ err:
 struct verbs_context_ops cvmrdma_ops {
     .alloc_pd = cvmrdma_alloc_pd,
     .create_cq = cvmrdma_create_cq,
-    // .create_qp = cvmrdma_create_qp,
+    .create_qp = cvmrdma_create_qp,
     // .dealloc_pd = cmvrdma_dealloc_pd,
     // .dereg_mr = cmvrdma_dereg_mr,
     // .destroy_cq = cmvrdma_destroy_cq,
     // .destroy_qp = cmvrdma_destroy_qp,
     // .free_context = cmvrdma_free_context,
-    // .modify_qp = cmvrdma_modify_qp,
+    .modify_qp = cvmrdma_modify_qp,
     // .poll_cq = cmvrdma_poll_cq,
     // .post_recv = cmvrdma_post_recv,
     // .post_send = cmvrdma_post_send,

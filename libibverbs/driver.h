@@ -48,6 +48,7 @@
 #include <sys/types.h>
 
 #include "cvmrdma/cvmrdma_cq_server.h" /* Each CQ holds a CQ server thread */
+#include "cvmrdma/cvmrdma_network_client.h" /* Each CQ holds a CQ server thread */
 
 struct verbs_device;
 
@@ -165,6 +166,11 @@ struct verbs_qp {
 	};
 	uint32_t		comp_mask;
 	struct verbs_xrcd       *xrcd;
+
+	/* Capability of the remote QP to notify on WRITEs */
+	QPNotificationClient * remote_qnc;
+	/* Send counter, used as nonce. */
+	uint32_t tx_ctr;
 };
 static_assert(offsetof(struct ibv_qp_ex, qp_base) == 0, "Invalid qp layout");
 
