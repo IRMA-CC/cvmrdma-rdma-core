@@ -1,7 +1,41 @@
 #include "cvmrdma_ops.h"
 
+
+struct ibv_pd * cvmrdma_alloc_pd(struct ibv_context *context)
+{
+    struct verbs_context * vctxt = verbs_get_ctx(pd->context);
+    PdBounceMetadata * bounce_metadata;
+
+    /* Allocate the PD through the provider */
+    struct ibv_pd * ibpd = vctxt->cvmrdma.alloc_pd();
+    if(! ibpd)
+    {
+        verbs_err(vctxt, "Failed to allocate PD through backend.")
+        goto err;
+    }
+
+
+	bounce_metadata = bounce_metadata_alloc();
+	if(! bounce_metadata)
+	{
+		fprintf(stderr, "Failed to allocated bounce metadata storage.\n");
+		goto free_pd;
+	}
+
+    ibpd->bounce_metadata = bounce_metadata;
+
+
+free_metadata:
+	bounce_metadata_destroy(bounce_metadata);
+free_pd:
+	free(pd);
+err:
+	return NULL;
+}
+
+
 struct verbs_context_ops cvmrdma_ops {
-    // .alloc_pd = cvmrdma_alloc_pd,
+    .alloc_pd = cvmrdma_alloc_pd,
     // .create_cq = cvmrdma_create_cq,
     // .create_qp = cvmrdma_create_qp,
     // .dealloc_pd = cmvrdma_dealloc_pd,

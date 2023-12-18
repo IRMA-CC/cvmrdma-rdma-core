@@ -47,6 +47,8 @@
 #include <sys/types.h>
 #include <infiniband/verbs_api.h>
 
+#include "cvmrdma/bounce_metadata.h" /* bounce metadata per PD */
+
 #ifdef __cplusplus
 #include <limits>
 #endif
@@ -632,6 +634,9 @@ struct ibv_mw_bind_info {
 struct ibv_pd {
 	struct ibv_context     *context;
 	uint32_t		handle;
+
+	/* XXX: we would put this in verbs_pd ... but it doesn't exist */
+	PdBounceMetadata * bounce_metadata;
 };
 
 struct ibv_td_init_attr {
