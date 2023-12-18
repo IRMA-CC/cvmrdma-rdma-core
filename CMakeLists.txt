@@ -61,7 +61,7 @@ if (${CMAKE_VERSION} VERSION_LESS "3.18.1")
 else()
 	cmake_minimum_required(VERSION 3.18.1 FATAL_ERROR)
 endif()
-project(rdma-core C)
+project(rdma-core LANGUAGES C CXX)
 
 # CMake likes to use -rdynamic too much, they fixed it in 3.4.
 if(POLICY CMP0065)
@@ -559,6 +559,28 @@ if (DEFINED ENABLE_LTTNG)
   include(FindLTTngUST REQUIRED)
   add_definitions(-DLTTNG_ENABLED)
 endif()
+
+# Capnproto
+find_package(CapnProto CONFIG REQUIRED)
+
+# Override the capnp executables paths as find_package(CapnProto) picks
+# the binaries compiled for the target architecture instead of the ones
+# for the host
+find_program(CAPNP_EXECUTABLE_HOST capnp REQUIRED) 
+set_target_properties(CapnProto::capnp_tool PROPERTIES
+  IMPORTED_LOCATION ${CAPNP_EXECUTABLE_HOST}
+)
+
+find_program(CAPNPC_CXX_EXECUTABLE_HOST capnpc-c++ REQUIRED)
+set_target_properties(CapnProto::capnpc_cpp PROPERTIES
+  IMPORTED_LOCATION ${CAPNPC_CXX_EXECUTABLE_HOST}
+)
+
+find_program(CAPNPC_CAPNP_EXECUTABLE_HOST capnpc-capnp REQUIRED)
+set_target_properties(CapnProto::capnpc_capnp PROPERTIES
+  IMPORTED_LOCATION ${CAPNPC_CAPNP_EXECUTABLE_HOST}
+)
+
 
 #-------------------------
 # Apply fixups
