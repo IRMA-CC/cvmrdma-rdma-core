@@ -1,5 +1,9 @@
 #include "cvmrdma_ops.h"
 
+#include <stdio.h>
+#include <stdlib.h>
+#include <sys/mman.h>
+#include <arpa/inet.h> /* ntohl */
 
 #include "bounce_metadata.h"
 #include "cvmrdma_cq_server.h"
@@ -9,16 +13,16 @@
 
 #include "debug.h"
 
-struct ibv_pd * cvmrdma_alloc_pd(struct ibv_context *context)
+static struct ibv_pd * cvmrdma_alloc_pd(struct ibv_context *context)
 {
-    struct verbs_context * vctxt = verbs_get_ctx(pd->context);
+    struct verbs_context * vctxt = verbs_get_ctx(context);
     PdBounceMetadata * bounce_metadata;
 
     /* Allocate the PD through the provider */
-    struct ibv_pd * ibpd = vctxt->cvmrdma.alloc_pd();
+    struct ibv_pd * ibpd = vctxt->cvmrdma.alloc_pd(context);
     if(! ibpd)
     {
-        verbs_err(vctxt, "Failed to allocate PD through backend.")
+        verbs_err(vctxt, "Failed to allocate PD through backend.\n");
         goto err;
     }
 
@@ -33,30 +37,33 @@ struct ibv_pd * cvmrdma_alloc_pd(struct ibv_context *context)
     ibpd->bounce_metadata = bounce_metadata;
 
 
-free_metadata:
-	bounce_metadata_destroy(bounce_metadata);
+// free_metadata:
+// 	bounce_metadata_destroy(bounce_metadata);
 free_pd:
-	vctxt->cvmrdma.dealloc_pd(pd);
+	vctxt->cvmrdma.dealloc_pd(ibpd);
 err:
 	return NULL;
 }
 
 
-struct ibv_cq *cvmrdma_create_cq(struct ibv_context *context, int cqe,
+static struct ibv_cq *cvmrdma_create_cq(struct ibv_context *context, int cqe,
 				struct ibv_comp_channel *channel,
 				int comp_vector)
 {
-    struct verbs_context * vctxt = verbs_get_ctx(pd->context);
+    struct verbs_context * vctxt = verbs_get_ctx(context);
+	int ret;
 
     /* Create the CQ on the provider */
-    struct ibv_cq * cq = vctxt->cvmrdma.create_cq(context, cqe, channel, comp_vector);
-    if(! cq)
+    struct ibv_cq * ibcq = vctxt->cvmrdma.create_cq(context, cqe, channel, comp_vector);
+    if(! ibcq)
     {
         goto err;
     }
 
+	struct verbs_cq * cq = (struct verbs_cq *)ibcq;
+
 	/* Initialize the CQ polling server */
-	cq_server_context_init(&cq->cvmrdma_cq_server, &cq->ibv_cq);
+	cq_server_context_init(&cq->cvmrdma_cq_server, ibcq);
 
 	/* And run the server loop in another thread */
 	ret = cq_server_run(&cq->cvmrdma_cq_server, &cq->cvmrdma_cq_server_thread);
@@ -66,37 +73,37 @@ struct ibv_cq *cvmrdma_create_cq(struct ibv_context *context, int cqe,
 		goto cq_server_context_destroy;
 	}
 
-	return &cq->ibv_cq;
+	return &cq->cq;
 
 cq_server_context_destroy:
 	cq_server_context_destroy(&cq->cvmrdma_cq_server);
-destroy_cq:
-    vctxt->cvmrdma.destroy_cq(cq);
+// destroy_cq:
+    vctxt->cvmrdma.destroy_cq(ibcq);
 err:
     return NULL;
 }
 
 
-struct ibv_qp *cvmrdma_create_qp(struct ibv_pd *pd,
+static struct ibv_qp *cvmrdma_create_qp(struct ibv_pd *pd,
 				struct ibv_qp_init_attr *attr)
 {
-    struct verbs_context * vctxt = verbs_get_ctx(pd->context);
+    struct verbs_context * ctxt = verbs_get_ctx(pd->context);
 
-    struct ibv_qp * qp = vctxt->cvmrdma.create_qp(pd, attr);
-    if(! qp)
+    struct ibv_qp * ibqp = ctxt->cvmrdma.create_qp(pd, attr);
+    if(! ibqp)
     {
         goto err;
     }
 
-	struct verbs_qp *vqp = (struct verbs_qp *)qp;
+	struct verbs_qp * qp = (struct verbs_qp *)ibqp;
 
 	/* Add this QP to the CQ server. This gives us one end of the notification
 	   channel ; the RPC server will push notifications there */
-	struct ibv_cq * send_cq = attr->send_cq;
-	assert(send_cq);
-	struct pvrdma_cq * send_pcq = to_vcq(send_cq);
+	struct ibv_cq * send_ibcq = attr->send_cq;
+	assert(send_ibcq);
+	struct verbs_cq * send_cq = (struct verbs_cq *)send_ibcq;
 
-	NotificationQueue * nq = cq_server_add_qp(&send_pcq->cvmrdma_cq_server, qp->ibv_qp.qp_num);
+	NotificationQueue * nq = cq_server_add_qp(&send_cq->cvmrdma_cq_server, ibqp->qp_num);
     if(! nq)
     {
         fprintf(stderr, "failed to register QP on CQ server\n");
@@ -107,27 +114,28 @@ struct ibv_qp *cvmrdma_create_qp(struct ibv_pd *pd,
 	   No risk of a race: we haven't returned the QPN to the user yet, the remote cannot possibly
 	   know it yet.
 	*/
-	cvmrdma_server_register_qp(ctxt->network_server, ppd->bounce_metadata, nq, qp->ibv_qp.qp_num);
+	cvmrdma_server_register_qp(ctxt->cvmrdma.network_server, pd->bounce_metadata, nq, ibqp->qp_num);
 
 	/* We can only get the capability to the remote QP once we know its QPN, this will be done
 	   in modify_qp */
-	vqp->remote_qnc = NULL;
-	vqp->tx_ctr = 0;
+	qp->remote_qnc = NULL;
+	qp->tx_ctr = 0;
 
-	return qp;
+	return ibqp;
 
 free_qp:
-    vctxt->cvmrdma.destroy_qp(qp);
+    ctxt->cvmrdma.destroy_qp(ibqp);
 err:
 	return NULL;
 
 
 }
 
-int cvmrdma_modify_qp(struct ibv_qp *ibqp, struct ibv_qp_attr *attr,
+static int cvmrdma_modify_qp(struct ibv_qp *ibqp, struct ibv_qp_attr *attr,
 		     int attr_mask)
 {
     struct verbs_context * vctxt = verbs_get_ctx(ibqp->context);
+	struct verbs_qp * qp = (struct verbs_qp *)ibqp;
     int ret = 0;
 
     ret = vctxt->cvmrdma.modify_qp(ibqp, attr, attr_mask);
@@ -273,7 +281,7 @@ static int post_send_do_bounce(struct ibv_qp *ibqp, struct ibv_send_wr *wr, stru
 }
 
 
-int pvrdma_post_send(struct ibv_qp *ibqp, struct ibv_send_wr *wr,
+static int cvmrdma_post_send(struct ibv_qp *ibqp, struct ibv_send_wr *wr,
 		     struct ibv_send_wr **bad_wr)
 {
     struct verbs_context * vctxt = verbs_get_ctx(ibqp->context);
@@ -292,7 +300,7 @@ int pvrdma_post_send(struct ibv_qp *ibqp, struct ibv_send_wr *wr,
 	- send the MAC as the immediate.
 	*/
 
-	ret = post_send_do_bounce(qp, wr, bad_wr);
+	ret = post_send_do_bounce(ibqp, wr, bad_wr);
 	if(ret < 0)
 	{
 		return ret;
@@ -316,7 +324,7 @@ int pvrdma_post_send(struct ibv_qp *ibqp, struct ibv_send_wr *wr,
 
 
 
-struct ibv_mr *cvmrdma_reg_mr(struct ibv_pd *pd, void *addr, size_t length,
+static struct ibv_mr *cvmrdma_reg_mr(struct ibv_pd *pd, void *addr, size_t length,
         uint64_t hca_va, int access)
 {
     struct verbs_context * vctxt = verbs_get_ctx(pd->context);
@@ -324,7 +332,6 @@ struct ibv_mr *cvmrdma_reg_mr(struct ibv_pd *pd, void *addr, size_t length,
 	int bounce_prots;
 	void *bounce;
     struct ibv_mr * ibmr;
-    struct verbs_mr * vmr;
     /* CVM
        - allocate memory here for bounce buf: should be in unprotected memory! eg with special
 	     syscall get and fd and mmap it
@@ -362,12 +369,10 @@ struct ibv_mr *cvmrdma_reg_mr(struct ibv_pd *pd, void *addr, size_t length,
         goto free_bounce;
     }
 
-    vmr = verbs_get_mr(ibmr);
-
 	/* Make this bounce MR's metadata available through its lkey or rkey */
 	register_bounce_mr(pd->bounce_metadata,
-		ibmr.lkey,
-		ibmr.rkey,
+		ibmr->lkey,
+		ibmr->rkey,
 		hca_va,
 		addr,
 		bounce
@@ -379,11 +384,10 @@ free_bounce:
 	munmap(bounce, length);
 err:
     return NULL;
-
 }
 
 
-struct verbs_context_ops cvmrdma_ops {
+struct verbs_context_ops cvmrdma_ops = {
     .alloc_pd = cvmrdma_alloc_pd,
     .create_cq = cvmrdma_create_cq,
     .create_qp = cvmrdma_create_qp,
@@ -429,16 +433,16 @@ static struct verbs_context *cvmrdma_alloc_context(struct ibv_device *ibdev,
 	context->cvmrdma.network_client_cap = cvmrdma_client_init(context->cvmrdma.network_client_connection);
 	
 
-	return &context->context;
+	return context;
 
 // close_server:
 //    TODO: close network server
 uninit_and_free:
-	context->cvmrdma.free_context(context->context);
+	context->cvmrdma.free_context(&context->context);
 err:
 	return NULL;
 }
 
-struct verbs_device_ops cvmrdma_device_ops {
+struct verbs_device_ops cvmrdma_device_ops = {
     .alloc_context = cvmrdma_alloc_context,
-}
+};

@@ -16,6 +16,15 @@ publish_internal_headers(infiniband
   marshall.h
   )
 
+publish_internal_headers(infiniband/cvmrdma
+  cvmrdma/cvmrdma_cq_server.h
+  cvmrdma/cvmrdma_network_server.h
+  cvmrdma/cvmrdma_network_client.h
+  cvmrdma/bounce_metadata.h
+  cvmrdma/notification_queue.h
+  cvmrdma/cvmrdma_ops.h
+)
+
 configure_file("libibverbs.map.in"
   "${CMAKE_CURRENT_BINARY_DIR}/libibverbs.map" @ONLY)
 

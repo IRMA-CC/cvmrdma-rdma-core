@@ -47,10 +47,6 @@
 #include <sys/types.h>
 #include <infiniband/verbs_api.h>
 
-#include "cvmrdma/bounce_metadata.h" /* bounce metadata per PD */
-#include "cvmrdma/cvmrdma_network_client.h" /* IP based RPCs client, per context */
-#include "cvmrdma/cvmrdma_network_server.h" /* IP based RPCs server, per context */
-
 
 #ifdef __cplusplus
 #include <limits>
@@ -66,6 +62,7 @@
 extern "C" {
 #endif
 
+struct verbs_mr;
 
 union ibv_gid {
 	uint8_t			raw[16];
@@ -639,7 +636,7 @@ struct ibv_pd {
 	uint32_t		handle;
 
 	/* XXX: we would put this in verbs_pd ... but it doesn't exist */
-	PdBounceMetadata * bounce_metadata;
+	struct PdBounceMetadata * bounce_metadata;
 };
 
 struct ibv_td_init_attr {
@@ -2174,9 +2171,9 @@ struct verbs_context {
 		/* Server and client for IP based RPCs
 		XXX: for qpn->ring rkey requests, it would make more sense to have a single
 		server for the whole machine; i.e a standalone process. */
-		CVMRDMAServer * network_server;
-		ClientSession * network_client_connection;
-		CVMRDMAClient * network_client_cap;
+		struct CVMRDMAServer * network_server;
+		struct ClientSession * network_client_connection;
+		struct CVMRDMAClient * network_client_cap;
 
 
 	} cvmrdma;

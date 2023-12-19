@@ -406,7 +406,7 @@ static struct verbs_device *try_driver(const struct verbs_device_ops *ops,
 	   the call sites to calls to CVM-aware functions, but this is more work for potentially
 	   little gain.
 	*/
-	vdev->ops = cvmrdma_device_ops;
+	vdev->ops = &cvmrdma_device_ops;
 
 	atomic_init(&vdev->refcount, 1);
 	dev = &vdev->device;

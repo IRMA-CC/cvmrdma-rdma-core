@@ -358,29 +358,29 @@ struct ibv_context *verbs_open_device(struct ibv_device *device, void *private_d
 	*/
 
 
-	ops = get_ops(context);
+	ops = get_ops(&context_ex->context);
 
-	context_ex.provider_ops.alloc_pd = ops->alloc_pd;
-	context_ex.provider_ops.create_cq = ops->create_cq;
-	context_ex.provider_ops.create_qp = ops->create_qp;
-	context_ex.provider_ops.dealloc_pd = ops->dealloc_pd;
-	context_ex.provider_ops.dereg_mr = ops->dereg_mr;
-	context_ex.provider_ops.destroy_cq = ops->destroy_cq;
-	context_ex.provider_ops.destroy_qp = ops->destroy_qp;
-	context_ex.provider_ops.free_context = ops->free_context;
-	context_ex.provider_ops.modify_qp = ops->modify_qp;
-	context_ex.provider_ops.poll_cq = ops->poll_cq;
-	context_ex.provider_ops.post_recv = ops->post_recv;
-	context_ex.provider_ops.post_send = ops->post_send;
-	context_ex.provider_ops.reg_dmabuf_mr = ops->reg_dmabuf_mr;
-	context_ex.provider_ops.reg_mr = ops->reg_mr;
+	context_ex->cvmrdma.alloc_pd = ops->alloc_pd;
+	context_ex->cvmrdma.create_cq = ops->create_cq;
+	context_ex->cvmrdma.create_qp = ops->create_qp;
+	context_ex->cvmrdma.dealloc_pd = ops->dealloc_pd;
+	context_ex->cvmrdma.dereg_mr = ops->dereg_mr;
+	context_ex->cvmrdma.destroy_cq = ops->destroy_cq;
+	context_ex->cvmrdma.destroy_qp = ops->destroy_qp;
+	context_ex->cvmrdma.free_context = ops->free_context;
+	context_ex->cvmrdma.modify_qp = ops->modify_qp;
+	context_ex->cvmrdma.poll_cq = ops->poll_cq;
+	context_ex->cvmrdma.post_recv = ops->post_recv;
+	context_ex->cvmrdma.post_send = ops->post_send;
+	context_ex->cvmrdma.reg_dmabuf_mr = ops->reg_dmabuf_mr;
+	context_ex->cvmrdma.reg_mr = ops->reg_mr;
 
 
 	/*
 		Then, we can replace the provider's ops by the one from the wrapper.
 	*/
 
-	verbs_set_ops(context_ex, cvmrdma_ops);
+	verbs_set_ops(context_ex, &cvmrdma_ops);
 
 	set_lib_ops(context_ex);
 	if (verbs_device->sysfs) {
