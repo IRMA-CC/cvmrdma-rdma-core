@@ -381,16 +381,19 @@ static struct ibv_mr *cvmrdma_reg_mr(struct ibv_pd *pd, void *addr, size_t lengt
 
 	/* LOCAL_WRITE: for destination of recv
 	   REMOTE_WRITE: for destination of write */
-	if ((access & IBV_ACCESS_LOCAL_WRITE) ||
-	    (access & IBV_ACCESS_REMOTE_WRITE))
+	if ((access & IBV_ACCESS_LOCAL_WRITE) || (access & IBV_ACCESS_REMOTE_WRITE))
+	{
+		DEBUG("Make bounce buffer read/write\n");
 		bounce_prots |= PROT_READ;
+	}
 
 	/* TODO: allocate the bounce buffer in unencrypted memory */
-	bounce = mmap(0, length, bounce_prots,
-		      MAP_ANONYMOUS | MAP_SHARED_VALIDATE, -1, 0);
+	bounce = mmap(0, length, bounce_prots, MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
 	if (bounce == MAP_FAILED) {
 		goto err;
 	}
+
+	DEBUG("Allocated bounce buffer for user region: UR %p   bounce MR %p\n", addr, bounce);
 
     /* reg_mr the bounce buffer as the MR through the provider */
     ibmr = vctxt->cvmrdma.reg_mr(pd, bounce, length, hca_va, access);
