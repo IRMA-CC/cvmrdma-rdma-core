@@ -102,14 +102,14 @@ static void * cq_server_loop(void * args)
                 bool has_imm = notification->has_imm;
 
             unsigned char nonce[3] = {
-                0x0000FFu & nonce_counter,
-                0x00FF00u & nonce_counter,
-                0xFF0000u & nonce_counter
+                    0xFFu & (nonce_counter >> 0),
+                    0xFFu & (nonce_counter >> 8),
+                    0xFFu & (nonce_counter >> 16),
             };
 
             unsigned char mac[2] = {
-                0x00FFu & protocol_imm,
-                0xFF00u & protocol_imm
+                    0xFFu & (protocol_imm >> 0),
+                    0xFFu & (protocol_imm >> 8)
             };
 
             assert(length == wc_length);

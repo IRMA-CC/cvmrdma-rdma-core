@@ -246,9 +246,9 @@ static int post_send_do_bounce(struct ibv_qp *ibqp, struct ibv_send_wr *wrs, str
 				/* Compute the nonce to use for the encryption from the counter*/
 				uint32_t nonce_counter = qp->tx_ctr++;
 				unsigned char nonce[3] = {
-					0x0000FFu & nonce_counter,
-					0x00FF00u & nonce_counter,
-					0xFF0000u & nonce_counter
+                    0xFFu & (nonce_counter >> 0),
+                    0xFFu & (nonce_counter >> 8),
+                    0xFFu & (nonce_counter >> 16),
 				};
 
 				/* HACK: fake mac to check transmission */
@@ -269,10 +269,10 @@ static int post_send_do_bounce(struct ibv_qp *ibqp, struct ibv_send_wr *wrs, str
 				   - for IMM: changing WRITE to WRITE_WITH_IMM and send the MAC as immediate.
 				   - for WRITE_WITH_IMM: replace the immediate with the MAC
 				
-					The actual immediate has already been sent with the RPC.
+					The actual immediate (if any) has already been sent with the RPC.
 				*/
 				
-				__be32 mac_imm = mac[0] & (mac[1] << 8);
+				__be32 mac_imm = mac[0] | (mac[1] << 8);
 
 				this_wr->opcode = IBV_WR_RDMA_WRITE_WITH_IMM;
 				this_wr->imm_data = mac_imm;
