@@ -78,7 +78,7 @@ NotificationQueue * nq_manager_create_queue(NotificationQueueManager * nqm, uint
     auto locked = std::scoped_lock{nqm->lock};
 
     auto present = nqm->notification_queue_for_qpn.find(qpn);
-    if(present == nqm->notification_queue_for_qpn.end())
+    if(present != nqm->notification_queue_for_qpn.end())
     {
         DEBUG("ERROR: qpn already has a registered notification queue!\n");
         return nullptr;
