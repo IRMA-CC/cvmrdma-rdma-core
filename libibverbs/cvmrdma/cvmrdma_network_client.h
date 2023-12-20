@@ -1,6 +1,7 @@
 #pragma once
 
 #include <inttypes.h>
+#include <stdbool.h>
 
 #ifdef __cplusplus
 
@@ -31,7 +32,7 @@ void cvmrdma_client_destroy(CVMRDMAClient * client);
 
 
 QPNotificationClient * get_qp_notification_client(ClientSession * session, CVMRDMAClient * client, uint32_t remote_qpn);
-void remote_qp_notify_write_rpc(ClientSession * session, QPNotificationClient * qnc, uint32_t imm, uint64_t hca_addr, uint64_t length, uint32_t rkey);
+void remote_qp_notify_write_rpc(ClientSession * session, QPNotificationClient * qnc, uint64_t hca_addr, uint64_t length, uint32_t rkey, uint32_t imm, bool has_imm);
 
 #ifdef __cplusplus
 }

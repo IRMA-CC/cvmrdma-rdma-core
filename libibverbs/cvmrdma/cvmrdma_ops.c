@@ -203,31 +203,37 @@ static int post_send_do_bounce(struct ibv_qp *ibqp, struct ibv_send_wr *wrs, str
 	}
 
 
-	for(struct ibv_send_wr * this_wr = wr ; this_wr != NULL ; this_wr = this_wr->next)
+	for(struct ibv_send_wr * this_wr = wrs ; this_wr != NULL ; this_wr = this_wr->next)
 	{
-		switch(this_wr->opcode)
+		enum ibv_wr_opcode this_op = this_wr->opcode;
+		switch(this_op)
 		{
-			case IBV_WR_RDMA_WRITE:{
+			case IBV_WR_RDMA_WRITE:
+			case IBV_WR_RDMA_WRITE_WITH_IMM: {
 				/* Prepare the bounce buffer. We have to encrypt the data
 				from the user regions into the bounce MRs. */
 
-				if(wr->num_sge != 1)
+				if(this_wr->num_sge != 1)
 				{
 					fprintf(stderr, "ERROR: for now CVMRDMA only supports 1 sge per WR\n");
 					*bad_wr = this_wr;
 					return EINVAL;
 				}
 
-				struct ibv_sge sge = wr->sg_list[0];
+				struct ibv_sge sge = this_wr->sg_list[0];
 				uint32_t rkey = this_wr->wr.rdma.rkey;
+
+				uint32_t imm = ntohl(this_wr->imm_data);
+				bool has_imm = (this_op == IBV_WR_RDMA_WRITE_WITH_IMM);
 
 				/* Before doing anything, we can already notify the remote of the upcoming write */
 				remote_qp_notify_write_rpc(
 					ctx->cvmrdma.network_client_connection, qp->remote_qnc,
-					ntohl(this_wr->imm_data),
 					sge.addr,
 					sge.length,
-					rkey
+					rkey,
+					imm,
+					has_imm
 				);
 
 				/* Identify the local MR from the lkey and find the corresponding bounce buffer */

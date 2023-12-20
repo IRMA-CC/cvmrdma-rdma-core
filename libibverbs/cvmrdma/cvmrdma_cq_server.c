@@ -80,6 +80,9 @@ static void * cq_server_loop(void * args)
                 return (void*)EINVAL;
             }
 
+
+            if (op == IBV_WC_RECV_RDMA_WITH_IMM)
+            {
             /* A WRITE has happened in a bounce buffer. To have enough information to decrypt this
             payload into the user region, retrieve the RPC notification on the corresponding QP */
             
@@ -92,8 +95,9 @@ static void * cq_server_loop(void * args)
             void * bounce_addr = notification->bounce_addr;
             void * user_addr = notification->user_addr;
             size_t length = notification->length;
+                unsigned int nonce_counter = notification->nonce_counter;
             uint32_t user_imm = notification->imm;
-            unsigned int nonce_counter = notification->nonce_counter;
+                bool has_imm = notification->has_imm;
 
             unsigned char nonce[3] = {
                 0x0000FFu & nonce_counter,
@@ -117,6 +121,8 @@ static void * cq_server_loop(void * args)
             notification_queue_pop(nq);
 
             /* TODO: push a WC to a queue pollable by user with the user_imm !*/
+                DEBUG("WARN: dropping IMM from WRITE notification! Imm = 0x%" PRIx32 " valid = %d\n", user_imm, has_imm);
+            }
         }
     }
 

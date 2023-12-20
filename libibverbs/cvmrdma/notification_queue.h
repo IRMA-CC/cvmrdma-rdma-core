@@ -1,5 +1,6 @@
 #pragma once
 
+#include <stdbool.h>
 #include <sys/types.h>
 #include <inttypes.h>
 
@@ -14,8 +15,9 @@ struct cq_server_notification
     void * bounce_addr;
     void * user_addr;
     size_t length;
-    uint32_t imm;
     unsigned int nonce_counter;
+    uint32_t imm;
+    bool has_imm;
 };
 
 typedef struct NotificationQueue NotificationQueue;

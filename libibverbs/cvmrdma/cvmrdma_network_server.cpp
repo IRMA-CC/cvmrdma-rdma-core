@@ -1,5 +1,7 @@
 #include "cvmrdma_network_server.h"
 
+#include <cinttypes>
+
 #include <functional>
 #include <unordered_map>
 #include <mutex>
@@ -9,7 +11,7 @@
 #include <capnp/ez-rpc.h>
 
 #include "cvmrdma.capnp.h"
-
+#include "debug.h"
 
 static capnp::CapabilityServerSet<CVMRDMA::QpNotificationChannel> qnc_capset;
 
@@ -26,36 +28,40 @@ public:
 
     kj::Promise<void> notifyWrite(NotifyWriteContext context) override
     {
+        DEBUG("[QPN %" PRIx32 "] notifyWrite\n", m_qpn);
+
         auto p = context.getParams();
-        uint32_t imm = p.getImm();
         uint64_t length = p.getLength();
         uint64_t hca_addr = p.getHcaAddr();
         uint32_t rkey = p.getRkey();
+        uint32_t imm = p.getImm();
+        bool has_imm = p.getHasImm();
 
         unsigned int nonce_counter = m_rx_counter++;
 
 
         /* Interpret the rkey here (ie per QP) before pushing the notification to the CQ poller:
            rkeys are per PD, but CQs do not belong to a particular PD. Therefore, only push per-context
-           information through the notification */
+           information through the notification. We can do the conversion here because the current QP
+           indicates which PD to use. */
         struct bounce_entry bounce_info = get_bounce_metadata_for_rkey(&m_bounce_metadata, rkey);
 
         size_t offt = hca_addr - bounce_info.hca_va;
         void * bounce_addr = (unsigned char*)bounce_info.bounce_buffer + offt;
         void * user_addr = (unsigned char*)bounce_info.user_buffer + offt;
 
-        /* TODO: push nonce, bounce_addr, user_addr, length to QP specific queue
-
-           poll_cq will get the qpn, and can pop entries off the right queue
+        /* Push nonce, bounce_addr, user_addr, length to QP specific queue
+           Poll_cq will get the qpn, and can pop entries off the right queue
         */
 
         struct cq_server_notification notification = {
             .bounce_addr = bounce_addr,
             .user_addr = user_addr,
             .length = length,
-            .imm = imm,
             /* nonce: 3 first bytes, little endian (24 bits) */
-            .nonce_counter = nonce_counter
+            .nonce_counter = nonce_counter,
+            .imm = imm,
+            .has_imm = has_imm
         };
 
         notification_queue_push(m_notification_queue, &notification);

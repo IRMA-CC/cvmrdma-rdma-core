@@ -1,6 +1,6 @@
 #include "cvmrdma_network_client.h"
 
-
+#include "debug.h"
 
 ClientSession * cvmrdma_start_session(char const * server_addr)
 {
@@ -38,15 +38,22 @@ QPNotificationClient * get_qp_notification_client(ClientSession * session, CVMRD
 
 
 
-void remote_qp_notify_write_rpc(ClientSession * session, QPNotificationClient * qnc, uint32_t imm, uint64_t hca_addr, uint64_t length, uint32_t rkey)
+void remote_qp_notify_write_rpc(ClientSession * session, QPNotificationClient * qnc, uint64_t hca_addr, uint64_t length, uint32_t rkey, uint32_t imm, bool has_imm)
 {
+    DEBUG("remote_qp_notify_write_rpc\n");
+
     auto req = qnc->notifyWriteRequest();
-    req.setImm(imm);
     req.setHcaAddr(hca_addr);
     req.setLength(length);
     req.setRkey(rkey);
-
+    req.setImm(imm);
+    req.setHasImm(has_imm);
+    
     auto rep = req.send();
 
-    /* Q: what happens if we never wait on the promise ?? */
+    /* TODO: run a client event loop in another thread and
+       use kj::Executor https://github.com/capnproto/capnproto/blob/0050fd757683f140b4a07fdc3eab986db0d00c8d/c++/src/kj/async.h#L753 
+    */
+    DEBUG("WARN: waiting on the IP promise, designed to happen in parallel!\n");
+    rep.wait(session->getWaitScope());
 }

@@ -11,7 +11,7 @@ interface CVMRDMA {
 
         # the length in the WC is an uint32_t, what happens if we send more than 4GiB ?
         # maybe we can make the length here an uint32 too
-        notifyWrite @0 (imm :UInt32, hcaAddr :UInt64, length :UInt64, rkey :UInt32) -> ();
+        notifyWrite @0 (hcaAddr :UInt64, length :UInt64, rkey :UInt32, imm :UInt32, hasImm :Bool) -> ();
     }
 
 
