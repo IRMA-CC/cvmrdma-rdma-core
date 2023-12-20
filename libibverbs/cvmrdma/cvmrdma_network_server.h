@@ -12,7 +12,7 @@ extern "C" {
 
 
 typedef struct CVMRDMAServer CVMRDMAServer;
-CVMRDMAServer * cvmrdma_start_network_server(void);
+CVMRDMAServer * cvmrdma_start_network_server(char const * server_bind_addr);
 void cvmrdma_stop_network_server(CVMRDMAServer * server);
 
 

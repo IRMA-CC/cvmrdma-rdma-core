@@ -147,9 +147,8 @@ private:
 };
 
 
-static int cvmrdma_server_loop(std::stop_token stoken, QpnMap * qm)
+static int cvmrdma_server_loop(std::stop_token stoken, QpnMap * qm, char const * server_bind_addr)
 {
-
     /* Create a channel to ask the server to stop: on stop request,
        the promise in the pair will be fulfilled. */
     auto stop_paf = kj::newPromiseAndFulfiller<void>();
@@ -159,7 +158,9 @@ static int cvmrdma_server_loop(std::stop_token stoken, QpnMap * qm)
 
     auto main_interface = kj::heap<CVMRDMAImpl>(*qm);
 
-    capnp::EzRpcServer server(std::move(main_interface), "*:3456");
+
+    DEBUG("Starting capnp server on '%s'\n", server_bind_addr);
+    capnp::EzRpcServer server(std::move(main_interface), server_bind_addr);
     stop_paf.promise.wait(server.getWaitScope());
 
     return 0;
@@ -171,9 +172,9 @@ static int cvmrdma_server_loop(std::stop_token stoken, QpnMap * qm)
 class CVMRDMAServer
 {
 public:
-    CVMRDMAServer()
+    CVMRDMAServer(char const * server_bind_addr)
     {
-        m_server_thread = std::jthread{cvmrdma_server_loop, &m_qp_for_qpn};
+        m_server_thread = std::jthread{cvmrdma_server_loop, &m_qp_for_qpn, server_bind_addr};
     }
 
 
@@ -181,6 +182,8 @@ public:
     {
         auto qnc = kj::heap<QpNotificationChannel>(*pd_bounce_metadata, nq, qpn);
         auto qnc_client = qnc_capset.add(std::move(qnc));
+
+        DEBUG("Register fresh notification channel for qpn 0x%" PRIx32 "\n", qpn);
 
         m_qp_for_qpn.insert_or_assign(qpn, std::move(qnc_client));
         return qnc;
@@ -200,9 +203,9 @@ private:
     std::jthread m_server_thread;
 };
 
-CVMRDMAServer * cvmrdma_start_network_server()
+CVMRDMAServer * cvmrdma_start_network_server(char const * server_bind_addr)
 {
-    return new CVMRDMAServer{};
+    return new CVMRDMAServer{server_bind_addr};
 }
 
 void cvmrdma_stop_network_server(CVMRDMAServer * cs)

@@ -450,22 +450,37 @@ static struct verbs_context *cvmrdma_alloc_context(struct ibv_device *ibdev,
 {
     struct verbs_device * vdev = verbs_get_device(ibdev);
 
+	DEBUG("cvmrdma_alloc_context\n");
+
+	/* eg 192.4.0.3:3456 */
+	char const * remote_addr = getenv("CVMRDMA_REMOTE_ADDR");
+	if(! remote_addr)
+	{
+		fprintf(stderr, "ERROR: No environment variable CVMRDMA_REMOTE_ADDR.\n");
+		goto err;
+	}
+
+	/* eg *:3456 */
+	char const * local_bind_addr = getenv("CVMRDMA_BIND_ADDR");
+	if(! local_bind_addr)
+	{
+		fprintf(stderr, "ERROR: No environment variable CVMRDMA_BIND_ADDR.\n");
+		goto err;
+	}
+
     /* Allocate provider context */
     struct verbs_context * context = vdev->cvmrdma.alloc_context(ibdev, cmd_fd, private_data);
     if(! context) {
 		goto err;
     }
-	/* Start an RPC server here,  */
-	context->cvmrdma.network_server = cvmrdma_start_network_server();
 
+	DEBUG("Start IP based server on %s\n", local_bind_addr);
+	/* Start an RPC server here,  */
+	context->cvmrdma.network_server = cvmrdma_start_network_server(local_bind_addr);
+
+	DEBUG("Connect to IP based remote on %s\n", remote_addr);
 	/* Connect to the remote's RPC server */
-	char const * server_addr = getenv("PVRDMA_REMOTE_ADDR");
-	if(! server_addr)
-	{
-		fprintf(stderr, "ERROR: No environment variable PVRDMA_REMOTE_ADDR.\n");
-		goto uninit_and_free;
-	}
-	context->cvmrdma.network_client_connection = cvmrdma_start_session(server_addr);
+	context->cvmrdma.network_client_connection = cvmrdma_start_session(remote_addr);
 
 	/* Get the root capability to the remote's RPC's API */
 	context->cvmrdma.network_client_cap = cvmrdma_client_init(context->cvmrdma.network_client_connection);
@@ -473,10 +488,8 @@ static struct verbs_context *cvmrdma_alloc_context(struct ibv_device *ibdev,
 
 	return context;
 
-// close_server:
-//    TODO: close network server
-uninit_and_free:
-	context->cvmrdma.free_context(&context->context);
+// uninit_and_free:
+// 	context->cvmrdma.free_context(&context->context);
 err:
 	return NULL;
 }
