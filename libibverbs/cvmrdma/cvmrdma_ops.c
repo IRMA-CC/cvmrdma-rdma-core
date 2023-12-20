@@ -36,6 +36,8 @@ static struct ibv_pd * cvmrdma_alloc_pd(struct ibv_context *context)
 
     ibpd->bounce_metadata = bounce_metadata;
 
+	return ibpd;
+
 
 // free_metadata:
 // 	bounce_metadata_destroy(bounce_metadata);
@@ -411,7 +413,7 @@ static struct ibv_mr *cvmrdma_reg_mr(struct ibv_pd *pd, void *addr, size_t lengt
 		bounce
 	);
 
-
+	return ibmr;
 
 free_bounce:
 	munmap(bounce, length);
