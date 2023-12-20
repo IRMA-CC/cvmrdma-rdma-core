@@ -372,14 +372,19 @@ struct ibv_context *verbs_open_device(struct ibv_device *device, void *private_d
 	context_ex->cvmrdma.poll_cq = ops->poll_cq;
 	context_ex->cvmrdma.post_recv = ops->post_recv;
 	context_ex->cvmrdma.post_send = ops->post_send;
+	context_ex->cvmrdma.query_device_ex = ops->query_device_ex;
+	context_ex->cvmrdma.query_port = ops->query_port;
 	context_ex->cvmrdma.reg_dmabuf_mr = ops->reg_dmabuf_mr;
 	context_ex->cvmrdma.reg_mr = ops->reg_mr;
+	context_ex->cvmrdma.req_notify_cq = ops->req_notify_cq;
 
 
 	/*
 		Then, we can replace the provider's ops by the one from the wrapper.
-	*/
 
+		First set the dummy ops to clear the provider ops, then set the CVMRDMA ops.
+	*/
+	verbs_set_ops(context_ex, &verbs_dummy_ops);
 	verbs_set_ops(context_ex, &cvmrdma_ops);
 
 	set_lib_ops(context_ex);

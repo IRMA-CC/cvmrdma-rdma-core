@@ -2162,11 +2162,18 @@ struct verbs_context {
 				struct ibv_recv_wr **bad_wr);
 		int (*post_send)(struct ibv_qp *qp, struct ibv_send_wr *wr,
 				struct ibv_send_wr **bad_wr);
+		int (*query_device_ex)(struct ibv_context *context,
+					const struct ibv_query_device_ex_input *input,
+					struct ibv_device_attr_ex *attr,
+					size_t attr_size);
+		int (*query_port)(struct ibv_context *context, uint8_t port_num,
+				struct ibv_port_attr *port_attr);
 		struct ibv_mr *(*reg_dmabuf_mr)(struct ibv_pd *pd, uint64_t offset,
 						size_t length, uint64_t iova,
 						int fd, int access);
 		struct ibv_mr *(*reg_mr)(struct ibv_pd *pd, void *addr, size_t length,
 					uint64_t hca_va, int access);
+		int (*req_notify_cq)(struct ibv_cq *cq, int solicited_only);
 
 		/* Server and client for IP based RPCs
 		XXX: for qpn->ring rkey requests, it would make more sense to have a single

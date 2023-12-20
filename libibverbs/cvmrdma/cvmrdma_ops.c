@@ -176,15 +176,21 @@ err:
     return ret;
 }
 
+static int cvmrdma_post_recv(struct ibv_qp *ibqp, struct ibv_recv_wr *wr,
+		struct ibv_recv_wr **bad_wr)
+{
+	/* WRITE_WITH_IMM consumes an RR even though it doesn't write a payload to the MR! So the user
+	   must be able to post_recvs.
+
+	   Since the bounce buffer is registered with the hca_va, a valid post recv for the original buffer
+	   is a valid post recv for the bounce buffer. We can simply pass the request unmodified.   
+	*/
+	struct verbs_context * ctx = verbs_get_ctx(ibqp->context);
+	return ctx->cvmrdma.post_recv(ibqp, wr, bad_wr);
+}
 
 
-// HACKY: very ad-hoc message, at least use a header
-struct cvmrdma_ring_message {
-   uint64_t hca_va;
-   uint64_t length;
-   uint32_t rkey;
-};
-static int post_send_do_bounce(struct ibv_qp *ibqp, struct ibv_send_wr *wr, struct ibv_send_wr **bad_wr)
+static int post_send_do_bounce(struct ibv_qp *ibqp, struct ibv_send_wr *wrs, struct ibv_send_wr **bad_wr)
 {
     struct verbs_qp * qp = (struct verbs_qp *)ibqp;
 	struct ibv_pd * pd = ibqp->pd;
@@ -322,6 +328,24 @@ static int cvmrdma_post_send(struct ibv_qp *ibqp, struct ibv_send_wr *wr,
    */
 }
 
+static int cvmrdma_query_device_ex(struct ibv_context *ibctxt,
+			const struct ibv_query_device_ex_input *input,
+			struct ibv_device_attr_ex *attr,
+			size_t attr_size)
+{
+	struct verbs_context * vctxt = verbs_get_ctx(ibctxt);
+	return vctxt->cvmrdma.query_device_ex(ibctxt, input, attr, attr_size);
+}
+
+
+
+static int cvmrdma_query_port(struct ibv_context *ibctxt, uint8_t port_num,
+		struct ibv_port_attr *port_attr)
+{
+	struct verbs_context * vctxt = verbs_get_ctx(ibctxt);
+	return vctxt->cvmrdma.query_port(ibctxt, port_num, port_attr);
+}
+
 
 
 static struct ibv_mr *cvmrdma_reg_mr(struct ibv_pd *pd, void *addr, size_t length,
@@ -398,9 +422,12 @@ struct verbs_context_ops cvmrdma_ops = {
     // .free_context = cvmrdma_free_context,
     .modify_qp = cvmrdma_modify_qp,
     // .poll_cq = cvmrdma_poll_cq,
-    // .post_recv = cvmrdma_post_recv,
+    .post_recv = cvmrdma_post_recv,
     .post_send = cvmrdma_post_send,
+	.query_device_ex = cvmrdma_query_device_ex,
+	.query_port = cvmrdma_query_port,
     // .reg_dmabuf_mr = cvmrdma_reg_dmabuf_mr,
+	// .req_notify_cq = cvmrdma_req_notify_cq
     .reg_mr = cvmrdma_reg_mr
 };
 
