@@ -33,6 +33,7 @@ static void * cq_server_loop(void * args)
     CQServer * server = args;
     struct ibv_cq * cq = server->cq;
     NotificationQueueManager * nqm = server->nqm;
+    struct verbs_context * ctxt = verbs_get_ctx(cq->context);
 
     int err;
 
@@ -40,7 +41,8 @@ static void * cq_server_loop(void * args)
 
     while(true)
     {
-        int nwcs = ibv_poll_cq(cq, CQ_SERVER_NUM_WCS, wcs);
+        /* TODO: try to switch to poll cq ex */
+        int nwcs = ctxt->cvmrdma.poll_cq(cq, CQ_SERVER_NUM_WCS, wcs);
         if(nwcs < 0)
         {
             err = nwcs;
