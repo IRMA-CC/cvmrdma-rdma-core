@@ -132,6 +132,8 @@ public:
         auto rb = context.initResults();
 
         uint32_t qpn = p.getQpn();
+        DEBUG("getQpChannelForQpn 0x%" PRIx32 "\n", qpn);
+
 
         /* get a reference to the QP notification channel client */
         auto & qnc = m_qpn_to_qp.at(qpn);

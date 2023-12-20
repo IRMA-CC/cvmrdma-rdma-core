@@ -34,7 +34,7 @@ static void * cq_server_loop(void * args)
     struct ibv_cq * cq = server->cq;
     NotificationQueueManager * nqm = server->nqm;
     struct verbs_context * ctxt = verbs_get_ctx(cq->context);
-
+    
     int err;
 
     struct ibv_wc wcs[CQ_SERVER_NUM_WCS];
@@ -49,6 +49,10 @@ static void * cq_server_loop(void * args)
             fprintf(stderr, "CQ server error: poll CQ failed %d\n", err);
             return (void*)err;
         }
+        if(nwcs > 0)
+        {
+            DEBUG("[CQ] polled %d\n", nwcs);
+        }
 
         for(int i = 0 ; i < nwcs ; i++)
         {
@@ -62,6 +66,8 @@ static void * cq_server_loop(void * args)
             uint32_t wc_length = this_wc->byte_len;
             uint32_t qpn = this_wc->qp_num;
 
+            DEBUG("[CQ] WRID = 0x%" PRIx64 "\n", this_wc->wr_id);
+
             if(status != IBV_WC_SUCCESS)
             {
                 fprintf(stderr, "CQ server WARN: WC reports failure\n");
@@ -69,60 +75,68 @@ static void * cq_server_loop(void * args)
                 continue;
             }
 
-            if(op != IBV_WC_RDMA_WRITE)
+            if(op == IBV_WC_RDMA_WRITE)
+            {
+                DEBUG("[CQ] WRITE done\n");
+            }
+            else if (op == IBV_WC_RECV_RDMA_WITH_IMM)
+            {
+                DEBUG("[CQ] Recv IMM\n");
+            }
+            else
             {
                 fprintf(stderr, "CQ server ERROR: received op %d, for now only RDMA WRITE is supported\n", op);
-                return (void*)EINVAL;
+                continue;
             }
 
             if(! (wc_flags & IBV_WC_WITH_IMM))
             {
-                fprintf(stderr, "CQ server ERROR: the server expects all WRITEs to report a MAC in the immediate value, "
+                /* XXX: is this accurate? is WITH_IMM set for sender AND receiver ??*/
+                fprintf(stderr, "CQ server WARN: the server expects all WRITEs to report a MAC in the immediate value, "
                                 "but this completion has no immedite\n");
-                return (void*)EINVAL;
             }
 
 
             if (op == IBV_WC_RECV_RDMA_WITH_IMM)
             {
-            /* A WRITE has happened in a bounce buffer. To have enough information to decrypt this
-            payload into the user region, retrieve the RPC notification on the corresponding QP */
-            
-            NotificationQueue * nq = nq_manager_get_queue(nqm, qpn);
-            assert(nq);
+                /* A WRITE has happened in a bounce buffer. To have enough information to decrypt this
+                payload into the user region, retrieve the RPC notification on the corresponding QP */
+                
+                NotificationQueue * nq = nq_manager_get_queue(nqm, qpn);
+                assert(nq);
 
-            /* Read the front of the queue inplace */
-            struct cq_server_notification const * notification = notification_queue_front(nq);
+                /* Read the front of the queue inplace */
+                struct cq_server_notification const * notification = notification_queue_front(nq);
 
-            void * bounce_addr = notification->bounce_addr;
-            void * user_addr = notification->user_addr;
-            size_t length = notification->length;
+                void * bounce_addr = notification->bounce_addr;
+                void * user_addr = notification->user_addr;
+                size_t length = notification->length;
                 unsigned int nonce_counter = notification->nonce_counter;
-            uint32_t user_imm = notification->imm;
+                uint32_t user_imm = notification->imm;
                 bool has_imm = notification->has_imm;
 
-            unsigned char nonce[3] = {
+                unsigned char nonce[3] = {
                     0xFFu & (nonce_counter >> 0),
                     0xFFu & (nonce_counter >> 8),
                     0xFFu & (nonce_counter >> 16),
-            };
+                };
 
-            unsigned char mac[2] = {
+                unsigned char mac[2] = {
                     0xFFu & (protocol_imm >> 0),
                     0xFFu & (protocol_imm >> 8)
-            };
+                };
 
-            assert(length == wc_length);
+                assert(length == wc_length);
 
-            DEBUG("Decrypting %zu B from %p to %p with nonce %x %x %x ; mac = %x %x\n", length, bounce_addr, user_addr, nonce[0], nonce[1], nonce[2], mac[0], mac[1]);
+                DEBUG("Decrypting %zu B from %p to %p with nonce %x %x %x ; mac = %x %x\n", length, bounce_addr, user_addr, nonce[0], nonce[1], nonce[2], mac[0], mac[1]);
 
-            /* TODO: decrypt !*/
-            memcpy(user_addr, bounce_addr, length);
+                /* TODO: decrypt !*/
+                memcpy(user_addr, bounce_addr, length);
 
-            /* Pop the entry after use */
-            notification_queue_pop(nq);
+                /* Pop the entry after use */
+                notification_queue_pop(nq);
 
-            /* TODO: push a WC to a queue pollable by user with the user_imm !*/
+                /* TODO: push a WC to a queue pollable by user with the user_imm !*/
                 DEBUG("WARN: dropping IMM from WRITE notification! Imm = 0x%" PRIx32 " valid = %d\n", user_imm, has_imm);
             }
         }

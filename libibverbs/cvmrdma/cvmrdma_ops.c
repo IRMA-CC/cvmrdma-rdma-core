@@ -160,6 +160,8 @@ static int cvmrdma_modify_qp(struct ibv_qp *ibqp, struct ibv_qp_attr *attr,
 				assert(attr_mask & IBV_QP_DEST_QPN);
 				uint32_t dest_qpn = attr->dest_qp_num;
 
+				DEBUG("Obtain notification channel cap from remote for its QP with QPN 0x%" PRIx32 "\n", dest_qpn);
+
 				/* Blocking: get the qp notifier capability from the remote over the network */
 				qp->remote_qnc = get_qp_notification_client(vctxt->cvmrdma.network_client_connection, vctxt->cvmrdma.network_client_cap, dest_qpn);
 
@@ -247,11 +249,11 @@ static int post_send_do_bounce(struct ibv_qp *ibqp, struct ibv_send_wr *wrs, str
 
 				/* Compute the nonce to use for the encryption from the counter*/
 				uint32_t nonce_counter = qp->tx_ctr++;
-				unsigned char nonce[3] = {
+                unsigned char nonce[3] = {
                     0xFFu & (nonce_counter >> 0),
                     0xFFu & (nonce_counter >> 8),
                     0xFFu & (nonce_counter >> 16),
-				};
+                };
 
 				/* HACK: fake mac to check transmission */
 				unsigned char mac[2] = {0x20, 0x10};
@@ -317,6 +319,7 @@ static int cvmrdma_post_send(struct ibv_qp *ibqp, struct ibv_send_wr *wr,
 	ret = post_send_do_bounce(ibqp, wr, bad_wr);
 	if(ret < 0)
 	{
+		fprintf(stderr, "Failed to bounce before send!\n");
 		return ret;
 	}
 

@@ -2,9 +2,9 @@
 
 #include <stdio.h>
 #ifdef NDEBUG
-    #define _PRINT_DEBUGS_BOOL false
+    #define _PRINT_DEBUGS_BOOL 0
 #else
-    #define _PRINT_DEBUGS_BOOL true
+    #define _PRINT_DEBUGS_BOOL 1
 #endif
 
 #define DEBUG(format, ...) \
