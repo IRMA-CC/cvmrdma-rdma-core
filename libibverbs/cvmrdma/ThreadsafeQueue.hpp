@@ -1,0 +1,74 @@
+#pragma once
+
+#include <deque>
+#include <mutex>
+#include <condition_variable>
+
+
+/* Single consumer, multi producer queue */
+template <typename T> 
+class ThreadsafeQueue
+{
+public:
+    void push(T && item)
+    {
+        auto locked = std::scoped_lock{m_lock};
+        m_queue.push_back(std::move(item));
+
+        m_queue_has_data_cv.notify_one();
+    }
+
+    void push(T const & item)
+    {
+        auto locked = std::scoped_lock{m_lock};
+        m_queue.push_back(item);
+
+        m_queue_has_data_cv.notify_one();
+    }
+
+    T & front()
+    {
+        auto locked = std::unique_lock{m_lock};
+        if(m_queue.empty())
+        {
+            while(m_queue.empty())
+            {
+                m_queue_has_data_cv.wait(locked);
+            }
+        }
+
+        /* Reference stays valid even without lock because there is a
+            single consumer */
+        return m_queue.front();
+    }
+
+    int pop_n_into(T * dest, int n)
+    {
+        auto locked = std::unique_lock{m_lock};
+
+        int i = 0;
+        while((i < n) && (! m_queue.empty()) )
+        {
+            dest[i] = m_queue.front();
+            m_queue.pop_front();
+            i++;
+        }
+
+        return i;
+    }
+
+    void pop()
+    {
+        auto locked = std::scoped_lock{m_lock};
+        m_queue.pop_front();
+
+        /* No need to notify_one after pop, there is a single consummer, no one
+            else is waiting. */
+    }
+
+
+private:
+    std::deque<T> m_queue;
+    std::condition_variable m_queue_has_data_cv;
+    std::mutex m_lock;
+};

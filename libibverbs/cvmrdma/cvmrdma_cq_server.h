@@ -20,6 +20,7 @@
 
 #include "qp_metadata_manager.h"
 #include "bounce_metadata.h"
+#include "wc_queue.h"
 
 typedef struct CQServer
 {
@@ -29,6 +30,8 @@ typedef struct CQServer
     /* Map to the notification channels for the QPs using this CQ */
     QPMetadataManager * qp_metadata_manager;
 
+    /* Pass WCs to the upper level through this queue */
+    WCQueue * wc_queue;
 } CQServer;
 
 

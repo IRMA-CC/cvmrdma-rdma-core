@@ -182,6 +182,7 @@ struct verbs_cq {
 
 	CQServer cvmrdma_cq_server;
 	pthread_t cvmrdma_cq_server_thread;
+	WCQueue * wc_queue;
 };
 
 enum ibv_flow_action_type {

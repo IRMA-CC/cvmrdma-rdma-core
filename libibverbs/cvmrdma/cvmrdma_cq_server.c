@@ -35,6 +35,7 @@ static void * cq_server_loop(void * args)
     struct verbs_cq * cq = (struct verbs_cq *)ibcq;
     QPMetadataManager * qp_metadata_manager = server->qp_metadata_manager;
     struct verbs_context * ctxt = verbs_get_ctx(ibcq->context);
+    WCQueue * wcq = cq->wc_queue;
     
     int err;
 
@@ -73,6 +74,7 @@ static void * cq_server_loop(void * args)
             {
                 fprintf(stderr, "CQ server WARN: WC reports failure\n");
                 /* TODO: pass failure to normal poll_cq */
+                wcq_push(wcq, this_wc);
                 continue;
             }
 
@@ -87,6 +89,7 @@ static void * cq_server_loop(void * args)
             else
             {
                 fprintf(stderr, "CQ server ERROR: received op %d, for now only RDMA WRITE is supported\n", op);
+                wcq_push(wcq, this_wc);
                 continue;
             }
 
@@ -148,9 +151,15 @@ static void * cq_server_loop(void * args)
                 /* Pop the entry after use */
                 notification_queue_pop(nq);
 
-                /* TODO: push a WC to a queue pollable by user with the user_imm !*/
-                DEBUG("WARN: dropping IMM from WRITE notification! Imm = 0x%" PRIx32 " valid = %d\n", user_imm, has_imm);
+
+                /* Modify the WC to report correct immediate to user */
+                this_wc->imm_data = user_imm;            
             }
+
+
+            /* Notify the user with the (potentially modified) WC */
+            wcq_push(wcq, this_wc);
+
         }
     }
 

@@ -12,6 +12,7 @@
 #include "cvmrdma_network_client.h"
 #include "cvmrdma_network_server.h"
 #include "notification_queue.h"
+#include "wc_queue.h"
 
 #include "debug.h"
 
@@ -65,6 +66,8 @@ static struct ibv_cq *cvmrdma_create_cq(struct ibv_context *context, int cqe,
     }
 
 	struct verbs_cq * cq = (struct verbs_cq *)ibcq;
+
+	cq->wc_queue = alloc_wc_queue();
 
 	/* Initialize the CQ polling server */
 	cq_server_context_init(&cq->cvmrdma_cq_server, ibcq);
@@ -183,6 +186,15 @@ static int cvmrdma_modify_qp(struct ibv_qp *ibqp, struct ibv_qp_attr *attr,
 err:
     return ret;
 }
+
+
+/* Poll the WCs that are passed by the CQ server. */
+static int cvmrdma_poll_cq(struct ibv_cq * ibcq, int num_entries, struct ibv_wc *wc)
+{
+	struct verbs_cq * cq = (struct verbs_cq *)ibcq;
+	return wcq_pop_into(cq->wc_queue, wc, num_entries);
+}
+
 
 static int cvmrdma_post_recv(struct ibv_qp *ibqp, struct ibv_recv_wr *wr,
 		struct ibv_recv_wr **bad_wr)
@@ -472,7 +484,7 @@ struct verbs_context_ops cvmrdma_ops = {
     // .destroy_qp = cvmrdma_destroy_qp,
     // .free_context = cvmrdma_free_context,
     .modify_qp = cvmrdma_modify_qp,
-    // .poll_cq = cvmrdma_poll_cq,
+    .poll_cq = cvmrdma_poll_cq,
     .post_recv = cvmrdma_post_recv,
     .post_send = cvmrdma_post_send,
 	.query_device_ex = cvmrdma_query_device_ex,
