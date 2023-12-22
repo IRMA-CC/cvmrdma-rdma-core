@@ -582,6 +582,10 @@ set_target_properties(CapnProto::capnpc_capnp PROPERTIES
 )
 
 
+# Libsodim
+find_package(Sodium MODULE REQUIRED)
+
+
 #-------------------------
 # Apply fixups
 
