@@ -91,13 +91,14 @@ PRIVATE
 )
 
 
-target_link_libraries(ibverbs LINK_PRIVATE
+target_link_libraries(ibverbs PRIVATE
   ${NL_LIBRARIES}
   ${CMAKE_THREAD_LIBS_INIT}
   ${CMAKE_DL_LIBS}
   kern-abi
 
   CapnProto::capnp-rpc
+  Sodium::sodium
   )
 
 
