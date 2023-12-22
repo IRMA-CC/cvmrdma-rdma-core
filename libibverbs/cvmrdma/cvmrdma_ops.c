@@ -92,10 +92,39 @@ err:
 }
 
 
+static int attach_qp_to_cq(struct verbs_context * ctxt, struct ibv_pd *pd, struct verbs_qp * qp, struct ibv_cq * ibcq)
+{
+	/* Add this QP to the CQ server. This gives us one end of the notification
+	   channel ; the RPC server will push notifications there.
+	    The    
+	 */
+	assert(ibcq);
+	struct verbs_cq * cq = (struct verbs_cq *)ibcq;
+
+	struct ibv_qp * ibqp = &qp->qp;
+	DEBUG("Create notification queue ->CQ server for QPN %" PRIx32 "\n", ibqp->qp_num);
+	NotificationQueue * nq = cq_server_add_qp(&cq->cvmrdma_cq_server, ibqp->qp_num);
+    if(! nq)
+    {
+        fprintf(stderr, "failed to register QP on CQ server\n");
+        return -1;
+    }
+
+	/* Create the corresponding RPC object. Pass the end of the notification channel here.
+	   No risk of a race: we haven't returned the QPN to the user yet, the remote cannot possibly
+	   know it yet.
+	*/
+	DEBUG("Create QpNotificationChannel cap QNC using notification queue\n");
+	cvmrdma_server_register_qp(ctxt->cvmrdma.network_server, pd->bounce_metadata, nq, ibqp->qp_num);
+
+	return 0;
+}
+
 static struct ibv_qp *cvmrdma_create_qp(struct ibv_pd *pd,
 				struct ibv_qp_init_attr *attr)
 {
     struct verbs_context * ctxt = verbs_get_ctx(pd->context);
+	int err;
 
     struct ibv_qp * ibqp = ctxt->cvmrdma.create_qp(pd, attr);
     if(! ibqp)
@@ -105,24 +134,30 @@ static struct ibv_qp *cvmrdma_create_qp(struct ibv_pd *pd,
 
 	struct verbs_qp * qp = (struct verbs_qp *)ibqp;
 
-	/* Add this QP to the CQ server. This gives us one end of the notification
-	   channel ; the RPC server will push notifications there */
-	struct ibv_cq * send_ibcq = attr->send_cq;
-	assert(send_ibcq);
-	struct verbs_cq * send_cq = (struct verbs_cq *)send_ibcq;
+	struct ibv_cq * rcq = attr->recv_cq;
+	struct ibv_cq * scq = attr->send_cq;
 
-	NotificationQueue * nq = cq_server_add_qp(&send_cq->cvmrdma_cq_server, ibqp->qp_num);
-    if(! nq)
+	/*  recv_cq is necessary: we need to decrypt on recv.
+	    send cq is optionnal.
+	    XXX: if a CQ is only used for sends (even for multiple QPs), then it could bypass
+	    the CQ server    
+	*/
+
+	err = attach_qp_to_cq(ctxt, pd, qp, rcq);
+	if(err)
+	{
+		fprintf(stderr, "Failed to attach QP %" PRIx32 " to its recv cq (%d)\n", ibqp->qp_num, err);
+		goto free_qp;
+	}
+	if(scq && (scq != rcq))
+	{
+		err = attach_qp_to_cq(ctxt, pd, qp, scq);
+		if(err)
     {
-        fprintf(stderr, "failed to register QP on CQ server\n");
+			fprintf(stderr, "Failed to attach QP %" PRIx32 " to its send cq (%d)\n", ibqp->qp_num, err);
         goto free_qp;
     }
-
-	/* Create the corresponding RPC object. Pass the end of the notification channel here.
-	   No risk of a race: we haven't returned the QPN to the user yet, the remote cannot possibly
-	   know it yet.
-	*/
-	cvmrdma_server_register_qp(ctxt->cvmrdma.network_server, pd->bounce_metadata, nq, ibqp->qp_num);
+	}
 
 	/* We can only get the capability to the remote QP once we know its QPN, this will be done
 	   in modify_qp */
