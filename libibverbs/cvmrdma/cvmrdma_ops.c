@@ -556,6 +556,14 @@ static struct verbs_context *cvmrdma_alloc_context(struct ibv_device *ibdev,
 		goto err;
 	}
 
+	/* Initialize cryptographic APIs (can be called multiple times) */
+	if (sodium_init() < 0) {
+		fprintf(stderr, "ERROR: Failed to initialize cryptographic APIs.\n");
+		goto err;
+	}
+
+
+
     /* Allocate provider context */
     struct verbs_context * context = vdev->cvmrdma.alloc_context(ibdev, cmd_fd, private_data);
     if(! context) {
