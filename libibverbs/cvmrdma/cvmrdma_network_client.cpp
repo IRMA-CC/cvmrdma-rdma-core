@@ -1,6 +1,74 @@
 #include "cvmrdma_network_client.h"
 
+#include <mutex>
+#include <condition_variable>
+#include <thread>
+
 #include "debug.h"
+
+#include <sodium.h>
+
+
+/* Option 1: an event loop with its own capnp client session and client cap runs in a deicated thread */
+
+static void client_event_loop(std::stop_token stoken,
+    char const * server_addr,
+    kj::Executor const ** client_evloop_executor, std::condition_variable * executor_cv, std::mutex * executor_lock
+    )
+{
+
+    /* Create a channel to ask the client to stop: on stop request,
+       the promise in the pair will be fulfilled. */
+    auto stop_paf = kj::newPromiseAndFulfiller<void>();
+    auto stop_cb = std::stop_callback(stoken,
+        [&](){ stop_paf.fulfiller->fulfill(); }
+    );
+
+    DEBUG("Starting capnp client thread, connecting to '%s'\n", server_addr);
+
+
+    auto session = ClientSession{server_addr};
+    auto cvmrda_client = CVMRDMAClient{session.getMain<CVMRDMA>()};
+
+    /* Pass executor to caller */
+    {
+        auto locked = std::unique_lock{*executor_lock};
+        *client_evloop_executor = &kj::getCurrentThreadExecutor();
+    }
+    executor_cv->notify_one();
+
+    stop_paf.promise.wait(session.getWaitScope());
+}
+
+class ClientEvloopThread
+{
+public:
+    ClientEvloopThread(char const * server_addr)
+    {
+        m_thread = std::jthread{client_event_loop, server_addr, &m_client_executor, &m_executor_set_cv, &m_executor_lock};
+    }
+
+    /* Blocks until the client thread has passed us a pointer to its executor, then returns this pointer */
+    kj::Executor const & get_client_thread_executor(void)
+    {
+        auto locked = std::unique_lock{m_executor_lock};
+        while(! m_client_executor)
+        {
+            m_executor_set_cv.wait(locked);
+        }
+        return *m_client_executor;
+    }
+
+private:
+    std::jthread m_thread;
+
+    kj::Executor const * m_client_executor = nullptr;
+    std::condition_variable m_executor_set_cv;
+    std::mutex m_executor_lock;
+};
+
+
+/* Option 2: client session and client cap are used on the main thread */
 
 ClientSession * cvmrdma_start_session(char const * server_addr)
 {
@@ -63,8 +131,8 @@ void remote_qp_notify_write_rpc_add_to_taskset(taskset_t * taskset, QPNotificati
     req.setMac1(mac[1]);
     req.setMac2(mac[2]);
     req.setMac3(mac[3]);
-    
-    auto rep = req.send();
 
+    auto rep = req.send();
+    
     taskset->add(rep.ignoreResult());
 }
