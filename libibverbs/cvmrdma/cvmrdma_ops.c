@@ -12,6 +12,7 @@
 #include "cvmrdma_network_client.h"
 #include "cvmrdma_network_server.h"
 #include "notification_queue.h"
+#include "taskset_wrapper.h"
 #include "wc_queue.h"
 
 #include "debug.h"
@@ -210,11 +211,11 @@ static int cvmrdma_post_recv(struct ibv_qp *ibqp, struct ibv_recv_wr *wr,
 }
 
 
-static int post_send_do_bounce(struct ibv_qp *ibqp, struct ibv_send_wr *wrs, struct ibv_send_wr **bad_wr)
+static int post_send_do_bounce(taskset_t * tk, struct ibv_qp *ibqp, struct ibv_send_wr *wrs, struct ibv_send_wr **bad_wr)
 {
     struct verbs_qp * qp = (struct verbs_qp *)ibqp;
 	struct ibv_pd * pd = ibqp->pd;
-	struct verbs_context * ctx = verbs_get_ctx(ibqp->context);
+	int err;
 
 	if(ibqp->qp_type != IBV_QPT_RC)
 	{
@@ -245,16 +246,6 @@ static int post_send_do_bounce(struct ibv_qp *ibqp, struct ibv_send_wr *wrs, str
 
 				uint32_t imm = ntohl(this_wr->imm_data);
 				bool has_imm = (this_op == IBV_WR_RDMA_WRITE_WITH_IMM);
-
-				/* Before doing anything, we can already notify the remote of the upcoming write */
-				remote_qp_notify_write_rpc(
-					ctx->cvmrdma.network_client_connection, qp->remote_qnc,
-					sge.addr,
-					sge.length,
-					rkey,
-					imm,
-					has_imm
-				);
 
 				/* Identify the local MR from the lkey and find the corresponding bounce buffer */
 				struct bounce_entry bounce_info = get_bounce_metadata_for_lkey(pd->bounce_metadata, sge.lkey);
@@ -319,8 +310,8 @@ static int post_send_do_bounce(struct ibv_qp *ibqp, struct ibv_send_wr *wrs, str
 				this_wr->imm_data = mac_imm;
 
 				/* Before doing anything, we can already notify the remote of the upcoming write */
-				remote_qp_notify_write_rpc(
-					ctx->cvmrdma.network_client_connection, qp->remote_qnc,
+				remote_qp_notify_write_rpc_add_to_taskset(
+					tk,
 					qp->remote_qnc,
 					sge.addr,
 					sge.length,
@@ -362,18 +353,28 @@ static int cvmrdma_post_send(struct ibv_qp *ibqp, struct ibv_send_wr *wr,
 	- xchachapoly1305 the plaintext region to the bounce buffer,
 	  keeping the same offset
 	- change WRITE into WRITE_WITH_IMM to notify the remote.
-	- send the MAC as the immediate.
+	- RPC send the dest hca_addr, rkey, imm, MAC, nonce
 	*/
 
-	ret = post_send_do_bounce(ibqp, wr, bad_wr);
+	/* Schedule the notification on a tasket BUT do not send them yet. Sending
+	   is blocking, we can instead start the RDMA transfer (which does not block
+	   the CPU) and then start to send the notifications)*/
+	taskset_t * tk = taskset_alloc(vctxt->cvmrdma.taskset_error_handler);
+
+	ret = post_send_do_bounce(tk, ibqp, wr, bad_wr);
 	if(ret < 0)
 	{
+		taskset_free(tk);
 		fprintf(stderr, "Failed to bounce before send!\n");
-		return ret;
+		goto ret;
 	}
 
     ret = vctxt->cvmrdma.post_send(ibqp, wr, bad_wr);
 
+	taskset_wait(vctxt->cvmrdma.network_client_connection, tk);
+ret:
+	/* Free the tk after use */
+	taskset_free(tk);
     return ret;
 
 /* XXX: do error handling here, if the send fails then things are
@@ -537,6 +538,7 @@ static struct verbs_context *cvmrdma_alloc_context(struct ibv_device *ibdev,
 	/* Get the root capability to the remote's RPC's API */
 	context->cvmrdma.network_client_cap = cvmrdma_client_init(context->cvmrdma.network_client_connection);
 	
+	context->cvmrdma.taskset_error_handler = taskset_error_handler_alloc();
 
 	return context;
 

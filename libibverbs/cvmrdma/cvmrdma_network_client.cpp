@@ -43,7 +43,7 @@ QPNotificationClient * get_qp_notification_client(ClientSession * session, CVMRD
 
 
 
-void remote_qp_notify_write_rpc(ClientSession * session, QPNotificationClient * qnc, uint64_t hca_addr, uint64_t length, uint32_t rkey, uint32_t imm, bool has_imm)
+void remote_qp_notify_write_rpc_add_to_taskset(taskset_t * taskset, QPNotificationClient * qnc, uint64_t hca_addr, uint64_t length, uint32_t rkey, uint32_t imm, bool has_imm, uint64_t const * nonce, uint64_t const * mac)
 {
     DEBUG("remote_qp_notify_write_rpc\n");
 
@@ -66,9 +66,5 @@ void remote_qp_notify_write_rpc(ClientSession * session, QPNotificationClient * 
     
     auto rep = req.send();
 
-    /* TODO: run a client event loop in another thread and
-       use kj::Executor https://github.com/capnproto/capnproto/blob/0050fd757683f140b4a07fdc3eab986db0d00c8d/c++/src/kj/async.h#L753 
-    */
-    DEBUG("WARN: waiting on the IP promise, designed to happen in parallel!\n");
-    rep.wait(session->getWaitScope());
+    taskset->add(rep.ignoreResult());
 }

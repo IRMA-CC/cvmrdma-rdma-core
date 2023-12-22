@@ -2181,6 +2181,7 @@ struct verbs_context {
 		struct CVMRDMAServer * network_server;
 		struct ClientSession * network_client_connection;
 		struct CVMRDMAClient * network_client_cap;
+		struct taskset_error_handler_t * taskset_error_handler; 
 
 
 	} cvmrdma;
