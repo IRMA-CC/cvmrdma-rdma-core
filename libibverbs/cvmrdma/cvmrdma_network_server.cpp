@@ -33,6 +33,7 @@ public:
     kj::Promise<void> notifyWrite(NotifyWriteContext context) override
     {
         DEBUG("[QPN %" PRIx32 "] notifyWrite\n", m_qpn);
+        TIMING("notif_srv_t0");
 
         auto p = context.getParams();
         uint64_t length = p.getLength();
@@ -78,6 +79,8 @@ public:
         mac64[1] = p.getMac1();
         mac64[2] = p.getMac2();
         mac64[3] = p.getMac3();
+
+        TIMING("notif_srv_push");
         notification_queue_push(m_notification_queue, std::move(notification));
         TIMING("notif_srv_done");
 
@@ -190,7 +193,7 @@ public:
                     fprintf(stderr, "QpNotificationChannel for QPN %" PRIx32 " is NOT a local server\n", local_qpn);
                 }
 
-        return kj::READY_NOW;
+                return kj::READY_NOW;
             }
         );
     }

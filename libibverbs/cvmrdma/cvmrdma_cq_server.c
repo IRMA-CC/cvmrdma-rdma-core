@@ -36,7 +36,7 @@ static void * cq_server_loop(void * args)
     QPMetadataManager * qp_metadata_manager = server->qp_metadata_manager;
     struct verbs_context * ctxt = verbs_get_ctx(ibcq->context);
     WCQueue * wcq = cq->wc_queue;
-    
+
     int err;
 
     struct ibv_wc wcs[CQ_SERVER_NUM_WCS];
@@ -58,12 +58,12 @@ static void * cq_server_loop(void * args)
 
         for(int i = 0 ; i < nwcs ; i++)
         {
+            TIMING("cqs_wc");
             struct ibv_wc * this_wc = &wcs[i];
             enum ibv_wc_status status = this_wc->status;
             enum ibv_wc_opcode op = this_wc->opcode;
             unsigned int wc_flags = this_wc->wc_flags;
-            /* The user-defined immediate is sent on the other channel,
-            the imm in the WC is the mac added by the protocol */
+            /* The user-defined immediate is sent on the other channel, the imm in the WC is unused for now! */
             __be32 protocol_imm = this_wc->imm_data;
             uint32_t wc_length = this_wc->byte_len;
             uint32_t qpn = this_wc->qp_num;
@@ -128,6 +128,7 @@ static void * cq_server_loop(void * args)
                 DEBUG("Decrypting %zu B from %p to %p\n", length, bounce_addr, user_addr);
                 DEBUG("nonce %lx %lx %lx %lx ; mac = %lx %lx %lx %lx\n", nonce[0], nonce[1], nonce[2], nonce[3], mac[0], mac[1], mac[2], mac[3]);
 #ifndef CVMRDMA_DUMMY_BOUNCE
+                TIMING("dec_t0");
                 err = crypto_aead_aegis256_decrypt_detached(
                     user_addr, NULL,
                     bounce_addr, length,

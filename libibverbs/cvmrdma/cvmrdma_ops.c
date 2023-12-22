@@ -153,10 +153,10 @@ static struct ibv_qp *cvmrdma_create_qp(struct ibv_pd *pd,
 	{
 		err = attach_qp_to_cq(ctxt, pd, qp, scq);
 		if(err)
-    {
+		{
 			fprintf(stderr, "Failed to attach QP %" PRIx32 " to its send cq (%d)\n", ibqp->qp_num, err);
-        goto free_qp;
-    }
+			goto free_qp;
+		}
 	}
 
 	/* We can only get the capability to the remote QP once we know its QPN, this will be done
@@ -313,6 +313,7 @@ static int post_send_do_bounce(taskset_t * tk, struct ibv_qp *ibqp, struct ibv_s
 					(unsigned char *)nonce,
 					(unsigned char const *)tx_key
 				);
+				TIMING("enc_t1");
 				if(err)
 				{
 					fprintf(stderr, "ERROR: Failed to encrypt WR.\n");
@@ -344,6 +345,7 @@ static int post_send_do_bounce(taskset_t * tk, struct ibv_qp *ibqp, struct ibv_s
 				this_wr->opcode = IBV_WR_RDMA_WRITE_WITH_IMM;
 				this_wr->imm_data = mac_imm;
 
+				TIMING("notif_lazy");
 				/* Before doing anything, we can already notify the remote of the upcoming write */
 				remote_qp_notify_write_rpc_add_to_taskset(
 					tk,
@@ -378,12 +380,12 @@ static int cvmrdma_post_send(struct ibv_qp *ibqp, struct ibv_send_wr *wr,
     struct verbs_context * vctxt = verbs_get_ctx(ibqp->context);
     int ret = 0;
 
+	TIMING("post_send_t0");
+
     /*
 	CVMRDMA: do the bounce and modify the WRs to use the bounce buffers
     
     on WRITE
-	- RPC send the dest hca_addr, rkey, imm (before starting encryption, to
-	  give IP based RPC a head start)
 	- find the local (base_addr, bounce_addr) for lkey
 	- xchachapoly1305 the plaintext region to the bounce buffer,
 	  keeping the same offset
@@ -404,9 +406,14 @@ static int cvmrdma_post_send(struct ibv_qp *ibqp, struct ibv_send_wr *wr,
 		goto ret;
 	}
 
+	TIMING("send_prov");
     ret = vctxt->cvmrdma.post_send(ibqp, wr, bad_wr);
 
+	/* Now schedule the notification and wait for them to be delivered */
+	TIMING("notif_wait");
 	taskset_wait(vctxt->cvmrdma.network_client_connection, tk);
+	TIMING("notif_done");
+
 ret:
 	/* Free the tk after use */
 	taskset_free(tk);
@@ -448,6 +455,9 @@ static struct ibv_mr *cvmrdma_reg_mr(struct ibv_pd *pd, void *addr, size_t lengt
         uint64_t hca_va, int access)
 {
     struct verbs_context * vctxt = verbs_get_ctx(pd->context);
+
+	/* TODO: add a secondary buffer in public memory where the encrypted payload will be
+	   copied from/to to avoid TOCTOU attacks. register _this secundary buffer_ as an MRs */
 
 	int bounce_prots;
 	void *bounce;
