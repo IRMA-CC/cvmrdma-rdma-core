@@ -22,7 +22,11 @@ publish_internal_headers(infiniband/cvmrdma
   cvmrdma/cvmrdma_network_client.h
   cvmrdma/bounce_metadata.h
   cvmrdma/notification_queue.h
+  cvmrdma/notification_queue.hpp
   cvmrdma/cvmrdma_ops.h
+  cvmrdma/qp_metadata_manager.h
+  cvmrdma/taskset_wrapper.h
+  cvmrdma/wc_queue.h
 )
 
 configure_file("libibverbs.map.in"
@@ -75,8 +79,11 @@ rdma_library(ibverbs "${CMAKE_CURRENT_BINARY_DIR}/libibverbs.map"
   cvmrdma/cvmrdma_cq_server.c
   cvmrdma/cvmrdma_network_client.cpp
   cvmrdma/cvmrdma_network_server.cpp
-  cvmrdma/notification_queue.cpp
   cvmrdma/cvmrdma_ops.c
+  cvmrdma/notification_queue.cpp
+  cvmrdma/qp_metadata_manager.cpp
+  cvmrdma/taskset_wrapper.cpp
+  cvmrdma/wc_queue.cpp
 
   
   ${CAPNP_SRCS}
