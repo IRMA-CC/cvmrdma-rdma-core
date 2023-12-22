@@ -5,6 +5,8 @@
 #include <sys/mman.h>
 #include <arpa/inet.h> /* ntohl */
 
+#include <sodium.h>
+
 #include "bounce_metadata.h"
 #include "cvmrdma_cq_server.h"
 #include "cvmrdma_network_client.h"
@@ -121,7 +123,10 @@ static struct ibv_qp *cvmrdma_create_qp(struct ibv_pd *pd,
 	/* We can only get the capability to the remote QP once we know its QPN, this will be done
 	   in modify_qp */
 	qp->remote_qnc = NULL;
-	qp->tx_ctr = 0;
+
+	/* Generate a random key */
+	randombytes_buf(qp->tx_key, sizeof(qp->tx_key));
+
 
 	return ibqp;
 
@@ -162,9 +167,8 @@ static int cvmrdma_modify_qp(struct ibv_qp *ibqp, struct ibv_qp_attr *attr,
 
 				DEBUG("Obtain notification channel cap from remote for its QP with QPN 0x%" PRIx32 "\n", dest_qpn);
 
-				/* Blocking: get the qp notifier capability from the remote over the network */
-				qp->remote_qnc = get_qp_notification_client(vctxt->cvmrdma.network_client_connection, vctxt->cvmrdma.network_client_cap, dest_qpn);
-
+				/* Blocking: get the qp notifier capability from the remote over the network and share the Tx key with the remote */
+				qp->remote_qnc = get_qp_notification_client(vctxt->cvmrdma.network_client_connection, vctxt->cvmrdma.network_client_cap, dest_qpn, qp->tx_key);
 				break;
 			}
 			default: {
@@ -247,24 +251,45 @@ static int post_send_do_bounce(struct ibv_qp *ibqp, struct ibv_send_wr *wrs, str
 				void * user_start = bounce_info.user_buffer + offt;
 				void * bounce_start = bounce_info.bounce_buffer + offt;
 
-				/* Compute the nonce to use for the encryption from the counter*/
-				uint32_t nonce_counter = qp->tx_ctr++;
-                unsigned char nonce[3] = {
-                    0xFFu & (nonce_counter >> 0),
-                    0xFFu & (nonce_counter >> 8),
-                    0xFFu & (nonce_counter >> 16),
-                };
+				/* Store the nonce and the mac word aligned to make serialization easier */
+				uint64_t nonce[crypto_aead_aegis256_NPUBBYTES / sizeof(uint64_t)];
+				uint64_t mac[crypto_aead_aegis256_ABYTES / sizeof(uint64_t)];
 
-				/* HACK: fake mac to check transmission */
-				unsigned char mac[2] = {0x20, 0x10};
+				/* Generate the nonce to use for the encryption */
+				randombytes_buf(nonce, sizeof(nonce));
 
+				uint64_t const * tx_key = qp->tx_key;
 
-        		DEBUG("Encrypting 0x%" PRIx32 " B from %p to %p with nonce %x %x %x\n", sge.length, user_start, bounce_start, nonce[0], nonce[1], nonce[2]);
+        		DEBUG("Encrypting 0x%" PRIx32 " B from %p to %p with nonce %lx %lx %lx %lx\n", sge.length, user_start, bounce_start, nonce[0], nonce[1], nonce[2], nonce[3]);
+#ifndef CVMRDMA_DUMMY_BOUNCE
+				/* TODO TOCTOU bounce !!!!*/
+				unsigned long long maclen = sizeof(mac);
+				
+				TIMING("enc_t0");
+				err = crypto_aead_aegis256_encrypt_detached(
+					bounce_start,
+					(unsigned char *)mac, &maclen,
+					user_start, sge.length,
+					NULL, 0,
+					NULL,
+					(unsigned char *)nonce,
+					(unsigned char const *)tx_key
+				);
+				if(err)
+				{
+					fprintf(stderr, "ERROR: Failed to encrypt WR.\n");
+					*bad_wr = this_wr;
+					return -1;
+				}
 
-				/* TODO: encrypt instead of copy! Populate mac */
+#else
 				memcpy(bounce_start, user_start, sge.length);
-
-				DEBUG("mac = %x %x\n", mac[0], mac[1]);
+				memset(mac, 0x01, sizeof(mac));
+				mac[0] = 0x11223344;
+				unsigned long long maclen = sizeof(mac);
+#endif
+				assert(maclen == sizeof(mac));
+				DEBUG("mac = %lx %lx %lx %lx\n", mac[0], mac[1], mac[2], mac[3]);
 
 				/* After the bounce, the sg-list in the WR is valid.
 				   We need to notify the remote of the incoming payload and send the MAC.
@@ -281,6 +306,18 @@ static int post_send_do_bounce(struct ibv_qp *ibqp, struct ibv_send_wr *wrs, str
 				this_wr->opcode = IBV_WR_RDMA_WRITE_WITH_IMM;
 				this_wr->imm_data = mac_imm;
 
+				/* Before doing anything, we can already notify the remote of the upcoming write */
+				remote_qp_notify_write_rpc(
+					ctx->cvmrdma.network_client_connection, qp->remote_qnc,
+					qp->remote_qnc,
+					sge.addr,
+					sge.length,
+					rkey,
+					imm,
+					has_imm,
+					nonce,
+					mac
+				);
 
 				break;
 			}

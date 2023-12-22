@@ -5,35 +5,36 @@
 #include <stdbool.h>
 #include <pthread.h>
 
+#include <sodium.h>
+
+#include <infiniband/driver.h>
 #include "debug.h"
 
 /*
-    HACKY: we use the CQ's public interface to do the polling !
-    This means that if a user polls the same CQ, everything breaks.
-
-    Better: Move existing CQ as a CQ backend. Extend CQ with a queue that
-    this server will publish to. Implement the user facing poll_cq on
+    TODO:
+    Extend CQ with a queue that this server will publish to. Implement the user facing poll_cq on
     this queue.
 */
 
 void cq_server_context_init(CQServer * server, struct ibv_cq * cq)
 {
     server->cq = cq;
-    server->nqm = nq_manager_alloc();
+    server->qp_metadata_manager = qp_metadata_manager_alloc();
 }
 
 void cq_server_context_destroy(CQServer * server)
 {
-    nq_manager_destroy(server->nqm);
+    qp_metadata_manager_destroy(server->qp_metadata_manager);
 }
 
 #define CQ_SERVER_NUM_WCS 16
 static void * cq_server_loop(void * args)
 {
     CQServer * server = args;
-    struct ibv_cq * cq = server->cq;
-    NotificationQueueManager * nqm = server->nqm;
-    struct verbs_context * ctxt = verbs_get_ctx(cq->context);
+    struct ibv_cq * ibcq = server->cq;
+    struct verbs_cq * cq = (struct verbs_cq *)ibcq;
+    QPMetadataManager * qp_metadata_manager = server->qp_metadata_manager;
+    struct verbs_context * ctxt = verbs_get_ctx(ibcq->context);
     
     int err;
 
@@ -42,7 +43,7 @@ static void * cq_server_loop(void * args)
     while(true)
     {
         /* TODO: try to switch to poll cq ex */
-        int nwcs = ctxt->cvmrdma.poll_cq(cq, CQ_SERVER_NUM_WCS, wcs);
+        int nwcs = ctxt->cvmrdma.poll_cq(ibcq, CQ_SERVER_NUM_WCS, wcs);
         if(nwcs < 0)
         {
             err = nwcs;
@@ -102,8 +103,11 @@ static void * cq_server_loop(void * args)
                 /* A WRITE has happened in a bounce buffer. To have enough information to decrypt this
                 payload into the user region, retrieve the RPC notification on the corresponding QP */
                 
-                NotificationQueue * nq = nq_manager_get_queue(nqm, qpn);
+                NotificationQueue * nq = qp_metadata_manager_get_queue(qp_metadata_manager, qpn);
                 assert(nq);
+
+                uint64_t const * rx_key = notification_queue_get_key(nq);
+                assert(rx_key);
 
                 /* Read the front of the queue inplace */
                 struct cq_server_notification const * notification = notification_queue_front(nq);
@@ -111,27 +115,35 @@ static void * cq_server_loop(void * args)
                 void * bounce_addr = notification->bounce_addr;
                 void * user_addr = notification->user_addr;
                 size_t length = notification->length;
-                unsigned int nonce_counter = notification->nonce_counter;
                 uint32_t user_imm = notification->imm;
                 bool has_imm = notification->has_imm;
-
-                unsigned char nonce[3] = {
-                    0xFFu & (nonce_counter >> 0),
-                    0xFFu & (nonce_counter >> 8),
-                    0xFFu & (nonce_counter >> 16),
-                };
-
-                unsigned char mac[2] = {
-                    0xFFu & (protocol_imm >> 0),
-                    0xFFu & (protocol_imm >> 8)
-                };
+                uint64_t const * nonce = notification->nonce;
+                uint64_t const * mac = notification->mac;
 
                 assert(length == wc_length);
 
-                DEBUG("Decrypting %zu B from %p to %p with nonce %x %x %x ; mac = %x %x\n", length, bounce_addr, user_addr, nonce[0], nonce[1], nonce[2], mac[0], mac[1]);
-
-                /* TODO: decrypt !*/
+                DEBUG("Decrypting %zu B from %p to %p\n", length, bounce_addr, user_addr);
+                DEBUG("nonce %lx %lx %lx %lx ; mac = %lx %lx %lx %lx\n", nonce[0], nonce[1], nonce[2], nonce[3], mac[0], mac[1], mac[2], mac[3]);
+#ifndef CVMRDMA_DUMMY_BOUNCE
+                err = crypto_aead_aegis256_decrypt_detached(
+                    user_addr, NULL,
+                    bounce_addr, length,
+                    (unsigned char const *)mac,
+                    NULL, 0,
+                    (unsigned char const *)nonce,
+                    (unsigned char const *)rx_key
+                );
+                TIMING("dec_t1");
+                if(err)
+                {
+                    DEBUG("WARN: Failed to decrypt bounce buffer, ignoring this WC.\n");
+                    /* In this case, don't pop from the queue: it might be an injected WR
+                       from an attacker. */
+                    continue;
+                }
+#else
                 memcpy(user_addr, bounce_addr, length);
+#endif
 
                 /* Pop the entry after use */
                 notification_queue_pop(nq);
@@ -158,5 +170,5 @@ int cq_server_run(CQServer * server, pthread_t * newthread)
 */
 NotificationQueue * cq_server_add_qp(CQServer * server, uint32_t qpn)
 {
-    return nq_manager_create_queue(server->nqm, qpn);
+    return qp_metadata_manager_create_queue(server->qp_metadata_manager, qpn);
 }

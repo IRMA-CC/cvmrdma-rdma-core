@@ -23,11 +23,16 @@ void cvmrdma_client_destroy(CVMRDMAClient * client)
     delete client;
 }
 
-QPNotificationClient * get_qp_notification_client(ClientSession * session, CVMRDMAClient * client, uint32_t remote_qpn)
+QPNotificationClient * get_qp_notification_client(ClientSession * session, CVMRDMAClient * client, uint32_t remote_qpn, uint64_t const * tx_key)
 {
     auto req = client->getQpChannelForQpnRequest();
 
     req.setQpn(remote_qpn);
+
+    req.setTxKey0(tx_key[0]);
+    req.setTxKey1(tx_key[1]);
+    req.setTxKey2(tx_key[2]);
+    req.setTxKey3(tx_key[3]);
 
     auto rep = req.send().wait(session->getWaitScope());
 
@@ -48,6 +53,16 @@ void remote_qp_notify_write_rpc(ClientSession * session, QPNotificationClient * 
     req.setRkey(rkey);
     req.setImm(imm);
     req.setHasImm(has_imm);
+    
+    req.setNonce0(nonce[0]);
+    req.setNonce1(nonce[1]);
+    req.setNonce2(nonce[2]);
+    req.setNonce3(nonce[3]);
+
+    req.setMac0(mac[0]);
+    req.setMac1(mac[1]);
+    req.setMac2(mac[2]);
+    req.setMac3(mac[3]);
     
     auto rep = req.send();
 

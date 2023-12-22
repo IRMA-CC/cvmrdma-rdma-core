@@ -1,6 +1,7 @@
 #include "cvmrdma_network_server.h"
 
 #include <cinttypes>
+#include <cassert>
 
 #include <functional>
 #include <unordered_map>
@@ -9,7 +10,10 @@
 #include <thread>
 
 #include <capnp/ez-rpc.h>
+#include <sodium.h>
 
+#include "aegis.hpp"
+#include "notification_queue.hpp"
 #include "cvmrdma.capnp.h"
 #include "debug.h"
 
@@ -54,17 +58,28 @@ public:
            Poll_cq will get the qpn, and can pop entries off the right queue
         */
 
-        struct cq_server_notification notification = {
-            .bounce_addr = bounce_addr,
-            .user_addr = user_addr,
-            .length = length,
-            /* nonce: 3 first bytes, little endian (24 bits) */
-            .nonce_counter = nonce_counter,
-            .imm = imm,
-            .has_imm = has_imm
-        };
+        auto notification = std::make_unique<struct cq_server_notification>();
 
-        notification_queue_push(m_notification_queue, &notification);
+        notification->bounce_addr = bounce_addr;
+        notification->user_addr = user_addr;
+        notification->length = length;
+        notification->imm = imm;
+        notification->has_imm = has_imm;
+
+        /* Pass nonce and MAC from their uint64 form to CQ server */
+        uint64_t * nonce64 = notification->nonce;
+        nonce64[0] = p.getNonce0();
+        nonce64[1] = p.getNonce1();
+        nonce64[2] = p.getNonce2();
+        nonce64[3] = p.getNonce3();
+
+        uint64_t * mac64 = notification->mac;
+        mac64[0] = p.getMac0();
+        mac64[1] = p.getMac1();
+        mac64[2] = p.getMac2();
+        mac64[3] = p.getMac3();
+        notification_queue_push(m_notification_queue, std::move(notification));
+        TIMING("notif_srv_done");
 
         return kj::READY_NOW;
     }
@@ -72,6 +87,12 @@ public:
     uint32_t get_qpn()
     {
         return m_qpn;
+    }
+
+    void set_rx_key(aegis_key_t const & rx_key)
+    {
+        DEBUG("setting rx_key on QNC for QPN %" PRIx32 "\n", m_qpn);
+        notification_queue_set_rx_key(m_notification_queue, rx_key);
     }
 
 private:
@@ -91,38 +112,40 @@ private:
 
 
 /* Threadsafe hashmap */
-class QpnMap {
+template <typename K, typename V>
+class ThreadsafeMap {
 public:
-    using qnc_client_t = CVMRDMA::QpNotificationChannel::Client;
-    void insert_or_assign(uint32_t qpn, qnc_client_t qnc)
+    void insert_or_assign(K qpn, V qnc)
     {
         auto locked = std::scoped_lock{m_lock};
         m_map.insert_or_assign(qpn, std::move(qnc));
     }
 
-    qnc_client_t & at(uint32_t qpn)
+    V & at(K qpn)
     {
         auto locked = std::scoped_lock{m_lock};
         return m_map.at(qpn);
     }
 
-    size_t erase(uint32_t qpn)
+    size_t erase(K qpn)
     {
         auto locked = std::scoped_lock{m_lock};
         return m_map.erase(qpn);
     }
 
 private:
-    std::unordered_map<uint32_t, qnc_client_t> m_map;
+    std::unordered_map<K, V> m_map;
     std::mutex m_lock;
 };
 
+using qnc_client_t = CVMRDMA::QpNotificationChannel::Client;
+using QncMap = ThreadsafeMap<uint32_t, qnc_client_t>;
 
 class CVMRDMAImpl : public CVMRDMA::Server
 {
 public:
-    CVMRDMAImpl(QpnMap & qpn_to_qp)
-    : m_qpn_to_qp{qpn_to_qp}
+    CVMRDMAImpl(QncMap & qpn_to_qnc)
+    : m_qpn_to_qnc{qpn_to_qnc}
     { }
 
 
@@ -131,25 +154,53 @@ public:
         auto p = context.getParams();
         auto rb = context.initResults();
 
-        uint32_t qpn = p.getQpn();
-        DEBUG("getQpChannelForQpn 0x%" PRIx32 "\n", qpn);
+        uint32_t local_qpn = p.getQpn();
+        DEBUG("getQpChannelForQpn 0x%" PRIx32 "\n", local_qpn);
 
 
-        /* get a reference to the QP notification channel client */
-        auto & qnc = m_qpn_to_qp.at(qpn);
+        /* Let's associate the remote's Tx key with this local qpn.
+           The remote's Tx key is an Rx key for us. */
+        aegis_key_t rx_key_64;
+        rx_key_64[0] = p.getTxKey0();
+        rx_key_64[1] = p.getTxKey1();
+        rx_key_64[2] = p.getTxKey2();
+        rx_key_64[3] = p.getTxKey3();
 
-        /* and create a new client for the user */
-        rb.setQnc(qnc);
+        /* get a QP notification channel client. Create a new copy s.t. the server does
+           not get destroyed on disconnects */
+        auto qnc = m_qpn_to_qnc.at(local_qpn);
+
+        /* first start finding the corresponding server */
+        auto qnc_server = qnc_capset.getLocalServer(qnc);
+
+        /* and pass to the user */
+        rb.setQnc(std::move(qnc));
+
+        /* Actually find the server to save the key. Make sure to move the array here so that it is not destroyed before the promise is resolved ! */
+        return qnc_server.then(
+            [local_qpn, rx_key_64 = std::move(rx_key_64)](kj::Maybe<CVMRDMA::QpNotificationChannel::Server &> qnc_server_maybe) -> kj::Promise<void> {
+                KJ_IF_MAYBE(qnc_server, qnc_server_maybe)
+                {
+                    auto qnc_impl = dynamic_cast<QpNotificationChannel *>(qnc_server);
+                    assert(qnc_impl);
+                    qnc_impl->set_rx_key(rx_key_64);
+                }
+                else
+                {
+                    fprintf(stderr, "QpNotificationChannel for QPN %" PRIx32 " is NOT a local server\n", local_qpn);
+                }
 
         return kj::READY_NOW;
+            }
+        );
     }
 
 private:
-    QpnMap & m_qpn_to_qp;
+    QncMap & m_qpn_to_qnc;
 };
 
 
-static int cvmrdma_server_loop(std::stop_token stoken, QpnMap * qm, char const * server_bind_addr)
+static int cvmrdma_server_loop(std::stop_token stoken, QncMap * qm, char const * server_bind_addr)
 {
     /* Create a channel to ask the server to stop: on stop request,
        the promise in the pair will be fulfilled. */
@@ -180,15 +231,14 @@ public:
     }
 
 
-    QpNotificationChannel * qp_notification_channel_create(PdBounceMetadata * pd_bounce_metadata, NotificationQueue * nq, uint32_t qpn)
+    void qp_notification_channel_create(PdBounceMetadata * pd_bounce_metadata, NotificationQueue * nq, uint32_t local_qpn)
     {
-        auto qnc = kj::heap<QpNotificationChannel>(*pd_bounce_metadata, nq, qpn);
-        auto qnc_client = qnc_capset.add(std::move(qnc));
+        auto qnc_server = kj::heap<QpNotificationChannel>(*pd_bounce_metadata, nq, local_qpn);
+        DEBUG("Register fresh notification channel for qpn 0x%" PRIx32 "\n", local_qpn);
 
-        DEBUG("Register fresh notification channel for qpn 0x%" PRIx32 "\n", qpn);
+        auto qnc_client = qnc_capset.add(std::move(qnc_server));
 
-        m_qp_for_qpn.insert_or_assign(qpn, std::move(qnc_client));
-        return qnc;
+        m_qp_for_qpn.insert_or_assign(local_qpn, std::move(qnc_client));
     }
 
     void qp_notification_channel_destroy(QpNotificationChannel * pnc)
@@ -201,7 +251,7 @@ public:
     }
 
 private:
-    QpnMap m_qp_for_qpn;
+    QncMap m_qp_for_qpn;
     std::jthread m_server_thread;
 };
 
@@ -219,7 +269,7 @@ void cvmrdma_stop_network_server(CVMRDMAServer * cs)
 
     pd_bounce_metadata: parameters of the MR/bounce in the PD that this QP belongs to
 */
-void cvmrdma_server_register_qp(CVMRDMAServer * cs, PdBounceMetadata * pd_bounce_metadata, NotificationQueue * nq, uint32_t qpn)
+void cvmrdma_server_register_qp(CVMRDMAServer * cs, PdBounceMetadata * pd_bounce_metadata, NotificationQueue * nq, uint32_t local_qpn)
 {
-    cs->qp_notification_channel_create(pd_bounce_metadata, nq, qpn);
+    cs->qp_notification_channel_create(pd_bounce_metadata, nq, local_qpn);
 }

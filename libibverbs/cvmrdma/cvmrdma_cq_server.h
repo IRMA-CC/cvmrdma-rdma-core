@@ -18,7 +18,7 @@
 #include <infiniband/verbs.h>
 
 
-#include "notification_queue.h"
+#include "qp_metadata_manager.h"
 #include "bounce_metadata.h"
 
 typedef struct CQServer
@@ -27,7 +27,8 @@ typedef struct CQServer
     struct ibv_cq * cq;
 
     /* Map to the notification channels for the QPs using this CQ */
-    NotificationQueueManager * nqm;
+    QPMetadataManager * qp_metadata_manager;
+
 } CQServer;
 
 

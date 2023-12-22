@@ -169,8 +169,8 @@ struct verbs_qp {
 
 	/* Capability of the remote QP to notify on WRITEs */
 	QPNotificationClient * remote_qnc;
-	/* Send counter, used as nonce. */
-	uint32_t tx_ctr;
+	/* Transmission key. AEGIS-256: 32 B*/
+	uint64_t tx_key[4];
 };
 static_assert(offsetof(struct ibv_qp_ex, qp_base) == 0, "Invalid qp layout");
 

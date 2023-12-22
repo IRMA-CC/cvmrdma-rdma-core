@@ -16,7 +16,7 @@ CVMRDMAServer * cvmrdma_start_network_server(char const * server_bind_addr);
 void cvmrdma_stop_network_server(CVMRDMAServer * server);
 
 
-void cvmrdma_server_register_qp(CVMRDMAServer * cs, PdBounceMetadata * pd_bounce_metadata, NotificationQueue * nq, uint32_t qpn);
+void cvmrdma_server_register_qp(CVMRDMAServer * cs, PdBounceMetadata * pd_bounce_metadata, NotificationQueue * nq, uint32_t local_qpn);
 
 #ifdef __cplusplus
 }
