@@ -152,12 +152,27 @@ static struct ibv_qp *cvmrdma_create_qp(struct ibv_pd *pd,
 	}
 	qp->recv_metadata = recv_metadata;
 
+	/* Initialize the send and recv mutex */
+	err = pthread_mutex_init(&qp->cvmrdma_recv_lock, NULL);
+	if(err)
+	{
+		fprintf(stderr, "Failed to initialize the CVMRDMA recv mutex %d\n", err);
+		goto free_recv_metadata;
+	}
+
+	err = pthread_mutex_init(&qp->cvmrdma_send_lock, NULL);
+	if(err)
+	{
+		fprintf(stderr, "Failed to initialize the CVMRDMA recv mutex %d\n", err);
+		goto free_recv_lock;
+	}
+
 
 	err = attach_qp_to_cq(ctxt, pd, qp, rcq);
 	if(err)
 	{
 		fprintf(stderr, "Failed to attach QP %" PRIx32 " to its recv cq (%d)\n", ibqp->qp_num, err);
-		goto free_recv_metadata;
+		goto free_send_lock;
 	}
 	if(scq && (scq != rcq))
 	{
@@ -165,7 +180,7 @@ static struct ibv_qp *cvmrdma_create_qp(struct ibv_pd *pd,
 		if(err)
 		{
 			fprintf(stderr, "Failed to attach QP %" PRIx32 " to its send cq (%d)\n", ibqp->qp_num, err);
-			goto free_recv_metadata;
+			goto free_send_lock;
 		}
 	}
 
@@ -179,7 +194,10 @@ static struct ibv_qp *cvmrdma_create_qp(struct ibv_pd *pd,
 
 	return ibqp;
 
-
+free_send_lock:
+	pthread_mutex_destroy(&qp->cvmrdma_send_lock);
+free_recv_lock:
+	pthread_mutex_destroy(&qp->cvmrdma_send_lock);
 free_recv_metadata:
 	free_qp_recv_metadata(recv_metadata);
 free_qp:
@@ -260,6 +278,10 @@ static int cvmrdma_post_recv(struct ibv_qp *ibqp, struct ibv_recv_wr *wr,
 	struct verbs_context * ctx = verbs_get_ctx(ibqp->context);
 
 
+	/* We need to lock so that the recv queue and the recvs actually
+	   match (i.e. no interleaved recv and push)*/
+
+	pthread_mutex_lock(&qp->cvmrdma_recv_lock);
 
 
 	err = ctx->cvmrdma.post_recv(ibqp, wr, bad_wr);
@@ -274,6 +296,7 @@ static int cvmrdma_post_recv(struct ibv_qp *ibqp, struct ibv_recv_wr *wr,
 	}
 
 ret:
+	pthread_mutex_unlock(&qp->cvmrdma_recv_lock);
 	return err;
 }
 
@@ -409,9 +432,16 @@ static int cvmrdma_post_send(struct ibv_qp *ibqp, struct ibv_send_wr *wr,
 		     struct ibv_send_wr **bad_wr)
 {
     struct verbs_context * vctxt = verbs_get_ctx(ibqp->context);
+    struct verbs_qp * qp = (struct verbs_qp *)ibqp;
     int ret = 0;
 
 	TIMING("post_send_t0");
+
+	/* We need to lock so that the notifications and the send actually
+	   match (i.e. no interleaved send)*/
+
+	pthread_mutex_lock(&qp->cvmrdma_send_lock);
+
 
     /*
 	CVMRDMA: do the bounce and modify the WRs to use the bounce buffers
@@ -440,14 +470,8 @@ static int cvmrdma_post_send(struct ibv_qp *ibqp, struct ibv_send_wr *wr,
 	TIMING("send_prov");
     ret = vctxt->cvmrdma.post_send(ibqp, wr, bad_wr);
 
-	/* Now schedule the notification and wait for them to be delivered */
-	TIMING("notif_wait");
-	taskset_wait(vctxt->cvmrdma.network_client_connection, tk);
-	TIMING("notif_done");
-
 ret:
-	/* Free the tk after use */
-	taskset_free(tk);
+	pthread_mutex_unlock(&qp->cvmrdma_send_lock);
     return ret;
 
 /* XXX: do error handling here, if the send fails then things are
