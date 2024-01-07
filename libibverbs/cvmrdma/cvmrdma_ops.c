@@ -12,6 +12,7 @@
 #include "cvmrdma_network_client.h"
 #include "cvmrdma_network_server.h"
 #include "notification_queue.h"
+#include "recv_metadata.h"
 #include "taskset_wrapper.h"
 #include "wc_queue.h"
 
@@ -143,11 +144,20 @@ static struct ibv_qp *cvmrdma_create_qp(struct ibv_pd *pd,
 	    the CQ server    
 	*/
 
+	QpRecvMetadata * recv_metadata = alloc_qp_recv_metadata();
+	if(! recv_metadata)
+	{
+		fprintf(stderr, "Failed to allocated recv metadata storage.\n");
+		goto free_qp;
+	}
+	qp->recv_metadata = recv_metadata;
+
+
 	err = attach_qp_to_cq(ctxt, pd, qp, rcq);
 	if(err)
 	{
 		fprintf(stderr, "Failed to attach QP %" PRIx32 " to its recv cq (%d)\n", ibqp->qp_num, err);
-		goto free_qp;
+		goto free_recv_metadata;
 	}
 	if(scq && (scq != rcq))
 	{
@@ -155,7 +165,7 @@ static struct ibv_qp *cvmrdma_create_qp(struct ibv_pd *pd,
 		if(err)
 		{
 			fprintf(stderr, "Failed to attach QP %" PRIx32 " to its send cq (%d)\n", ibqp->qp_num, err);
-			goto free_qp;
+			goto free_recv_metadata;
 		}
 	}
 
@@ -169,6 +179,9 @@ static struct ibv_qp *cvmrdma_create_qp(struct ibv_pd *pd,
 
 	return ibqp;
 
+
+free_recv_metadata:
+	free_qp_recv_metadata(recv_metadata);
 free_qp:
     ctxt->cvmrdma.destroy_qp(ibqp);
 err:
@@ -235,18 +248,36 @@ static int cvmrdma_poll_cq(struct ibv_cq * ibcq, int num_entries, struct ibv_wc 
 static int cvmrdma_post_recv(struct ibv_qp *ibqp, struct ibv_recv_wr *wr,
 		struct ibv_recv_wr **bad_wr)
 {
-	/* WRITE_WITH_IMM consumes an RR even though it doesn't write a payload to the MR! So the user
-	   must be able to post_recvs.
-
+	/*
 	   Since the bounce buffer is registered with the hca_va, a valid post recv for the original buffer
-	   is a valid post recv for the bounce buffer. We can simply pass the request unmodified.   
+	   is a valid post recv for the bounce buffer. We can simply pass the request unmodified.
+
+	   Since the CVMRDMA wrapper also needs to know where recvs end up, we need to keep the sg-list in case
+	   of success
 	*/
+	int err;
+	struct verbs_qp * qp = (struct verbs_qp *)ibqp;
 	struct verbs_context * ctx = verbs_get_ctx(ibqp->context);
-	return ctx->cvmrdma.post_recv(ibqp, wr, bad_wr);
+
+
+
+
+	err = ctx->cvmrdma.post_recv(ibqp, wr, bad_wr);
+	if(err)
+	{
+		goto ret;
+	}
+
+	for(struct ibv_recv_wr * this_wr = wr ; this_wr != NULL ; this_wr = this_wr->next)
+	{
+		qp_recv_metadata_push(qp->recv_metadata, this_wr->wr_id, this_wr->sg_list, this_wr->num_sge);
+	}
+
+ret:
+	return err;
 }
 
 
-static int post_send_do_bounce(taskset_t * tk, struct ibv_qp *ibqp, struct ibv_send_wr *wrs, struct ibv_send_wr **bad_wr)
 {
     struct verbs_qp * qp = (struct verbs_qp *)ibqp;
 	struct ibv_pd * pd = ibqp->pd;

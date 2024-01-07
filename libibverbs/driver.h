@@ -169,6 +169,8 @@ struct verbs_qp {
 
 	/* Capability of the remote QP to notify on WRITEs */
 	QPNotificationClient * remote_qnc;
+	/* Save location of future recvs in FIFO */
+	struct QpRecvMetadata * recv_metadata;
 	/* Transmission key. AEGIS-256: 32 B*/
 	uint64_t tx_key[4];
 };
