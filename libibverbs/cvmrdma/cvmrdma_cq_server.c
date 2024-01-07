@@ -73,88 +73,95 @@ static void * cq_server_loop(void * args)
             if(status != IBV_WC_SUCCESS)
             {
                 fprintf(stderr, "CQ server WARN: WC reports failure\n");
-                /* TODO: pass failure to normal poll_cq */
-                wcq_push(wcq, this_wc);
-                continue;
             }
-
-            if(op == IBV_WC_RDMA_WRITE)
+            else if(! (op & IBV_WC_RECV))
             {
-                DEBUG("[CQ] WRITE done\n");
-            }
-            else if (op == IBV_WC_RECV_RDMA_WITH_IMM)
-            {
-                DEBUG("[CQ] Recv IMM\n");
+                /* This is a send completion (SEND, WRITE, WWI) */
+                DEBUG("[CQ] send op %d done\n", op);
             }
             else
             {
-                fprintf(stderr, "CQ server ERROR: received op %d, for now only RDMA WRITE is supported\n", op);
-                wcq_push(wcq, this_wc);
-                continue;
-            }
-
-            if(! (wc_flags & IBV_WC_WITH_IMM))
-            {
-                /* XXX: is this accurate? is WITH_IMM set for sender AND receiver ??*/
-                fprintf(stderr, "CQ server WARN: the server expects all WRITEs to report a MAC in the immediate value, "
-                                "but this completion has no immedite\n");
-            }
-
-
-            if (op == IBV_WC_RECV_RDMA_WITH_IMM)
-            {
-                /* A WRITE has happened in a bounce buffer. To have enough information to decrypt this
-                payload into the user region, retrieve the RPC notification on the corresponding QP */
+                /* A WRITE_WITH_IMM or SEND has happened in a bounce buffer. This means that all
+                   WRITEs on this QP preceding this operation are also ready.
                 
+                   To have enough information to decrypt the payloads into the user region, retrieve
+                   the RPC notifications on the corresponding QP */
                 NotificationQueue * nq = qp_metadata_manager_get_queue(qp_metadata_manager, qpn);
                 assert(nq);
 
                 uint64_t const * rx_key = notification_queue_get_key(nq);
                 assert(rx_key);
 
-                /* Read the front of the queue inplace */
-                struct cq_server_notification const * notification = notification_queue_front(nq);
+                /* Process all pending WRITEs and the current op */
+                enum ibv_wr_opcode current_opcode;
+                do {
+                    /* Read the front of the queue inplace */
+                    struct cq_server_notification const * notification = notification_queue_front(nq);
+                    current_opcode = notification->op;
+                    bool has_imm = ((current_opcode == IBV_WR_SEND_WITH_IMM) || (current_opcode == IBV_WR_RDMA_WRITE_WITH_IMM));
 
-                void * bounce_addr = notification->bounce_addr;
-                void * user_addr = notification->user_addr;
-                size_t length = notification->length;
-                uint32_t user_imm = notification->imm;
-                bool has_imm = notification->has_imm;
-                uint64_t const * nonce = notification->nonce;
-                uint64_t const * mac = notification->mac;
 
-                assert(length == wc_length);
+                    void * bounce_addr = notification->bounce_addr;
+                    void * user_addr = notification->user_addr;
+                    size_t length = notification->length;
+                    uint32_t user_imm = notification->imm;
+                    uint64_t const * nonce = notification->nonce;
+                    uint64_t const * mac = notification->mac;
 
-                DEBUG("Decrypting %zu B from %p to %p\n", length, bounce_addr, user_addr);
-                DEBUG("nonce %lx %lx %lx %lx ; mac = %lx %lx %lx %lx\n", nonce[0], nonce[1], nonce[2], nonce[3], mac[0], mac[1], mac[2], mac[3]);
+                    if(current_opcode != IBV_WR_RDMA_WRITE)
+                    {
+                        /* This has to be the signaled op we've been looking for: the WC holds
+                           information related to it. Let's do some sanity checks */
+                        
+                        assert(
+                            ((current_opcode == IBV_WR_SEND) && (op == IBV_WC_RECV))
+                            || ((current_opcode == IBV_WR_SEND_WITH_IMM) && (op == IBV_WC_RECV))
+                            || ((current_opcode == IBV_WR_RDMA_WRITE_WITH_IMM) && (op == IBV_WC_RECV_RDMA_WITH_IMM))
+                        );
+                        
+                        assert(wc_length == length);
+                        assert( (!!has_imm) == (!! (wc_flags & IBV_WC_WITH_IMM)) );
+
+                        if(has_imm)
+                        {
+                            /* Per CVMRDMA protocol, the imm is NOT carried over IB */
+                            assert(protocol_imm == 0);
+
+                            /* Modify the WC to report correct immediate to user */
+                            this_wc->imm_data = user_imm;
+                        }
+                    }
+
+
+                    DEBUG("Decrypting %zu B from %p to %p\n", length, bounce_addr, user_addr);
+                    DEBUG("nonce %lx %lx %lx %lx ; mac = %lx %lx %lx %lx\n", nonce[0], nonce[1], nonce[2], nonce[3], mac[0], mac[1], mac[2], mac[3]);
 #ifndef CVMRDMA_DUMMY_BOUNCE
-                TIMING("dec_t0");
-                err = crypto_aead_aegis256_decrypt_detached(
-                    user_addr, NULL,
-                    bounce_addr, length,
-                    (unsigned char const *)mac,
-                    NULL, 0,
-                    (unsigned char const *)nonce,
-                    (unsigned char const *)rx_key
-                );
-                TIMING("dec_t1");
-                if(err)
-                {
-                    DEBUG("WARN: Failed to decrypt bounce buffer, ignoring this WC.\n");
-                    /* In this case, don't pop from the queue: it might be an injected WR
-                       from an attacker. */
-                    continue;
-                }
+                    TIMING("dec_t0");
+                    err = crypto_aead_aegis256_decrypt_detached(
+                        user_addr, NULL,
+                        bounce_addr, length,
+                        (unsigned char const *)mac,
+                        NULL, 0,
+                        (unsigned char const *)nonce,
+                        (unsigned char const *)rx_key
+                    );
+                    TIMING("dec_t1");
+                    if(err)
+                    {
+                        DEBUG("WARN: Failed to decrypt bounce buffer, ignoring this WC.\n");
+                        /* In this case, don't pop from the queue: it might be an injected WR
+                        from an attacker. */
+                        continue;
+                    }
 #else
-                memcpy(user_addr, bounce_addr, length);
+                    memcpy(user_addr, bounce_addr, length);
 #endif
 
-                /* Pop the entry after use */
-                notification_queue_pop(nq);
+                    /* Pop the entry after use */
+                    notification_queue_pop(nq);
 
+                } while (current_opcode == IBV_WR_RDMA_WRITE);
 
-                /* Modify the WC to report correct immediate to user */
-                this_wc->imm_data = user_imm;            
             }
 
 

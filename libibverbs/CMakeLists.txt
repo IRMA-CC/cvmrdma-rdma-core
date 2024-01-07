@@ -16,10 +16,17 @@ publish_internal_headers(infiniband
   marshall.h
   )
 
+publish_headers(infiniband/cvmrdma
+  cvmrdma/cvmrdma_network_client.h
+  cvmrdma/cvmrdma_network_evloop.h
+  cvmrdma/cvmrdma_network_server.h
+)
+
 publish_internal_headers(infiniband/cvmrdma
   cvmrdma/cvmrdma_cq_server.h
-  cvmrdma/cvmrdma_network_server.h
-  cvmrdma/cvmrdma_network_client.h
+  cvmrdma/cvmrdma_network_client_priv.h
+  cvmrdma/cvmrdma_network_evloop_priv.h
+  cvmrdma/cvmrdma_network_server_priv.h
   cvmrdma/bounce_metadata.h
   cvmrdma/notification_queue.h
   cvmrdma/notification_queue.hpp
@@ -80,6 +87,7 @@ rdma_library(ibverbs "${CMAKE_CURRENT_BINARY_DIR}/libibverbs.map"
   cvmrdma/bounce_metadata.cpp
   cvmrdma/cvmrdma_cq_server.c
   cvmrdma/cvmrdma_network_client.cpp
+  cvmrdma/cvmrdma_network_evloop.cpp
   cvmrdma/cvmrdma_network_server.cpp
   cvmrdma/cvmrdma_ops.c
   cvmrdma/notification_queue.cpp

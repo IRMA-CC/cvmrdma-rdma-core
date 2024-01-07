@@ -47,6 +47,10 @@
 #include <sys/types.h>
 #include <infiniband/verbs_api.h>
 
+#include <infiniband/cvmrdma/cvmrdma_network_client.h>
+#include <infiniband/cvmrdma/cvmrdma_network_evloop.h>
+#include <infiniband/cvmrdma/cvmrdma_network_server.h>
+
 
 #ifdef __cplusplus
 #include <limits>
@@ -2175,14 +2179,17 @@ struct verbs_context {
 					uint64_t hca_va, int access);
 		int (*req_notify_cq)(struct ibv_cq *cq, int solicited_only);
 
-		/* Server and client for IP based RPCs
-		XXX: for qpn->ring rkey requests, it would make more sense to have a single
-		server for the whole machine; i.e a standalone process. */
-		struct CVMRDMAServer * network_server;
-		struct ClientSession * network_client_connection;
-		struct CVMRDMAClient * network_client_cap;
-		struct taskset_error_handler_t * taskset_error_handler; 
-
+		/* Server and client for IP based RPCs.
+		   The event loop runs the server by default, and later on CVMRDMA layer can
+		   open as many sessions as necessary to remote servers on the same event loop.
+		   From each session, the CVMRDMA layer can get a CVMRDMA client. 
+		
+		   XXX: for now, we only connect a single remote.
+		*/
+		CapnpEvloopThread * network_evloop;
+		CVMRDMAServer * network_server;
+		ClientSession * network_client_connection;
+		CVMRDMAClient * network_client_cap;
 
 	} cvmrdma;
 

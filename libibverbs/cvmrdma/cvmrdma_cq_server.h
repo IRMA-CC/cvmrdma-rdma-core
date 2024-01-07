@@ -7,13 +7,11 @@
  * 
  * Instead, a dedicated thread receives these notifications, and decrypts the
  * payload from unprotected memory into protected memory. Once this is done,
- * a notification can be queue for the user.
+ * a notification can be queued for the user.
  */
 
 
 
-
-/* XXX: for now accept a single CQ, in the future could poll several CQs */
 
 #include <infiniband/verbs.h>
 

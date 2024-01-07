@@ -9,8 +9,9 @@
 
 #include "bounce_metadata.h"
 #include "cvmrdma_cq_server.h"
-#include "cvmrdma_network_client.h"
-#include "cvmrdma_network_server.h"
+#include "cvmrdma_network_client_priv.h"
+#include "cvmrdma_network_server_priv.h"
+#include "cvmrdma_network_evloop_priv.h"
 #include "notification_queue.h"
 #include "recv_metadata.h"
 #include "taskset_wrapper.h"
@@ -116,7 +117,7 @@ static int attach_qp_to_cq(struct verbs_context * ctxt, struct ibv_pd *pd, struc
 	   know it yet.
 	*/
 	DEBUG("Create QpNotificationChannel cap QNC using notification queue\n");
-	cvmrdma_server_register_qp(ctxt->cvmrdma.network_server, pd->bounce_metadata, nq, ibqp->qp_num);
+	cvmrdma_server_register_qp(ctxt->cvmrdma.network_server, pd->bounce_metadata, qp->recv_metadata, nq, ibqp->qp_num);
 
 	return 0;
 }
@@ -238,7 +239,10 @@ static int cvmrdma_modify_qp(struct ibv_qp *ibqp, struct ibv_qp_attr *attr,
 				DEBUG("Obtain notification channel cap from remote for its QP with QPN 0x%" PRIx32 "\n", dest_qpn);
 
 				/* Blocking: get the qp notifier capability from the remote over the network and share the Tx key with the remote */
-				qp->remote_qnc = get_qp_notification_client(vctxt->cvmrdma.network_client_connection, vctxt->cvmrdma.network_client_cap, dest_qpn, qp->tx_key);
+				qp->remote_qnc = get_qp_notification_client(
+					vctxt->cvmrdma.network_evloop, vctxt->cvmrdma.network_client_cap,
+					dest_qpn, qp->tx_key
+				);
 				break;
 			}
 			default: {
@@ -301,7 +305,9 @@ ret:
 }
 
 
+static int post_send_do_bounce(struct ibv_qp *ibqp, struct ibv_send_wr *wrs, struct ibv_send_wr **bad_wr)
 {
+	struct verbs_context * ctxt = verbs_get_ctx(ibqp->context);
     struct verbs_qp * qp = (struct verbs_qp *)ibqp;
 	struct ibv_pd * pd = ibqp->pd;
 	int err;
@@ -316,112 +322,151 @@ ret:
 	for(struct ibv_send_wr * this_wr = wrs ; this_wr != NULL ; this_wr = this_wr->next)
 	{
 		enum ibv_wr_opcode this_op = this_wr->opcode;
+
 		switch(this_op)
 		{
-			case IBV_WR_RDMA_WRITE:
-			case IBV_WR_RDMA_WRITE_WITH_IMM: {
-				/* Prepare the bounce buffer. We have to encrypt the data
-				from the user regions into the bounce MRs. */
-
-				if(this_wr->num_sge != 1)
-				{
-					fprintf(stderr, "ERROR: for now CVMRDMA only supports 1 sge per WR\n");
-					*bad_wr = this_wr;
-					return EINVAL;
-				}
-
-				struct ibv_sge sge = this_wr->sg_list[0];
-				uint32_t rkey = this_wr->wr.rdma.rkey;
-
-				uint32_t imm = ntohl(this_wr->imm_data);
-				bool has_imm = (this_op == IBV_WR_RDMA_WRITE_WITH_IMM);
-
-				/* Identify the local MR from the lkey and find the corresponding bounce buffer */
-				struct bounce_entry bounce_info = get_bounce_metadata_for_lkey(pd->bounce_metadata, sge.lkey);
-				size_t offt = sge.addr - bounce_info.hca_va;
-
-				void * user_start = bounce_info.user_buffer + offt;
-				void * bounce_start = bounce_info.bounce_buffer + offt;
-
-				/* Store the nonce and the mac word aligned to make serialization easier */
-				uint64_t nonce[crypto_aead_aegis256_NPUBBYTES / sizeof(uint64_t)];
-				uint64_t mac[crypto_aead_aegis256_ABYTES / sizeof(uint64_t)];
-
-				/* Generate the nonce to use for the encryption */
-				randombytes_buf(nonce, sizeof(nonce));
-
-				uint64_t const * tx_key = qp->tx_key;
-
-        		DEBUG("Encrypting 0x%" PRIx32 " B from %p to %p with nonce %lx %lx %lx %lx\n", sge.length, user_start, bounce_start, nonce[0], nonce[1], nonce[2], nonce[3]);
-#ifndef CVMRDMA_DUMMY_BOUNCE
-				/* TODO TOCTOU bounce !!!!*/
-				unsigned long long maclen = sizeof(mac);
-				
-				TIMING("enc_t0");
-				err = crypto_aead_aegis256_encrypt_detached(
-					bounce_start,
-					(unsigned char *)mac, &maclen,
-					user_start, sge.length,
-					NULL, 0,
-					NULL,
-					(unsigned char *)nonce,
-					(unsigned char const *)tx_key
-				);
-				TIMING("enc_t1");
-				if(err)
-				{
-					fprintf(stderr, "ERROR: Failed to encrypt WR.\n");
-					*bad_wr = this_wr;
-					return -1;
-				}
-
-#else
-				memcpy(bounce_start, user_start, sge.length);
-				memset(mac, 0x01, sizeof(mac));
-				mac[0] = 0x11223344;
-				unsigned long long maclen = sizeof(mac);
-#endif
-				assert(maclen == sizeof(mac));
-				DEBUG("mac = %lx %lx %lx %lx\n", mac[0], mac[1], mac[2], mac[3]);
-
-				/* After the bounce, the sg-list in the WR is valid.
-				   We need to notify the remote of the incoming payload and send the MAC.
-
-				   Do both by
-				   - for IMM: changing WRITE to WRITE_WITH_IMM and send the MAC as immediate.
-				   - for WRITE_WITH_IMM: replace the immediate with the MAC
-				
-					The actual immediate (if any) has already been sent with the RPC.
-				*/
-				
-				__be32 mac_imm = mac[0] | (mac[1] << 8);
-
-				this_wr->opcode = IBV_WR_RDMA_WRITE_WITH_IMM;
-				this_wr->imm_data = mac_imm;
-
-				TIMING("notif_lazy");
-				/* Before doing anything, we can already notify the remote of the upcoming write */
-				remote_qp_notify_write_rpc_add_to_taskset(
-					tk,
-					qp->remote_qnc,
-					sge.addr,
-					sge.length,
-					rkey,
-					imm,
-					has_imm,
-					nonce,
-					mac
-				);
-
-				break;
-			}
-			default: {
-				fprintf(stderr, "ERROR: for now CVMRDMA only supports WRITE\n");
-				*bad_wr = this_wr;
-				return EINVAL;
-			}
+		case IBV_WR_SEND:
+		case IBV_WR_SEND_WITH_IMM:
+		case IBV_WR_RDMA_WRITE:
+		case IBV_WR_RDMA_WRITE_WITH_IMM: {
+			break;
+		}
+		default: {
+			fprintf(stderr, "ERROR: unsupported infiniband operation\n");
+			*bad_wr = this_wr;
+			return EINVAL;
+		}
 		}
 
+		/* Prepare the bounce buffer. We have to encrypt the data
+		from the user regions into the bounce MRs. */
+
+		if(this_wr->num_sge != 1)
+		{
+			fprintf(stderr, "ERROR: for now CVMRDMA only supports 1 sge per WR\n");
+			*bad_wr = this_wr;
+			return EINVAL;
+		}
+
+		struct ibv_sge sge = this_wr->sg_list[0];
+		
+		/* Send rkey s.t. remote knows which MR has been written to */
+		uint64_t remote_addr = this_wr->wr.rdma.remote_addr;
+		uint32_t rkey = this_wr->wr.rdma.rkey;
+
+		/* Send the imm ONLY over the capnp channel to keep it confidential */
+		uint32_t imm = ntohl(this_wr->imm_data);
+		this_wr->imm_data = 0;
+
+		/* Identify the local MR from the lkey and find the corresponding bounce buffer */
+		struct bounce_entry bounce_info = get_bounce_metadata_for_lkey(pd->bounce_metadata, sge.lkey);
+		size_t offt = sge.addr - bounce_info.hca_va;
+
+		void * user_start = bounce_info.user_buffer + offt;
+		void * bounce_start = bounce_info.bounce_buffer + offt;
+
+		/* Store the nonce and the mac word aligned to make serialization easier
+		   Store on the heap to pass ownership to another thread */
+		uint64_t * nonce = malloc(crypto_aead_aegis256_NPUBBYTES);
+		uint64_t * mac = malloc(crypto_aead_aegis256_ABYTES);
+
+		/* Generate the nonce to use for the encryption */
+		randombytes_buf(nonce, sizeof(nonce));
+
+		uint64_t const * tx_key = qp->tx_key;
+
+		DEBUG("Encrypting 0x%" PRIx32 " B from %p to %p with nonce %lx %lx %lx %lx\n", sge.length, user_start, bounce_start, nonce[0], nonce[1], nonce[2], nonce[3]);
+#ifndef CVMRDMA_DUMMY_BOUNCE
+		/* TODO TOCTOU bounce !!!!*/
+		unsigned long long maclen = sizeof(mac);
+		
+		TIMING("enc_t0");
+		err = crypto_aead_aegis256_encrypt_detached(
+			bounce_start,
+			(unsigned char *)mac, &maclen,
+			user_start, sge.length,
+			NULL, 0,
+			NULL,
+			(unsigned char *)nonce,
+			(unsigned char const *)tx_key
+		);
+		TIMING("enc_t1");
+		if(err)
+		{
+			fprintf(stderr, "ERROR: Failed to encrypt WR.\n");
+			*bad_wr = this_wr;
+			return -1;
+		}
+
+#else
+		memcpy(bounce_start, user_start, sge.length);
+		memset(mac, 0x01, sizeof(mac));
+		mac[0] = 0x11223344;
+		unsigned long long maclen = sizeof(mac);
+#endif
+		assert(maclen == crypto_aead_aegis256_ABYTES);
+		DEBUG("mac = %lx %lx %lx %lx\n", mac[0], mac[1], mac[2], mac[3]);
+
+		/* After the bounce, the sg-list in the WR is valid.
+			We need to notify the remote of the incoming payload.
+		*/
+		
+
+		TIMING("notif_lazy");
+		/* Before doing anything, we can already notify the remote of the upcoming write
+			We use kj::Executor to start the send off-thread, on the capnp event loop thread.
+		*/
+
+		switch (this_op)
+		{
+		case IBV_WR_SEND:
+			remote_qp_notify_send(ctxt->cvmrdma.network_evloop,
+				qp->remote_qnc,
+				sge.length,
+				nonce,
+				mac
+			);
+			break;
+		case IBV_WR_SEND_WITH_IMM:
+			remote_qp_notify_send_with_imm(ctxt->cvmrdma.network_evloop,
+				qp->remote_qnc,
+				sge.length,
+				imm,
+				nonce,
+				mac
+			);
+			break;
+		case IBV_WR_RDMA_WRITE:
+			remote_qp_notify_write(ctxt->cvmrdma.network_evloop,
+				qp->remote_qnc,
+				remote_addr,
+				sge.length,
+				rkey,
+				nonce,
+				mac
+			);
+			break;
+		case IBV_WR_RDMA_WRITE_WITH_IMM:
+			remote_qp_notify_write_with_imm(ctxt->cvmrdma.network_evloop,
+				qp->remote_qnc,
+				remote_addr,
+				sge.length,
+				rkey,
+				imm,
+				nonce,
+				mac
+			);
+			break;
+		default: {
+			fprintf(stderr, "ERROR: for now CVMRDMA only supports SEND (w/ imm) and WRITE (W/ imm)\n");
+			assert(false);
+			exit(1);
+		}
+		}
+
+		/* mac and nonce ownership is passed to capnp client */
+		mac = NULL;
+		nonce = NULL;
 	}
 
 	return 0;
@@ -433,7 +478,7 @@ static int cvmrdma_post_send(struct ibv_qp *ibqp, struct ibv_send_wr *wr,
 {
     struct verbs_context * vctxt = verbs_get_ctx(ibqp->context);
     struct verbs_qp * qp = (struct verbs_qp *)ibqp;
-    int ret = 0;
+	int ret = 0;
 
 	TIMING("post_send_t0");
 
@@ -454,15 +499,9 @@ static int cvmrdma_post_send(struct ibv_qp *ibqp, struct ibv_send_wr *wr,
 	- RPC send the dest hca_addr, rkey, imm, MAC, nonce
 	*/
 
-	/* Schedule the notification on a tasket BUT do not send them yet. Sending
-	   is blocking, we can instead start the RDMA transfer (which does not block
-	   the CPU) and then start to send the notifications)*/
-	taskset_t * tk = taskset_alloc(vctxt->cvmrdma.taskset_error_handler);
-
-	ret = post_send_do_bounce(tk, ibqp, wr, bad_wr);
+	ret = post_send_do_bounce(ibqp, wr, bad_wr);
 	if(ret < 0)
 	{
-		taskset_free(tk);
 		fprintf(stderr, "Failed to bounce before send!\n");
 		goto ret;
 	}
@@ -636,18 +675,19 @@ static struct verbs_context *cvmrdma_alloc_context(struct ibv_device *ibdev,
     }
 
 	DEBUG("Start IP based server on %s\n", local_bind_addr);
-	/* Start an RPC server here,  */
-	context->cvmrdma.network_server = cvmrdma_start_network_server(local_bind_addr);
+	/* Start a new thread with a capnp event loop running the RPC server */
+	context->cvmrdma.network_evloop = create_capnp_event_loop(local_bind_addr, &context->cvmrdma.network_server);
+	
+
+	/* Open a session to the remote using the same event loop */
 
 	DEBUG("Connect to IP based remote on %s\n", remote_addr);
 	/* Connect to the remote's RPC server */
-	context->cvmrdma.network_client_connection = cvmrdma_start_session(remote_addr);
+	context->cvmrdma.network_client_connection = new_client_rpc_session(context->cvmrdma.network_evloop, remote_addr);
 
 	/* Get the root capability to the remote's RPC's API */
-	context->cvmrdma.network_client_cap = cvmrdma_client_init(context->cvmrdma.network_client_connection);
+	context->cvmrdma.network_client_cap = get_cvmrdma_client(context->cvmrdma.network_evloop, context->cvmrdma.network_client_connection);
 	
-	context->cvmrdma.taskset_error_handler = taskset_error_handler_alloc();
-
 	return context;
 
 // uninit_and_free:

@@ -2,6 +2,13 @@
 
 interface CVMRDMA {
 
+    enum IBVOp {
+      send @0;
+      sendWithImm @1;
+      write @2;
+      writeWithImm @3;
+    }
+
     interface QpNotificationChannel {
         # rkey is relative to the PD, so the notification is done on a PD-specific object
 
@@ -11,8 +18,11 @@ interface CVMRDMA {
         # the length in the WC is an uint32_t, what happens if we send more than 4GiB ?
         # maybe we can make the length here an uint32 too
         # nonce: 32B, mac: 32B
-        notifyWrite @0 (
-            hcaAddr :UInt64, length :UInt64, rkey :UInt32, imm :UInt32, hasImm :Bool,
+        notifySend @0 (
+            op :IBVOp,
+            length :UInt64,
+            imm :UInt32, # For *_IMM variants
+            hcaAddr :UInt64, rkey :UInt32, # for WRITE_* variants
             nonce0 :UInt64, nonce1 :UInt64, nonce2 :UInt64, nonce3 :UInt64,
             mac0 :UInt64, mac1 :UInt64, mac2 :UInt64, mac3 :UInt64
         ) -> ();

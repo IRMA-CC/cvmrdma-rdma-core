@@ -5,6 +5,8 @@
 #include <sys/types.h>
 #include <inttypes.h>
 
+#include <infiniband/verbs.h>
+
 #ifdef __cplusplus
 extern "C" {
 #endif
@@ -18,8 +20,8 @@ struct cq_server_notification
     void * bounce_addr;
     void * user_addr;
     size_t length;
-    uint32_t imm;
-    bool has_imm;
+    enum ibv_wr_opcode op;
+    uint32_t imm; /* imm is only valid for ops that contain one */
 };
 
 typedef struct NotificationQueue NotificationQueue;
