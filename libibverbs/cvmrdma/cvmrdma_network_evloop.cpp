@@ -25,14 +25,21 @@ public:
 /* The capnp thread starts the CVMRDMA server and returns its executor
    so that the main thread can call functions on this thread. In particular;
    this allows the main thread to create new client sessions on this thread. */
-void capnp_event_loop(std::stop_token stoken,
+void capnp_server_loop(std::stop_token stoken,
     char const * local_bind_addr,
-    kj::Executor const ** client_evloop_executor,
-    kj::TaskSet ** taskset,
-    std::condition_variable * executor_cv, std::mutex * executor_lock,
     CVMRDMAServer ** server_cap
     )
 {
+
+    DEBUG("Starting capnp server on %s\n", local_bind_addr);
+
+    auto main_interface = kj::heap<CVMRDMAServer>(); 
+    *server_cap = main_interface.get();
+
+    capnp::EzRpcServer server(std::move(main_interface), local_bind_addr);
+
+    /* get executor AFTER server*/
+    auto & this_executor = kj::getCurrentThreadExecutor();
 
     /* Create a channel to ask the event loop to stop: on stop request,
        the promise in the pair will be fulfilled. Since a PAF is not
@@ -41,23 +48,47 @@ void capnp_event_loop(std::stop_token stoken,
     auto stop_paf = kj::newPromiseAndFulfiller<void>();
     auto stop_cb = std::stop_callback(stoken,
         [&](){
-            auto locked = std::unique_lock{*executor_lock};
-            while(! client_evloop_executor)
-            {
-                executor_cv->wait(locked);
-            }
-            (*client_evloop_executor)->executeSync(
+
+            this_executor.executeSync(
                 [&] { stop_paf.fulfiller->fulfill(); }
             );
         }
     );
 
-    DEBUG("Starting capnp server on %s\n", local_bind_addr);
+    stop_paf.promise.wait(server.getWaitScope());
+    DEBUG("WARN: capnp server event loop exits!\n");
+}
 
-    auto main_interface = kj::heap<CVMRDMAServer>(); 
-    *server_cap = main_interface.get();
+/* The capnp thread starts the CVMRDMA server and returns its executor
+   so that the main thread can call functions on this thread. In particular;
+   this allows the main thread to create new client sessions on this thread. */
+void capnp_client_loop(std::stop_token stoken,
+    char const * remote_addr,
+    kj::Executor const ** client_evloop_executor,
+    kj::TaskSet ** taskset,
+    std::condition_variable * executor_cv, std::mutex * executor_lock,
+    ClientSession ** client_session
+    )
+{
 
-    capnp::EzRpcServer server(std::move(main_interface), local_bind_addr);
+    auto client = capnp::EzRpcClient{remote_addr}; 
+
+    /* get executor AFTER client */
+    auto & this_executor = kj::getCurrentThreadExecutor();
+
+
+    /* Create a channel to ask the event loop to stop: on stop request,
+       the promise in the pair will be fulfilled. Since a PAF is not
+       threadsafe, we must fulfill it through the executor as the
+       stop cb is executed in the requester thread! */
+    auto stop_paf = kj::newPromiseAndFulfiller<void>();
+    auto stop_cb = std::stop_callback(stoken,
+        [&](){
+            this_executor.executeSync(
+                [&] { stop_paf.fulfiller->fulfill(); }
+            );
+        }
+    );
 
     auto tk_handler = TrivialHandler{};
     auto tk = kj::TaskSet{tk_handler};
@@ -67,18 +98,29 @@ void capnp_event_loop(std::stop_token stoken,
         auto locked = std::unique_lock{*executor_lock};
         *client_evloop_executor = &kj::getCurrentThreadExecutor();
         *taskset = &tk;
+        *client_session = &client;
     }
     executor_cv->notify_one();
 
-    stop_paf.promise.wait(server.getWaitScope());
+    stop_paf.promise.wait(client.getWaitScope());
+    DEBUG("WARN: capnp client event loop exits!\n");
 }
+
+
+
 
 class CapnpEvloopThread
 {
 public:
     CapnpEvloopThread(char const * local_bind_addr, CVMRDMAServer ** server)
     {
-        m_thread = std::jthread{capnp_event_loop, local_bind_addr, &m_executor, &m_taskset, &m_executor_set_cv, &m_executor_lock, server};
+        m_server_thread = std::jthread{capnp_server_loop, local_bind_addr, server};
+    }
+
+    ClientSession * start_client(char const * remote_addr)
+    {
+        ClientSession * session = nullptr;
+        m_client_thread = std::jthread{capnp_client_loop, remote_addr, &m_executor, &m_taskset, &m_executor_set_cv, &m_executor_lock, &session};
 
         /* Wait until thread sets executor */
         {
@@ -88,6 +130,8 @@ public:
                 m_executor_set_cv.wait(locked);
             }
         }
+
+        return session;
     }
 
     
@@ -119,22 +163,9 @@ public:
     }
 
 
-    /* Cannot make it a kj::Own bc destructor fails on different thread ...
-       HACKY: using raw new/delete is not exception safe ! */
-    std::unique_ptr<capnp::EzRpcClient> new_rpc_session(char const * server_addr)
-    {
-        /* Create a new client session on the capnp thread */
-        return m_executor->executeSync(
-            [server_addr]() {
-                DEBUG("Starting capnp client session connected to '%s'\n", server_addr);
-                return std::make_unique<capnp::EzRpcClient>(server_addr);
-            }
-        );
-    }
-
-
 private:
-    std::jthread m_thread;
+    std::jthread m_server_thread;
+    std::jthread m_client_thread;
 
     kj::Executor const * m_executor = nullptr;
     kj::TaskSet * m_taskset = nullptr;
@@ -171,12 +202,7 @@ void destroy_capnp_event_loop(CapnpEvloopThread * evloop)
 ClientSession * new_client_rpc_session(CapnpEvloopThread * evloop, char const * server_addr)
 {
     /* Create a new client session on the capnp thread */
-    return evloop->get_executor().executeSync(
-        [server_addr]() {
-            DEBUG("Starting capnp client session connected to '%s'\n", server_addr);
-            return new capnp::EzRpcClient{server_addr};
-        }
-    );
+    return evloop->start_client(server_addr);
 }
 
 void destroy_client_rpc_session(CapnpEvloopThread * evloop, ClientSession * session)
@@ -216,81 +242,62 @@ void destroy_cvmrdma_client(CapnpEvloopThread * evloop, CVMRDMAClient * client)
    running the capnp event loop.
 
 */
-QPNotificationClient * get_qp_notification_client(CapnpEvloopThread * evloop, CVMRDMAClient * client, uint32_t remote_qpn, uint64_t const * tx_key)
+QPNotificationClient * get_qp_notification_client(CapnpEvloopThread * evloop, CVMRDMAClient * client, uint32_t remote_qpn)
 {
-    /* The capability is created in this thread, is this a problem ??
-       Plus it's a _lazy_ capability ! Should we wait on it before ?
-    */
+    /* The RPC returns a lazy capability. However: we really want it to be done: wait
+       for capability to be fully resolved. This way, we're sure that the remote has
+       the tx key when we return. */
 
-    return new QPNotificationClient{
+    QPNotificationClient * qnc = new QPNotificationClient{
         evloop->get_executor().executeSync(
             [=]() {
-                return get_qp_notification_client_rpc(client, remote_qpn, tx_key);
+                return register_qp_with_remote_qp_rpc(client, remote_qpn);
             }
         )
     };
+
+
+    /* return the resolved QNC */
+    return qnc;
 }
 
-void remote_qp_notify_send(CapnpEvloopThread *cev, QPNotificationClient *qnc,
-			   uint64_t length, uint64_t const *nonce,
-			   uint64_t const *mac)
+
+void set_remote_params(CapnpEvloopThread * evloop, QPNotificationClient *qnc, uint64_t const * tx_key, uint32_t local_ring_rkey)
 {
-    DEBUG("remote_qp_notify_send\n");
+    evloop->get_executor().executeSync(
+        [=]() { return set_remote_params_rpc(qnc, tx_key, local_ring_rkey); }
+    );
+}
+
+void remote_qp_notify_chunk(CapnpEvloopThread *cev, QPNotificationClient *qnc,
+    enum ibv_wr_opcode op,
+    uint32_t rkey, uint64_t hca_addr, 
+    uint64_t const * nonce,
+    bool last_chunk, uint32_t imm
+)
+{
+    DEBUG("remote_qp_notify_chunk\n");
 
     /* Add to taskset on evloop thread */
     cev->get_executor().executeSync(
         [=]() {
             cev->get_taskset().add(
-                remote_qp_notify_send_rpc(qnc, length, nonce, mac)
+                remote_qp_notify_chunk_rpc(qnc, op, rkey, hca_addr, nonce, last_chunk, imm)
             );
         }
     );
 }
 
 
-void remote_qp_notify_send_with_imm(CapnpEvloopThread *cev, QPNotificationClient *qnc,
-				    uint64_t length, uint32_t imm,
-				    uint64_t const *nonce, uint64_t const *mac)
+void remote_qp_notify_chunk_recv(CapnpEvloopThread *cev, QPNotificationClient *qnc)
 {
-	DEBUG("remote_qp_notify_send_with_imm\n");
+    DEBUG("remote_qp_notify_chunk_recv\n");
 
+    /* Add to taskset on evloop thread */
     cev->get_executor().executeSync(
         [=]() {
             cev->get_taskset().add(
-                remote_qp_notify_send_with_imm_rpc(qnc, length, imm, nonce, mac)
-            );
-        }
-    );
-
-}
-
-void remote_qp_notify_write(CapnpEvloopThread *cev, QPNotificationClient *qnc,
-			    uint64_t hca_addr, uint64_t length, uint32_t rkey,
-			    uint64_t const *nonce, uint64_t const *mac)
-{
-	DEBUG("remote_qp_notify_write\n");
-
-    cev->get_executor().executeSync(
-        [=]() {
-            cev->get_taskset().add(
-                remote_qp_notify_write_rpc(qnc, hca_addr, length, rkey, nonce, mac)
-            );
-        }
-    );
-}
-
-void remote_qp_notify_write_with_imm(CapnpEvloopThread *cev, QPNotificationClient *qnc,
-				     uint64_t hca_addr, uint64_t length,
-				     uint32_t rkey, uint32_t imm,
-				     uint64_t const *nonce, uint64_t const *mac)
-{
-	DEBUG("remote_qp_notify_write_with_imm\n");
-
-    cev->get_executor().executeSync(
-        [=]() {
-            cev->get_taskset().add(
-                remote_qp_notify_write_with_imm_rpc(qnc, hca_addr, length, rkey,
-						    imm, nonce, mac)
+                remote_qp_notify_chunk_recv_rpc(qnc)
             );
         }
     );

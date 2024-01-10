@@ -4,6 +4,8 @@
 
 #include <inttypes.h>
 
+#include <pthread.h>
+
 #include "notification_queue.h"
 #include "bounce_metadata.h"
 #include "recv_metadata.h"
@@ -24,45 +26,77 @@ using QncMap = ThreadsafeMap<uint32_t, qnc_client_t>;
 class QpNotificationChannel : public CVMRDMA::QpNotificationChannel::Server
 {
 public:
-    QpNotificationChannel(PdBounceMetadata & bounce_metadata, QpRecvMetadata & recv_metadata, NotificationQueue * nq, uint32_t qpn);
+    QpNotificationChannel(
+        NotificationQueue * nq,
+        uint32_t qpn,
+        int * send_lines_full_ptr,
+        pthread_mutex_t * send_lines_lock_ptr,
+        pthread_cond_t * send_lines_avail_ptr,
+        uint64_t * rx_key_ptr,
+        uint32_t * remote_ring_rkey_ptr,
+        bool * remote_params_set_ptr,
+        pthread_mutex_t *  remote_params_lock_ptr,
+        pthread_cond_t * remote_params_set_cv_ptr
+    );
     
-    kj::Promise<void> notifySend(NotifySendContext context) override;
-
+    kj::Promise<void> notifyChunk(NotifyChunkContext context) override;
+    kj::Promise<void> notifyChunkRecv(NotifyChunkRecvContext context) override;
+    kj::Promise<void> setRemoteParams(SetRemoteParamsContext context) override;
+    
     uint32_t get_qpn()
     {
         return m_qpn;
     }
 
-    void set_rx_key(aegis_key_t const & rx_key)
+    void set_qp_remote_params(uint64_t const * rx_key, uint32_t ring_rkey)
     {
-        DEBUG("setting rx_key on QNC for QPN %" PRIx32 "\n", m_qpn);
-        notification_queue_set_rx_key(m_notification_queue, rx_key);
+        DEBUG("setting rx_key and ring rkey %" PRIx32 "on QNC for local QPN %" PRIx32 "\n", ring_rkey, m_qpn);
+
+        pthread_mutex_lock(m_remote_params_lock_ptr);
+        memcpy(m_rx_key_ptr, rx_key, crypto_aead_aegis256_KEYBYTES);
+        *m_remote_ring_rkey_ptr = ring_rkey;
+        *m_remote_params_set_ptr = true;
+        pthread_mutex_unlock(m_remote_params_lock_ptr);
+
+        pthread_cond_signal(m_remote_params_set_cv_ptr);
     }
 
 private:
     uint32_t m_qpn = 0;
 
-    /* Per QP counter used as a nonce. */
-    unsigned int m_rx_counter = 0;
-
-    /* Metadata of the bounce buffers in this QP's PD */
-    PdBounceMetadata & m_bounce_metadata;
-
-    /* Location of the future recvs */
-    QpRecvMetadata & m_recv_metadata;
-
-
     /* Queue to CQ server. Owned by the CQ server through the NotificationQueueManager */
-    NotificationQueue * m_notification_queue;
+    NotificationQueue * m_notification_queue = nullptr;
+
+    uint64_t * m_rx_key_ptr = nullptr;
+    uint32_t * m_remote_ring_rkey_ptr = nullptr; 
+	bool * m_remote_params_set_ptr = nullptr;
+	pthread_mutex_t * m_remote_params_lock_ptr = nullptr;
+	pthread_cond_t * m_remote_params_set_cv_ptr = nullptr;
+
+    /* Counter in the original qp tracking the number of lines full in the remote recv ring / the locl send ring */
+    int * m_send_lines_full_ptr = nullptr;
+    pthread_mutex_t * m_send_lines_lock_ptr = nullptr;
+    pthread_cond_t * m_send_lines_avail_cv_ptr = nullptr;
 };
 
 
 class CVMRDMAServer : public CVMRDMA::Server
 {
 public:
-    kj::Promise<void> getQpChannelForQpn(GetQpChannelForQpnContext context) override;
+    kj::Promise<void> registerQpWithRemoteQp(RegisterQpWithRemoteQpContext context) override;
 
-    void qp_notification_channel_create(PdBounceMetadata * pd_bounce_metadata, QpRecvMetadata * recv_metadata, NotificationQueue * nq, uint32_t local_qpn);
+    void qp_notification_channel_create(
+        NotificationQueue * nq,
+        uint32_t local_qpn,
+        int * send_lines_full_ptr,
+        pthread_mutex_t * send_lines_lock_ptr,
+        pthread_cond_t * send_lines_avail_ptr,
+        uint64_t * rx_key_ptr,
+        uint32_t * remote_ring_rkey_ptr,
+        bool * remote_params_set_ptr,
+        pthread_mutex_t *  remote_params_lock_ptr,
+        pthread_cond_t * remote_params_set_cv_ptr
+    );
     void qp_notification_channel_destroy(QpNotificationChannel * pnc);
 
 private:
@@ -75,8 +109,18 @@ extern "C" {
 
 /* C API */
 
-typedef struct CVMRDMAServer CVMRDMAServer;
-void cvmrdma_server_register_qp(CVMRDMAServer * cs, PdBounceMetadata * pd_bounce_metadata, QpRecvMetadata * recv_metadata, NotificationQueue * nq, uint32_t local_qpn);
+void cvmrdma_server_register_qp(CVMRDMAServer * cs,
+    NotificationQueue * nq,
+    uint32_t local_qpn,
+    int * send_lines_full_ptr,
+    pthread_mutex_t * send_lines_lock_ptr,
+    pthread_cond_t * send_lines_avail_ptr,
+    uint64_t * rx_key_ptr,
+    uint32_t * remote_ring_rkey_ptr,
+    bool * remote_params_set_ptr,
+    pthread_mutex_t *  remote_params_lock_ptr,
+    pthread_cond_t * remote_params_set_cv_ptr
+);
 
 #ifdef __cplusplus
 }

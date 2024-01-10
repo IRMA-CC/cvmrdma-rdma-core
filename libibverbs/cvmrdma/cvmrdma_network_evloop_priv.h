@@ -5,6 +5,8 @@
 #include "cvmrdma_network_client.h"
 #include "cvmrdma_network_server.h"
 
+#include <infiniband/verbs.h>
+
 #ifdef __cplusplus
 extern "C" {
 #endif
@@ -25,23 +27,18 @@ void destroy_cvmrdma_client(CapnpEvloopThread * evloop, CVMRDMAClient * client);
 
 
 /* Get a capability to a given remote QP */
-QPNotificationClient * get_qp_notification_client(CapnpEvloopThread * evloop, CVMRDMAClient * client, uint32_t remote_qpn, uint64_t const * tx_key);
+QPNotificationClient * get_qp_notification_client(CapnpEvloopThread * evloop, CVMRDMAClient * client, uint32_t remote_qpn);
+void set_remote_params(CapnpEvloopThread * evloop, QPNotificationClient *qnc, uint64_t const * tx_key, uint32_t local_ring_rkey);
 
 
-/* The four notification functions take ownership of nonce and mac and pass it to the RPC function ! */
-void remote_qp_notify_send(CapnpEvloopThread *cev, QPNotificationClient *qnc,
-			   uint64_t length, uint64_t const *nonce,
-			   uint64_t const *mac);
-void remote_qp_notify_send_with_imm(CapnpEvloopThread *cev, QPNotificationClient *qnc,
-				    uint64_t length, uint32_t imm,
-				    uint64_t const *nonce, uint64_t const *mac);
-void remote_qp_notify_write(CapnpEvloopThread *cev, QPNotificationClient *qnc,
-			    uint64_t hca_addr, uint64_t length, uint32_t rkey,
-			    uint64_t const *nonce, uint64_t const *mac);
-void remote_qp_notify_write_with_imm(CapnpEvloopThread *cev, QPNotificationClient *qnc,
-				     uint64_t hca_addr, uint64_t length,
-				     uint32_t rkey, uint32_t imm,
-				     uint64_t const *nonce, uint64_t const *mac);
+/* The notification functions take ownership of nonce and pass it to the RPC function ! */
+void remote_qp_notify_chunk(CapnpEvloopThread *cev, QPNotificationClient *qnc,
+    enum ibv_wr_opcode op,
+    uint32_t rkey, uint64_t hca_addr, 
+    uint64_t const * nonce,
+    bool last_chunk, uint32_t imm
+);
+void remote_qp_notify_chunk_recv(CapnpEvloopThread *cev, QPNotificationClient *qnc);
 
 
 #ifdef __cplusplus

@@ -3,39 +3,44 @@
 interface CVMRDMA {
 
     enum IBVOp {
-      send @0;
-      sendWithImm @1;
-      write @2;
-      writeWithImm @3;
+      write @0;
+      writeWithImm @1;
+      send @2;
+      sendWithImm @3;
     }
 
     interface QpNotificationChannel {
-        # rkey is relative to the PD, so the notification is done on a PD-specific object
 
-        # for RC: WRITEs on a QP happen in-order, so a counter can be used for the nonce
-        # the counter has to be per-QP
-
-        # the length in the WC is an uint32_t, what happens if we send more than 4GiB ?
-        # maybe we can make the length here an uint32 too
-        # nonce: 32B, mac: 32B
-        notifySend @0 (
+        # notify the arrival of a chunk with WWI on the ring buffer
+        # the length will be present in the WWI_WC ; and decryption will
+        # fail if the length is altered
+        notifyChunk @0 (
             op :IBVOp,
-            length :UInt64,
-            imm :UInt32, # For *_IMM variants
-            hcaAddr :UInt64, rkey :UInt32, # for WRITE_* variants
+            rkey :UInt32, hcaAddr :UInt64, # for WRITE_* variants
             nonce0 :UInt64, nonce1 :UInt64, nonce2 :UInt64, nonce3 :UInt64,
-            mac0 :UInt64, mac1 :UInt64, mac2 :UInt64, mac3 :UInt64
+            lastChunk :Bool, imm :UInt32
         ) -> ();
 
-        # TODO: could add method to update txKey.
+        # called on WC for a WWI, freeing up a slot in the ring buffer
+        notifyChunkRecv @1 () -> ();
+
+        # tx key for client, rx on server
+        setRemoteParams @2 (
+            localRingRkey :UInt32,
+            txKey0 :UInt64, txKey1 :UInt64, txKey2 :UInt64, txKey3 :UInt64
+        ) -> ();
     }
 
     # Register a QP with the remote CQ server: get a notfication channel to the server,
     # and set the transmission key for this QP.
-    # Send the local QPN, and the key that will be used to send on this QP.
     # Each QP uses a different key to prevent nonce reuse
     # Sending and receiving use different keys: the sender generates the key
     # and sends it to the receiver
     # AEGIS-256 keys are 256 bits long
-    getQpChannelForQpn @0 (qpn :UInt32, txKey0 :UInt64, txKey1 :UInt64, txKey2 :UInt64, txKey3 :UInt64) -> (qnc :QpNotificationChannel);
+    # Also pass the rkey to the ring buffer associated with the local qp
+
+    registerQpWithRemoteQp @0 (
+        remoteQpn :UInt32,
+    ) -> (qnc :QpNotificationChannel);
+
 }
