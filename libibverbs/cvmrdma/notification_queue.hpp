@@ -13,10 +13,6 @@
 struct NotificationQueue
 {
     ThreadsafeQueue<std::unique_ptr<struct cq_server_notification>> queue;
-
-    /* RX key for the QP associated with this queue. */
-    aegis_key_t rx_key;
 };
 
 void notification_queue_push(NotificationQueue * q, std::unique_ptr<struct cq_server_notification> notif);
-void notification_queue_set_rx_key(NotificationQueue * q, aegis_key_t const & rx_key);
