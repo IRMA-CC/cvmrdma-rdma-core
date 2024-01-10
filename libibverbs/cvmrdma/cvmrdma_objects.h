@@ -1,0 +1,124 @@
+#pragma once
+
+#include <pthread.h>
+
+#include <infiniband/driver.h>
+
+#include "recv_metadata.h"
+#include "notification_queue.h"
+#include "cvmrdma_network_client.h"
+#include "cvmrdma_network_server.h"
+#include "cvmrdma_network_evloop.h"
+#include "cvmrdma_cq_server.h"
+#include "wc_queue.h"
+
+/* the library code modifies the user visible verbs_context quite a bit, it's difficult
+   to wrap it! instead, include cvmrdma_context _in_ verbs_context (in verbs.h) */
+struct cvmrdma_context {
+
+	/* Save the function pointers to the provider ops here. */
+	struct verbs_context_ops prov_ops;
+
+
+    /* CQ server for every QP is in this process */
+    CQServer cvmrdma_cq_server;
+    pthread_t cvmrdma_cq_server_thread;
+
+
+    /* Server and client for IP based RPCs.
+        The event loop runs the server by default, and later on CVMRDMA layer can
+        open as many sessions as necessary to remote servers on the same event loop.
+        From each session, the CVMRDMA layer can get a CVMRDMA client. 
+    
+        XXX: for now, we only connect a single remote.
+    */
+    CapnpEvloopThread * network_evloop;
+    CVMRDMAServer * network_server;
+    ClientSession * network_client_connection;
+    CVMRDMAClient * network_client_cap;
+
+	char const * remote_addr;
+};
+
+
+struct cvmrdma_pd {
+    struct ibv_pd user_pd;
+
+    struct ibv_pd * provider_pd;
+
+	/* XXX: we would put this in verbs_pd ... but it doesn't exist */
+	PdBounceMetadata * bounce_metadata;
+	uint32_t mr_id_ctr;
+};
+
+struct cvmrdma_mr {
+	/* Fake user-visible data */
+	struct verbs_mr user_mr;
+
+    uint64_t hca_va;
+};
+
+struct cvmrdma_cq {
+    struct verbs_cq user_cq;
+
+    /* a cvmrdma_cq does not correspond to a backend cq: there is a single CQ server,
+       this CQ only gets notification through the WCQueue */
+
+	WCQueue * wc_queue;
+};
+
+struct cvmrdma_qp {
+	/* Fake user-visible data */
+	struct verbs_qp user_qp;
+
+	/* Actual provider qp */
+	struct ibv_qp * provider_qp;
+
+	/* Capability of the remote QP to notify on WRITEs */
+	QPNotificationClient * remote_qnc;
+	/* Transmission key. AEGIS-256: 32 B. Generate the tx key, and receive the rx key */
+	uint64_t tx_key[4];
+
+	/* The IP based server will enqueue notifications related to this QP on this queue */
+	NotificationQueue * notification_queue;
+
+	/* Preserve order of post_* and the related notifications */
+	pthread_mutex_t cvmrdma_send_lock;
+
+	/* Protext send_lines_full */
+	pthread_mutex_t send_lines_full_lock;
+	/* Notifies that new send lines are available */
+	pthread_cond_t send_lines_avail;
+
+	/* Reserved chunks to gather, encrypt / scatter, decrypt */
+	void * bounce_private_mem;
+	/* Ring buffer associated to this QP exposed as an MR */
+	struct ibv_mr * ringbuf_mr;
+	int next_send_slot;
+	int send_lines_full;
+	int next_recv_slot;
+	int last_line_acked;
+
+	/* Remote params */
+	uint64_t rx_key[4];
+	uint32_t remote_ring_rkey;
+	bool remote_params_set;
+	pthread_mutex_t remote_params_lock;
+	pthread_cond_t remote_params_set_cv;
+
+
+
+	/* Save location of future recvs in FIFO. When recving a SEND, the CQ server will write
+	  chunk-by-chunk. The QP needs to remember where in the RR it has stopped to be able to write
+	  the next chunk */
+	QpRecvMetadata * recv_metadata;
+	int cur_sge_idx;
+	size_t cur_offt_in_sge;
+
+	/* Count the number of bytes recvd in this WR, to report in the WC */
+	size_t wr_bytes_rcved;
+
+	/* Whether the user requests a SEND_WC by default */
+	bool user_sq_sig_all;
+};
+

@@ -39,6 +39,8 @@
 #include <infiniband/driver.h>
 #include <util/bitmap.h>
 
+#include "cvmrdma/cvmrdma_objects.h"
+
 #define INIT		__attribute__((constructor))
 
 #define PFX		"libibverbs: "
@@ -75,6 +77,9 @@ struct verbs_ex_private {
 	bool use_ioctl_write;
 	struct verbs_context_ops ops;
 	bool imported;
+	/* Replace the "ops" cvmrdma wrappers, and save the provider ops for use
+	   by the wrapper in the CVMRDMA context */
+	struct cvmrdma_context cvmrdma_ctxt;
 };
 
 static inline struct verbs_ex_private *get_priv(struct ibv_context *ctx)
@@ -85,6 +90,11 @@ static inline struct verbs_ex_private *get_priv(struct ibv_context *ctx)
 static inline const struct verbs_context_ops *get_ops(struct ibv_context *ctx)
 {
 	return &get_priv(ctx)->ops;
+}
+
+static inline struct cvmrdma_context * cvmrdma_get_ctx(struct ibv_context * ibctxt)
+{
+	return &get_priv(ibctxt)->cvmrdma_ctxt;
 }
 
 enum ibv_node_type decode_knode_type(unsigned int knode_type);

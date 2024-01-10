@@ -47,11 +47,6 @@
 #include <sys/types.h>
 #include <infiniband/verbs_api.h>
 
-#include <infiniband/cvmrdma/cvmrdma_network_client.h>
-#include <infiniband/cvmrdma/cvmrdma_network_evloop.h>
-#include <infiniband/cvmrdma/cvmrdma_network_server.h>
-
-
 #ifdef __cplusplus
 #include <limits>
 #endif
@@ -638,9 +633,6 @@ struct ibv_mw_bind_info {
 struct ibv_pd {
 	struct ibv_context     *context;
 	uint32_t		handle;
-
-	/* XXX: we would put this in verbs_pd ... but it doesn't exist */
-	struct PdBounceMetadata * bounce_metadata;
 };
 
 struct ibv_td_init_attr {
@@ -2142,58 +2134,6 @@ struct ibv_values_ex {
 
 struct verbs_context {
 	/*  "grows up" - new fields go here */
-
-	/* cvmrdma_context */
-	struct {
-		/* Providers ops. Original ops in the provider that we may call
-		   from the CVMRDMA wrapper. */
-		struct ibv_pd *(*alloc_pd)(struct ibv_context *context);
-		struct ibv_cq *(*create_cq)(struct ibv_context *context, int cqe,
-						struct ibv_comp_channel *channel,
-						int comp_vector);
-		struct ibv_qp *(*create_qp)(struct ibv_pd *pd,
-						struct ibv_qp_init_attr *attr);
-		int (*dealloc_pd)(struct ibv_pd *pd);
-		int (*dereg_mr)(struct verbs_mr *vmr);
-		int (*destroy_cq)(struct ibv_cq *cq);
-		int (*destroy_qp)(struct ibv_qp *qp);
-		void (*free_context)(struct ibv_context *context);
-		int (*modify_qp)(struct ibv_qp *qp, struct ibv_qp_attr *attr,
-				int attr_mask);
-
-		int (*poll_cq)(struct ibv_cq *cq, int num_entries, struct ibv_wc *wc);
-		int (*post_recv)(struct ibv_qp *qp, struct ibv_recv_wr *wr,
-				struct ibv_recv_wr **bad_wr);
-		int (*post_send)(struct ibv_qp *qp, struct ibv_send_wr *wr,
-				struct ibv_send_wr **bad_wr);
-		int (*query_device_ex)(struct ibv_context *context,
-					const struct ibv_query_device_ex_input *input,
-					struct ibv_device_attr_ex *attr,
-					size_t attr_size);
-		int (*query_port)(struct ibv_context *context, uint8_t port_num,
-				struct ibv_port_attr *port_attr);
-		struct ibv_mr *(*reg_dmabuf_mr)(struct ibv_pd *pd, uint64_t offset,
-						size_t length, uint64_t iova,
-						int fd, int access);
-		struct ibv_mr *(*reg_mr)(struct ibv_pd *pd, void *addr, size_t length,
-					uint64_t hca_va, int access);
-		int (*req_notify_cq)(struct ibv_cq *cq, int solicited_only);
-
-		/* Server and client for IP based RPCs.
-		   The event loop runs the server by default, and later on CVMRDMA layer can
-		   open as many sessions as necessary to remote servers on the same event loop.
-		   From each session, the CVMRDMA layer can get a CVMRDMA client. 
-		
-		   XXX: for now, we only connect a single remote.
-		*/
-		CapnpEvloopThread * network_evloop;
-		CVMRDMAServer * network_server;
-		ClientSession * network_client_connection;
-		CVMRDMAClient * network_client_cap;
-
-	} cvmrdma;
-
-	/* verbs_context */
 	int (*query_port)(struct ibv_context *context, uint8_t port_num,
 			  struct ibv_port_attr *port_attr,
 			  size_t port_attr_len);

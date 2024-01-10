@@ -47,10 +47,6 @@
 #include <infiniband/cmd_ioctl.h>
 #include <sys/types.h>
 
-#include <pthread.h>
-
-#include "cvmrdma/cvmrdma_cq_server.h" /* Each CQ holds a CQ server thread */
-#include "cvmrdma/cvmrdma_network_client.h" /* Each CQ holds a CQ server thread */
 
 struct verbs_device;
 
@@ -168,16 +164,6 @@ struct verbs_qp {
 	};
 	uint32_t		comp_mask;
 	struct verbs_xrcd       *xrcd;
-
-	/* Capability of the remote QP to notify on WRITEs */
-	QPNotificationClient * remote_qnc;
-	/* Save location of future recvs in FIFO */
-	struct QpRecvMetadata * recv_metadata;
-	/* Transmission key. AEGIS-256: 32 B*/
-	uint64_t tx_key[4];
-
-	pthread_mutex_t cvmrdma_recv_lock;
-	pthread_mutex_t cvmrdma_send_lock;
 };
 static_assert(offsetof(struct ibv_qp_ex, qp_base) == 0, "Invalid qp layout");
 
@@ -186,10 +172,6 @@ struct verbs_cq {
 		struct ibv_cq cq;
 		struct ibv_cq_ex cq_ex;
 	};
-
-	CQServer cvmrdma_cq_server;
-	pthread_t cvmrdma_cq_server_thread;
-	WCQueue * wc_queue;
 };
 
 enum ibv_flow_action_type {
