@@ -17,7 +17,7 @@ interface CVMRDMA {
         notifyChunk @0 (
             op :IBVOp,
             rkey :UInt32, hcaAddr :UInt64, # for WRITE_* variants
-            nonce0 :UInt64, nonce1 :UInt64, nonce2 :UInt64, nonce3 :UInt64,
+            nonce0 :UInt64, nonce1 :UInt64, nonce2 :UInt64,
             lastChunk :Bool, imm :UInt32
         ) -> ();
 
@@ -36,7 +36,6 @@ interface CVMRDMA {
     # Each QP uses a different key to prevent nonce reuse
     # Sending and receiving use different keys: the sender generates the key
     # and sends it to the receiver
-    # AEGIS-256 keys are 256 bits long
     # Also pass the rkey to the ring buffer associated with the local qp
 
     registerQpWithRemoteQp @0 (

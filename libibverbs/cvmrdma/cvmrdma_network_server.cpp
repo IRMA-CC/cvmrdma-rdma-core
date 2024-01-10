@@ -76,7 +76,6 @@ kj::Promise<void> QpNotificationChannel::notifyChunk(NotifyChunkContext context)
     nonce64[0] = p.getNonce0();
     nonce64[1] = p.getNonce1();
     nonce64[2] = p.getNonce2();
-    nonce64[3] = p.getNonce3();
 
 
     notification->hca_addr = p.getHcaAddr();

@@ -476,7 +476,7 @@ static int post_send_do_bounce(struct cvmrdma_qp * qp, struct ibv_send_wr *wrs, 
 
 			/* Store the nonce word aligned to make serialization easier
 			Store on the heap  */
-			uint64_t nonce[crypto_aead_aegis256_NPUBBYTES / sizeof(uint64_t)];
+			uint64_t nonce[crypto_aead_xchacha20poly1305_ietf_NPUB_WORDS];
 
 
 			/* Generate the nonce to use for the encryption */
@@ -487,8 +487,8 @@ static int post_send_do_bounce(struct cvmrdma_qp * qp, struct ibv_send_wr *wrs, 
 			TIMING("chunk_notify");
 			{
 				/* Make a copy of the nonce on the heap to pass ownership to another thread */
-				uint64_t * nonce_for_notif = malloc(crypto_aead_aegis256_NPUBBYTES);
-				memcpy(nonce_for_notif, &nonce, crypto_aead_aegis256_NPUBBYTES);
+				uint64_t * nonce_for_notif = malloc(sizeof(nonce));
+				memcpy(nonce_for_notif, &nonce, sizeof(nonce));
 
 				if(is_write)
 				{
@@ -608,13 +608,12 @@ static int post_send_do_bounce(struct cvmrdma_qp * qp, struct ibv_send_wr *wrs, 
 			/**** ENCRYPT *****/
 
 			DEBUG("ptxt %x %x %x\n", ptxt[0], ptxt[1], ptxt[2]);
-			DEBUG("plen %llu\n", chunk_bytes);
-			DEBUG("nonce %llx %llx %llx %llx\n", nonce[0], nonce[1], nonce[2], nonce[3]);
-			DEBUG("tx_key %llx\n", tx_key[0]);
+			DEBUG("plen %zu\n", chunk_bytes);
+			DEBUG("nonce %lx %lx %lx\n", nonce[0], nonce[1], nonce[2]);
 
 			TIMING("enc_t0");
 			unsigned long long clen = CVMRDMA_RING_SLOT_BYTES;
-			err = crypto_aead_aegis256_encrypt(
+			err = crypto_aead_xchacha20poly1305_ietf_encrypt(
 				encrypted,
 				&clen,
 				ptxt, chunk_bytes,
@@ -635,7 +634,7 @@ static int post_send_do_bounce(struct cvmrdma_qp * qp, struct ibv_send_wr *wrs, 
 			DEBUG("clen %llu\n", clen);
 
 			/* The ciphertext has length (plen + maclen) */
-			assert(clen == (chunk_bytes + crypto_aead_aegis256_ABYTES));
+			assert(clen == (chunk_bytes + crypto_aead_xchacha20poly1305_ietf_ABYTES));
 
 
 			/***** COPY ******/

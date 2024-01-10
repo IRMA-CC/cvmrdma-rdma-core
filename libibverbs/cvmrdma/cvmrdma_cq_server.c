@@ -141,14 +141,13 @@ static void * cq_server_loop(void * args)
                 unsigned long long clen = wc_length;
                 unsigned long long mlen = CVMRDMA_RING_SLOT_BYTES;
 
-                DEBUG("nonce %llx %llx %llx %llx\n", nonce[0], nonce[1], nonce[2], nonce[3]);
+                DEBUG("nonce %lx %lx %lx\n", nonce[0], nonce[1], nonce[2]);
                 DEBUG("private %x %x %x ...\n", private[0], private[1], private[2]);
                 DEBUG("clen %llu\n", clen);
-                DEBUG("rx_key %llx\n", rx_key[0]);
 
 
                 TIMING("dec_t0");
-                err = crypto_aead_aegis256_decrypt(
+                err = crypto_aead_xchacha20poly1305_ietf_decrypt(
                     decrypted, &mlen,
                     NULL,
                     private, clen,
@@ -227,7 +226,7 @@ static void * cq_server_loop(void * args)
                     if(bytes_copied < mlen)
                     {
                         /* Early loop exit bc the sglist is empty. This is an error ! */
-                        fprintf(stderr, "Incoming chunk would exceed the end of the receive request! (chunk %zu > recv %zu)\n", mlen, bytes_copied);
+                        fprintf(stderr, "Incoming chunk would exceed the end of the receive request! (chunk %llu > recv %zu)\n", mlen, bytes_copied);
                         exit(1);
                         /* TODO: emit IBV_WC_LOC_LEN_ERR in WC status for user !*/
                     }

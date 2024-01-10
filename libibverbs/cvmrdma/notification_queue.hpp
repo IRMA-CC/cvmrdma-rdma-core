@@ -8,7 +8,6 @@
 #include <memory>
 
 #include "ThreadsafeQueue.hpp"
-#include "aegis.hpp"
 
 struct NotificationQueue
 {

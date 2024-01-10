@@ -4,6 +4,7 @@
 
 #include <infiniband/driver.h>
 
+#include "crypto.h"
 #include "recv_metadata.h"
 #include "notification_queue.h"
 #include "cvmrdma_network_client.h"
@@ -76,8 +77,8 @@ struct cvmrdma_qp {
 
 	/* Capability of the remote QP to notify on WRITEs */
 	QPNotificationClient * remote_qnc;
-	/* Transmission key. AEGIS-256: 32 B. Generate the tx key, and receive the rx key */
-	uint64_t tx_key[4];
+	/* Transmission key Generate the tx key, and receive the rx key */
+	uint64_t tx_key[crypto_aead_xchacha20poly1305_ietf_KEY_WORDS];
 
 	/* The IP based server will enqueue notifications related to this QP on this queue */
 	NotificationQueue * notification_queue;
@@ -100,7 +101,7 @@ struct cvmrdma_qp {
 	int last_line_acked;
 
 	/* Remote params */
-	uint64_t rx_key[4];
+	uint64_t rx_key[crypto_aead_xchacha20poly1305_ietf_KEY_WORDS];
 	uint32_t remote_ring_rkey;
 	bool remote_params_set;
 	pthread_mutex_t remote_params_lock;

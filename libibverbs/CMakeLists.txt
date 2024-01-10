@@ -23,6 +23,7 @@ publish_headers(infiniband/cvmrdma
 )
 
 publish_internal_headers(infiniband/cvmrdma
+  cvmrdma/crypto.h
   cvmrdma/cvmrdma_cq_server.h
   cvmrdma/cvmrdma_network_client_priv.h
   cvmrdma/cvmrdma_network_evloop_priv.h

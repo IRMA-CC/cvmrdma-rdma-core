@@ -47,7 +47,6 @@ kj::Promise<void> remote_qp_notify_chunk_rpc(
     req.setNonce0(nonce[0]);
     req.setNonce1(nonce[1]);
     req.setNonce2(nonce[2]);
-    req.setNonce3(nonce[3]);
 
     req.setLastChunk(last_chunk);
     req.setImm(imm);

@@ -4,7 +4,6 @@
 #include <mutex>
 #include <memory>
 
-#include "aegis.hpp"
 #include "notification_queue.hpp"
 #include "debug.h"
 
