@@ -39,6 +39,9 @@ struct cvmrdma_context {
     CVMRDMAClient * network_client_cap;
 
 	char const * remote_addr;
+
+	/* dma heap to allocate the public buffers on */
+	int dma_heap;
 };
 
 
@@ -93,8 +96,11 @@ struct cvmrdma_qp {
 
 	/* Reserved chunks to gather, encrypt / scatter, decrypt */
 	void * bounce_private_mem;
-	/* Ring buffer associated to this QP exposed as an MR */
+	/* Ring buffer associated to this QP exposed as an MR. */
 	struct ibv_mr * ringbuf_mr;
+	void * ringbuf_va;
+	int ringbuf_dmabuf_fd;
+
 	int next_send_slot;
 	int send_lines_full;
 	int next_recv_slot;

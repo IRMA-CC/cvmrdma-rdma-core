@@ -2,8 +2,14 @@
 
 #include <stdio.h>
 #include <stdlib.h>
-#include <sys/mman.h>
+
 #include <arpa/inet.h> /* ntohl */
+#include <unistd.h>
+
+#include <sys/mman.h>
+#include <sys/ioctl.h>
+
+#include <linux/dma-buf.h>
 
 #include <sodium.h>
 
@@ -21,6 +27,7 @@
 #include "notification_queue.h"
 #include "recv_metadata.h"
 #include "wc_queue.h"
+#include "dma_heap.h"
 
 #include "debug.h"
 
@@ -126,6 +133,94 @@ static int attach_qp_to_cq_server(struct cvmrdma_context * ctxt, struct cvmrdma_
 	return 0;
 }
 
+/* Allocate a zero-indexed publicly available mr*/
+static struct ibv_mr * alloc_public_mr(struct cvmrdma_context * ctxt, struct cvmrdma_pd *pd, size_t size, int * dmabuf_fd, void ** ringbuf_va)
+{
+	int ret;
+	int dma_buf;
+
+#ifndef DUMMY_SYSTEM_HEAP
+	dma_buf = alloc_dma_buf(ctxt->dma_heap, size);
+	if(dma_buf < 0)
+	{
+		fprintf(stderr, "Failed to allocate dma-buf\n");
+		goto err;
+	}
+
+
+	/* WARN: MUST attach+dma_map to dma-buf before mmap !! In our hacky implementation, the actual
+	   allocation is done in dma_map */
+	int access = IBV_ACCESS_LOCAL_WRITE | IBV_ACCESS_REMOTE_WRITE | IBV_ACCESS_RELAXED_ORDERING;
+	size_t offt = 0;
+	struct ibv_mr * mr = ctxt->prov_ops.reg_dmabuf_mr(
+		pd->provider_pd,
+		offt, size, 0,
+		dma_buf, access
+	);
+	if(! mr)
+	{
+		fprintf(stderr, "Failed to reg dmabuf as mr\n");
+		goto free_dma_buf;
+	}
+
+
+	/* direct access to provider ops does NOT set ibv fields ! */
+	void * va = mmap(0, size, PROT_READ | PROT_WRITE, MAP_SHARED_VALIDATE, dma_buf, 0);
+	if(va == MAP_FAILED)
+	{
+		fprintf(stderr, "Failed to mmap dma-buf\n");
+		goto dereg_mr;
+	}
+
+
+	mr->addr = (void *)(uintptr_t)offt; /* oddity in libibverb, follow */
+
+#else
+	dma_buf = -1;
+
+	void * va = mmap(0, size, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
+	if(va == MAP_FAILED)
+	{
+		fprintf(stderr, "Failed to mmap public MR buf\n");
+		goto err;
+	}
+
+	int access = IBV_ACCESS_LOCAL_WRITE | IBV_ACCESS_REMOTE_WRITE | IBV_ACCESS_RELAXED_ORDERING;
+
+	struct ibv_mr * mr = ctxt->prov_ops.reg_mr(
+		pd->provider_pd, va, size, 0, access 
+	);
+	if(! mr)
+	{
+		fprintf(stderr, "Failed to reg public mr\n");
+		goto unmap;
+	}
+
+	mr->addr = va;
+#endif
+
+	/* setup the internal fields of ibv_mr */
+	mr->context = pd->user_pd.context;
+	mr->pd = &pd->user_pd;
+	mr->length = size;
+
+	DEBUG("public mr: dmabuf %d va %p len %zu\n", *dmabuf_fd, va, size);
+
+	*dmabuf_fd = dma_buf;
+	*ringbuf_va = va;
+
+	return mr;
+
+dereg_mr:
+	// TODO: dereg mr on failure ...
+#ifndef DUMMY_SYSTEM_HEAP
+free_dma_buf:
+	close(dma_buf);
+#endif
+err:
+	return NULL;
+}
+
 static struct ibv_qp *cvmrdma_create_qp(struct ibv_pd * ibpd,
 				struct ibv_qp_init_attr *attr)
 {
@@ -185,7 +280,7 @@ static struct ibv_qp *cvmrdma_create_qp(struct ibv_pd * ibpd,
 	qp->wr_bytes_rcved = 0;
 
 	/* Allocate the bounce regions and ring buffer for this QP */
-	void * bounce_private_mem = mmap(0, CVMRDMA_PRIV_BOUNCE_TOTAL_BYTES, PROT_WRITE | PROT_WRITE, MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
+	void * bounce_private_mem = mmap(0, CVMRDMA_PRIV_BOUNCE_TOTAL_BYTES, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
 	if (bounce_private_mem == MAP_FAILED) {
 		err = errno;
 		fprintf(stderr, "Failed to mmap bounce buffer %d\n", err);
@@ -196,30 +291,18 @@ static struct ibv_qp *cvmrdma_create_qp(struct ibv_pd * ibpd,
 
     /* To perform the bounce, we'll need to read and write the ring buffers */
 	size_t all_rings_bytes = __CVMRDMA_RING_NR * CVMRDMA_RING_TOTAL_BYTES;
-	void * ringbufs_public = mmap(0, all_rings_bytes, PROT_WRITE | PROT_WRITE, MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
-	if (ringbufs_public == MAP_FAILED) {
-		err = errno;
-		fprintf(stderr, "Failed to mmap bounce buffer %d\n", err);
-		goto free_bounce_private;
-	}
-	/* reg_mr the bounce buffer as a 0-indexed MR
-	XXX: depending on access, we might not need in output and an input ring buffer
-	*/
-	int access = IBV_ACCESS_LOCAL_WRITE | IBV_ACCESS_REMOTE_WRITE | IBV_ACCESS_RELAXED_ORDERING;
-    struct ibv_mr * ringbuf_mr = ctxt->prov_ops.reg_mr(prov_pd, ringbufs_public, all_rings_bytes, 0, access);
+
+	int dmabuf_fd = -1;
+	void * ringbuf_va = NULL;
+	struct ibv_mr * ringbuf_mr = alloc_public_mr(ctxt, pd, all_rings_bytes, &dmabuf_fd, &ringbuf_va);
     if(! ringbuf_mr)
     {
-        goto free_bounce_public;
+        goto free_bounce_private;
     }
 
-	/* see ibv_reg_mr_iova2 */
-	ringbuf_mr->context = prov_ctxt;
-	ringbuf_mr->pd      = prov_pd;
-	ringbuf_mr->addr    = ringbufs_public;
-	ringbuf_mr->length  = all_rings_bytes;
-
-
 	qp->ringbuf_mr = ringbuf_mr;
+	qp->ringbuf_dmabuf_fd = dmabuf_fd;
+	qp->ringbuf_va = ringbuf_va;
 
 	qp->next_send_slot = 0;
 	qp->next_recv_slot = 0;
@@ -263,9 +346,8 @@ static struct ibv_qp *cvmrdma_create_qp(struct ibv_pd * ibpd,
 free_send_lock:
 	pthread_mutex_destroy(&qp->cvmrdma_send_lock);
 dereg_ring_mr:
-	ibv_dereg_mr(ringbuf_mr);
-free_bounce_public:
-	munmap(ringbufs_public, all_rings_bytes);
+	ctxt->prov_ops.dereg_mr(verbs_get_mr(ringbuf_mr));
+	close(dmabuf_fd);
 free_bounce_private:
 	munmap(bounce_private_mem, CVMRDMA_PRIV_BOUNCE_TOTAL_BYTES);
 free_recv_metadata:
@@ -450,7 +532,7 @@ static int post_send_do_bounce(struct cvmrdma_qp * qp, struct ibv_send_wr *wrs, 
 		unsigned char * gather = (unsigned char *)qp->bounce_private_mem + CVMRDMA_PRIV_CHUNK_SG_OUT * CVMRDMA_RING_SLOT_BYTES;
 		unsigned char * encrypted = (unsigned char *)qp->bounce_private_mem + CVMRDMA_PRIV_CHUNK_ENC_OUT * CVMRDMA_RING_SLOT_BYTES;
 
-		unsigned char * ringbuf_out = qp->ringbuf_mr->addr + CVMRDMA_RING_SEND * CVMRDMA_RING_TOTAL_BYTES;;
+		unsigned char * ringbuf_out = qp->ringbuf_va + CVMRDMA_RING_SEND * CVMRDMA_RING_TOTAL_BYTES;;
 
 		struct ibv_sge * sgl = this_wr->sg_list;
 		size_t nsge = this_wr->num_sge;
@@ -952,6 +1034,17 @@ static struct verbs_context *cvmrdma_alloc_context(struct ibv_device *ibdev,
 		fprintf(stderr, "Failed to start CQ server %d\n", ret);
 		exit(1);
 	}
+
+#ifndef DUMMY_SYSTEM_HEAP
+	int system_heap_fd = open_system_heap();
+	if(system_heap_fd < 0)
+	{
+		ret = (int)errno;
+		fprintf(stderr, "Failed to open system DMA heap (%d)\n", ret);
+		exit(1);
+	}
+	cvmrdma_ctx->dma_heap = system_heap_fd;
+#endif
 
 	return prov_verbs_context;
 

@@ -109,7 +109,7 @@ static void * cq_server_loop(void * args)
 
                 uint64_t const * rx_key = qp->rx_key;
 
-                unsigned char * ringbuf_in = (unsigned char *)qp->ringbuf_mr->addr + CVMRDMA_RING_RECV * CVMRDMA_RING_TOTAL_BYTES;
+                unsigned char * ringbuf_in = (unsigned char *)qp->ringbuf_va + CVMRDMA_RING_RECV * CVMRDMA_RING_TOTAL_BYTES;
 		        unsigned char * private = (unsigned char *)qp->bounce_private_mem + CVMRDMA_PRIV_CHUNK_ENC_IN * CVMRDMA_RING_SLOT_BYTES;
 		        unsigned char * decrypted = (unsigned char *)qp->bounce_private_mem + CVMRDMA_PRIV_CHUNK_SG_IN * CVMRDMA_RING_SLOT_BYTES;
 

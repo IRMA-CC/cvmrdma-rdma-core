@@ -37,6 +37,7 @@ publish_internal_headers(infiniband/cvmrdma
   cvmrdma/recv_metadata.hpp
   cvmrdma/taskset_wrapper.h
   cvmrdma/wc_queue.h
+  cvmrdma/dma_heap.h
 )
 
 configure_file("libibverbs.map.in"
@@ -96,6 +97,7 @@ rdma_library(ibverbs "${CMAKE_CURRENT_BINARY_DIR}/libibverbs.map"
   cvmrdma/recv_metadata.cpp
   cvmrdma/taskset_wrapper.cpp
   cvmrdma/wc_queue.cpp
+  cvmrdma/dma_heap.c
 
   
   ${CAPNP_SRCS}
@@ -125,6 +127,11 @@ target_compile_features(ibverbs
 PUBLIC
   cxx_std_20
 )
+
+if(DUMMY_SYSTEM_HEAP)
+  target_compile_definitions(ibverbs PRIVATE DUMMY_SYSTEM_HEAP)
+endif()
+
 
 
 function(ibverbs_finalize)
