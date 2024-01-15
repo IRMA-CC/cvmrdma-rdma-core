@@ -470,6 +470,11 @@ if (NOT NO_MAN_PAGES)
   FIND_PACKAGE(rst2man)
 endif ()
 
+if(DUMMY_SYSTEM_HEAP)
+  add_compile_definitions(DUMMY_SYSTEM_HEAP)
+endif()
+
+
 #-------------------------
 # Find libraries
 # pthread

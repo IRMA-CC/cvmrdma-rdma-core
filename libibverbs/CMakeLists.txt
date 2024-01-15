@@ -128,11 +128,6 @@ PUBLIC
   cxx_std_20
 )
 
-if(DUMMY_SYSTEM_HEAP)
-  target_compile_definitions(ibverbs PRIVATE DUMMY_SYSTEM_HEAP)
-endif()
-
-
 
 function(ibverbs_finalize)
   if (ENABLE_STATIC)
