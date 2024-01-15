@@ -1947,13 +1947,19 @@ int mlx5_alloc_cq_buf(struct mlx5_context *mctx, struct mlx5_cq *cq,
 		buf->req_alignment = dev->page_size;
 		buf->resource_type = MLX5DV_RES_TYPE_CQ;
 	}
-
+#ifndef DUMMY_SYSTEM_HEAP
+	ret = mlx5_alloc_public_buf(mctx, buf,
+		align(nent * cqe_sz, dev->page_size),
+		dev->page_size
+	);
+#else
 	ret = mlx5_alloc_prefered_buf(mctx, buf,
 				      align(nent * cqe_sz, dev->page_size),
 				      dev->page_size,
 				      type,
 				      MLX5_CQ_PREFIX);
 
+#endif
 	if (ret)
 		return -1;
 

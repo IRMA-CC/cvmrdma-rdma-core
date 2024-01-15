@@ -62,11 +62,14 @@ static struct mlx5_db_page *__add_page(struct mlx5_context *context)
 	page = malloc(sizeof *page + nlong * sizeof(long));
 	if (!page)
 		return NULL;
-
+#ifndef DUMMY_SYSTEM_HEAP
+	ret = mlx5_alloc_public_buf(context, &page->buf, ps, ps);
+#else
 	if (mlx5_is_extern_alloc(context))
 		ret = mlx5_alloc_buf_extern(context, &page->buf, ps);
 	else
 		ret = mlx5_alloc_buf(&page->buf, ps, ps);
+#endif
 	if (ret) {
 		free(page);
 		return NULL;
@@ -85,10 +88,12 @@ static struct mlx5_db_page *__add_page(struct mlx5_context *context)
 }
 
 __be32 *mlx5_alloc_dbrec(struct mlx5_context *context, struct ibv_pd *pd,
-			 bool *custom_alloc)
+			 bool *custom_alloc, int * db_page_fd)
 {
 	struct mlx5_db_page *page;
 	__be32 *db = NULL;
+	unsigned long long offt = 0;
+	int fd = -1;
 	int i, j;
 
 	if (mlx5_is_custom_alloc(pd)) {
@@ -103,8 +108,8 @@ __be32 *mlx5_alloc_dbrec(struct mlx5_context *context, struct ibv_pd *pd,
 
 		if (!db)
 			return NULL;
-
 		*custom_alloc = true;
+		*db_page_fd = -1;
 		return db;
 	}
 
@@ -132,10 +137,12 @@ found:
 	--j;
 	page->free[i] &= ~(1UL << j);
 	db = page->buf.buf + (i * 8 * sizeof(long) + j) * context->cache_line_size;
+	fd = page->buf.public_fd;
 
 out:
 	pthread_mutex_unlock(&context->dbr_map_mutex);
 
+	*db_page_fd = fd;
 	return db;
 }
 
@@ -176,7 +183,7 @@ void mlx5_free_db(struct mlx5_context *context, __be32 *db, struct ibv_pd *pd,
 		if (page->buf.type == MLX5_ALLOC_TYPE_EXTERNAL)
 			mlx5_free_buf_extern(context, &page->buf);
 		else
-			mlx5_free_buf(&page->buf);
+			mlx5_free_public_buf(context, &page->buf);
 
 		free(page);
 	}

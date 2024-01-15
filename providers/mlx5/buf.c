@@ -40,6 +40,10 @@
 #include <errno.h>
 #include <sys/mman.h>
 #include <util/bitmap.h>
+#include <sys/fcntl.h>
+#include <unistd.h>
+
+#include "public_alloc.h"
 
 #include "mlx5.h"
 
@@ -357,6 +361,10 @@ int mlx5_free_actual_buf(struct mlx5_context *ctx, struct mlx5_buf *buf)
 		mlx5_free_buf_custom(ctx, buf);
 		break;
 
+	case MLX5_ALLOC_TYPE_PUBLIC_DMABUF:
+		mlx5_free_public_buf(ctx, buf);
+		break;
+
 	default:
 		mlx5_err(ctx->dbg_fp, "Bad allocation type\n");
 	}
@@ -568,4 +576,52 @@ void mlx5_free_buf(struct mlx5_buf *buf)
 {
 	ibv_dofork_range(buf->buf, buf->length);
 	free(buf->buf);
+}
+
+int mlx5_alloc_public_buf(struct mlx5_context *context, struct mlx5_buf *buf, size_t size, int page_size)
+{
+	int ret;
+	int al_size;
+	int pubmem_fd;
+	void * va;
+
+	al_size = align(size, page_size);
+
+	ret = mlx5_cmd_alloc_public_mem(&context->ibv_ctx.context, al_size, O_RDWR | O_CLOEXEC, &pubmem_fd, NULL);
+	if(ret)
+	{
+		goto ret;
+	}
+
+	fprintf(stderr, "dmabuf fd %d\n", pubmem_fd);
+
+	/* mmap already aligns to page size */
+	va = mmap(0, al_size, PROT_READ | PROT_WRITE, MAP_SHARED_VALIDATE, pubmem_fd, 0);
+	if(va == MAP_FAILED)
+	{
+		ret = EINVAL;
+		goto free_pubmem;
+	}
+	assert(((uintptr_t)va % page_size) == 0);
+
+	buf->buf = va;
+	buf->length = al_size;
+	buf->type = MLX5_ALLOC_TYPE_PUBLIC_DMABUF;
+	buf->public_fd = pubmem_fd;
+
+	return 0;
+
+free_pubmem:
+	/* XXX: no ioctl to free yet ...*/
+	close(pubmem_fd);
+ret:
+	return ret;
+}
+
+
+void mlx5_free_public_buf(struct mlx5_context *context, struct mlx5_buf *buf)
+{
+	munmap(buf->buf, buf->length);
+	close(buf->public_fd);
+	/* XXX: no ioctl to free yet ...*/
 }

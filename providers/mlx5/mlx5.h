@@ -202,6 +202,7 @@ enum mlx5_alloc_type {
 	MLX5_ALLOC_TYPE_PREFER_CONTIG,
 	MLX5_ALLOC_TYPE_EXTERNAL,
 	MLX5_ALLOC_TYPE_CUSTOM,
+	MLX5_ALLOC_TYPE_PUBLIC_DMABUF,
 	MLX5_ALLOC_TYPE_ALL
 };
 
@@ -437,6 +438,7 @@ struct mlx5_buf {
 	void			       *buf;
 	size_t				length;
 	int                             base;
+	int  public_fd;
 	struct mlx5_hugetlb_mem	       *hmem;
 	enum mlx5_alloc_type		type;
 	uint64_t			resource_type;
@@ -501,6 +503,7 @@ struct mlx5_cq {
 	uint32_t			cons_index;
 	__be32			       *dbrec;
 	bool				custom_db;
+	int db_page_fd;
 	int				arm_sn;
 	int				cqe_sz;
 	int				resize_cqe_sz;
@@ -550,6 +553,7 @@ struct mlx5_srq {
 	int				waitq_tail;
 	__be32			       *db;
 	bool				custom_db;
+	int db_page_fd;
 	uint16_t			counter;
 	int				wq_sig;
 	struct ibv_qp		       *cmd_qp;
@@ -689,6 +693,7 @@ struct mlx5_qp {
 
 	__be32                         *db;
 	bool				custom_db;
+	int db_page_fd;
 	struct mlx5_wq                  rq;
 	int                             wq_sig;
 	uint32_t			qp_cap_cache;
@@ -736,6 +741,7 @@ struct mlx5_rwq {
 	int buf_size;
 	struct mlx5_wq rq;
 	__be32  *db;
+	int db_page_fd;
 	bool	custom_db;
 	void	*pbuff;
 	__be32	*recv_db;
@@ -1098,6 +1104,8 @@ int mlx5_alloc_prefered_buf(struct mlx5_context *mctx,
 			    size_t size, int page_size,
 			    enum mlx5_alloc_type alloc_type,
 			    const char *component);
+int mlx5_alloc_public_buf(struct mlx5_context *context, struct mlx5_buf *buf, size_t size, int page_size);
+void mlx5_free_public_buf(struct mlx5_context *context, struct mlx5_buf *buf);
 int mlx5_free_actual_buf(struct mlx5_context *ctx, struct mlx5_buf *buf);
 void mlx5_get_alloc_type(struct mlx5_context *context,
 			 struct ibv_pd *pd,
@@ -1112,7 +1120,7 @@ int mlx5_alloc_buf_extern(struct mlx5_context *ctx, struct mlx5_buf *buf,
 void mlx5_free_buf_extern(struct mlx5_context *ctx, struct mlx5_buf *buf);
 
 __be32 *mlx5_alloc_dbrec(struct mlx5_context *context, struct ibv_pd *pd,
-			 bool *custom_alloc);
+			 bool *custom_alloc, int * db_page_fd);
 void mlx5_free_db(struct mlx5_context *context, __be32 *db, struct ibv_pd *pd,
 		  bool custom_alloc);
 

@@ -295,6 +295,8 @@ struct mlx5_ib_create_cq {
 	__u16	uar_page_index;
 	__u16	reserved0;
 	__u32	reserved1;
+	__u32   buf_fd;
+	__u32   db_page_fd;
 };
 
 struct mlx5_ib_create_cq_resp {
@@ -343,6 +345,8 @@ struct mlx5_ib_create_qp {
 	};
 	__u32  ece_options;
 	struct  mlx5_ib_create_qp_dci_streams dci_streams;
+	__u32   buf_fd;
+	__u32   db_page_fd;
 	__u16 reserved;
 };
 
