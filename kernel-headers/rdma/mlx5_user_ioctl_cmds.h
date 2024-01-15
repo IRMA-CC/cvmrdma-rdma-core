@@ -333,9 +333,15 @@ enum mlx5_ib_query_pd_attrs {
 	MLX5_IB_ATTR_QUERY_PD_RESP_PDN,
 };
 
+enum mlx5_ib_alloc_public_mem_attrs {
+	MLX5_IB_ATTR_ALLOC_PUBLIC_MEM_SIZE = (1U << UVERBS_ID_NS_SHIFT),
+	MLX5_IB_ATTR_ALLOC_PUBLIC_MEM_FLAGS,
+	MLX5_IB_ATTR_ALLOC_PUBLIC_MEM_FD
+};
+
 enum mlx5_ib_pd_methods {
 	MLX5_IB_METHOD_PD_QUERY = (1U << UVERBS_ID_NS_SHIFT),
-
+	MLX5_IB_METHOD_ALLOC_PUBLIC_MEM,
 };
 
 enum mlx5_ib_device_methods {

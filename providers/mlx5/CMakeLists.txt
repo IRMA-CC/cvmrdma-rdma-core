@@ -40,6 +40,7 @@ rdma_shared_provider(mlx5 libmlx5.map
   dr_arg.c
   mlx5.c
   mlx5_vfio.c
+  public_alloc.c
   qp.c
   srq.c
   verbs.c
