@@ -193,7 +193,8 @@ static struct ibv_mr * alloc_public_mr(struct cvmrdma_context * ctxt, struct cvm
 	if(! mr)
 	{
 		fprintf(stderr, "Failed to reg public mr\n");
-		goto unmap;
+		munmap(va, size);
+		goto err;
 	}
 
 	mr->addr = va;
