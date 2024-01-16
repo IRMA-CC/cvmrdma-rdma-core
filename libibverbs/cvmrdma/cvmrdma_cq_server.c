@@ -62,6 +62,7 @@ static void * cq_server_loop(void * args)
             // __be32 protocol_imm = this_wc->imm_data;
             uint32_t wc_length = this_wc->byte_len;
             uint32_t qpn = this_wc->qp_num;
+            struct cvmrdma_qp * qp = qp_metadata_manager_get_qp(qp_metadata_manager, qpn);
 
             DEBUG("[CQ] WRID = 0x%" PRIx64 " QPN %" PRIx32 "\n", this_wc->wr_id, qpn);
 
@@ -73,7 +74,37 @@ static void * cq_server_loop(void * args)
             {
                 /* This is a send completion (SEND, WRITE, WWI) */
                 DEBUG("[CQ] send op %d done\n", op);
-                TIMING("cq_serv_wc_send");
+
+                qp->wr_chunks_sent++;
+
+                struct send_metadata_entry * send_info = qp_send_metadata_front(qp->send_metadata);
+            
+                if(send_info->nchunks == qp->wr_chunks_sent)
+                {
+                    uint32_t wrid = send_info->wrid;
+                    size_t bytes = send_info->bytes;
+
+                    qp->wr_chunks_sent = 0;
+                    qp_send_metadata_pop(qp->send_metadata);
+
+                    struct ibv_wc send_wc = {
+                        .byte_len = bytes,
+                        .wc_flags = 0,
+                        .imm_data = 0,
+                        .opcode = IBV_WC_SEND,
+                        .qp_num = qpn,
+                        .status = IBV_WC_SUCCESS,
+                        .wr_id = wrid
+                    };
+
+                    /* Notify user CQ of a SEND
+                       XXX: here we notify always, whereas user can request SEND_SIGNALLED or not.
+                    */
+
+                    struct cvmrdma_cq * scq = (struct cvmrdma_cq *)qp->user_qp.qp.send_cq;
+                    wcq_push(scq->wc_queue, &send_wc);
+                }
+
             }
             else
             {
@@ -88,7 +119,6 @@ static void * cq_server_loop(void * args)
 
                 DEBUG("starting chunk processing for qpn %" PRIx32 "\n", qpn);
 
-                struct cvmrdma_qp * qp = qp_metadata_manager_get_qp(qp_metadata_manager, qpn);
                 struct cvmrdma_pd * pd = (struct cvmrdma_pd *)qp->user_qp.qp.pd;
                 assert(qp);
 
@@ -137,6 +167,9 @@ static void * cq_server_loop(void * args)
                 TIMING("pop_chunk_notify");
                 struct cq_server_notification const * notification = notification_queue_front(nq);
 
+                enum ibv_wr_opcode wr_op = notification->op;
+                bool is_write = (wr_op == IBV_WR_RDMA_WRITE) || (wr_op == IBV_WR_RDMA_WRITE_WITH_IMM);
+
                 uint64_t const * nonce = notification->nonce;
                 unsigned long long clen = wc_length;
                 unsigned long long mlen = CVMRDMA_RING_SLOT_BYTES;
@@ -145,6 +178,46 @@ static void * cq_server_loop(void * args)
                 DEBUG("private %x %x %x ...\n", private[0], private[1], private[2]);
                 DEBUG("clen %llu\n", clen);
 
+
+                // Decrypt directly to destination !
+                bool bypass_scatter = false;
+                if(is_write)
+                {
+                    /* The operation is a WRITE: use the remote_addr and rkey provided by the requester. We
+                    always write in a contiguous block, so always bypass scatter */
+                    uint32_t rkey = notification->rkey;
+                    uint64_t hca_addr = notification->hca_addr;
+
+                    struct cvmrdma_mr * mr = get_bounce_metadata_for_rkey(pd->bounce_metadata, rkey);
+
+                    uint64_t offt = hca_addr - mr->hca_va;
+                    void * dest = (unsigned char *)mr->user_mr.ibv_mr.addr + offt;
+
+                    decrypted = dest;
+                    bypass_scatter = true;
+                }
+                else
+                {
+                    /* The operation is a SEND: we can only bypass the scatter if the next chunk fits
+                       in the current sge */
+
+                    struct recv_metadata_entry * recv_info = qp_recv_metadata_front(qp->recv_metadata);
+                    struct ibv_sge * rcv_sgl = recv_info->sgl;
+                    int rcv_nsge = recv_info->nsge;
+                    struct ibv_sge * cur_sge = &rcv_sgl[qp->cur_sge_idx];
+
+                    size_t plen = clen - crypto_aead_xchacha20poly1305_ietf_ABYTES;
+                    if(qp->cur_offt_in_sge + plen <= cur_sge->length)
+                    {
+                        /* can write directly to dest! */
+                        struct cvmrdma_mr * cur_mr = get_bounce_metadata_for_lkey(pd->bounce_metadata, cur_sge->lkey);
+                        unsigned char * mr_addr = cur_mr->user_mr.ibv_mr.addr;
+                        uint64_t offt = (cur_sge->addr - cur_mr->hca_va) + qp->cur_offt_in_sge;
+
+                        decrypted = mr_addr + offt;
+                        bypass_scatter = true;
+                    }
+                }
 
                 TIMING("dec_t0");
                 err = crypto_aead_xchacha20poly1305_ietf_decrypt(
@@ -168,23 +241,8 @@ static void * cq_server_loop(void * args)
                 /* Scatter the plaintext to user memory. If the op is a WRITE, the remote has set the destination address,
                    else the op is a SEND and we must use the next chunk in the current recv request */
 
-                enum ibv_wr_opcode wr_op = notification->op;
-                bool is_write = (wr_op == IBV_WR_RDMA_WRITE) || (wr_op == IBV_WR_RDMA_WRITE_WITH_IMM);
 
-                if(is_write)
-                {
-                    /* The operation is a WRITE: use the remote_addr and rkey provided by the requester */
-                    uint32_t rkey = notification->rkey;
-                    uint64_t hca_addr = notification->hca_addr;
-
-                    struct cvmrdma_mr * mr = get_bounce_metadata_for_rkey(pd->bounce_metadata, rkey);
-
-                    uint64_t offt = hca_addr - mr->hca_va;
-                    void * dest = (unsigned char *)mr->user_mr.ibv_mr.addr + offt;
-
-                    memcpy(dest, decrypted, mlen);
-                }
-                else
+                if(! bypass_scatter)
                 {
                     /* The operation is a SEND: use the next chunk on the current recv request */
                     struct recv_metadata_entry * recv_info = qp_recv_metadata_front(qp->recv_metadata);
@@ -229,6 +287,20 @@ static void * cq_server_loop(void * args)
                         fprintf(stderr, "Incoming chunk would exceed the end of the receive request! (chunk %llu > recv %zu)\n", mlen, bytes_copied);
                         exit(1);
                         /* TODO: emit IBV_WC_LOC_LEN_ERR in WC status for user !*/
+                    }
+                }
+                else
+                {
+                    /* Record in the QP the number of bytes written during the decrypt (directly to dest) */
+                    struct recv_metadata_entry * recv_info = qp_recv_metadata_front(qp->recv_metadata);
+                    struct ibv_sge * rcv_sgl = recv_info->sgl;
+                    struct ibv_sge * cur_sge = &rcv_sgl[qp->cur_sge_idx];
+
+                    qp->cur_offt_in_sge += mlen;
+                    if(qp->cur_offt_in_sge >= cur_sge->length)
+                    {
+                        qp->cur_offt_in_sge = 0;
+                        qp->cur_sge_idx++;
                     }
                 }
 
@@ -288,7 +360,7 @@ static void * cq_server_loop(void * args)
                             .wr_id = recv_wrid
                         };
 
-
+                        /* Notify user CQ of a RECV */
                         wcq_push(rcq->wc_queue, &recv_wc);
 
                         /* And reset the byte counter */

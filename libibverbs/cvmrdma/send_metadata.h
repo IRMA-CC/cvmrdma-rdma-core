@@ -1,0 +1,42 @@
+#pragma once
+
+#include <infiniband/verbs.h>
+
+
+/*
+    For each send, store the number of chunks in that WR to the CQ server, so that
+    it knows when to emit a SEND WC back to the user.
+*/
+
+struct send_metadata_entry
+{
+    uint64_t wrid;
+    size_t bytes;
+    size_t nchunks;
+    /* Whether this SEND was requested by the remote as a READ */
+    bool write_for_read;
+};
+
+
+#ifdef __cplusplus
+#include "ThreadsafeQueue.hpp"
+
+struct QpSendMetadata {
+    ThreadsafeQueue<struct send_metadata_entry> queue;
+};
+
+extern "C" {
+#endif
+
+typedef struct QpSendMetadata QpSendMetadata;
+
+QpSendMetadata * alloc_qp_send_metadata(void);
+void free_qp_send_metadata(QpSendMetadata * send_metadata);
+
+void qp_send_metadata_push(QpSendMetadata * send_metadata_manager, uint64_t wrid, size_t bytes, size_t nchunks, bool write_for_read);
+struct send_metadata_entry * qp_send_metadata_front(QpSendMetadata * send_metadata);
+void qp_send_metadata_pop(QpSendMetadata * send_metadata);
+
+#ifdef __cplusplus
+}
+#endif

@@ -593,8 +593,6 @@ int mlx5_alloc_public_buf(struct mlx5_context *context, struct mlx5_buf *buf, si
 		goto ret;
 	}
 
-	fprintf(stderr, "dmabuf fd %d\n", pubmem_fd);
-
 	/* mmap already aligns to page size */
 	va = mmap(0, al_size, PROT_READ | PROT_WRITE, MAP_SHARED_VALIDATE, pubmem_fd, 0);
 	if(va == MAP_FAILED)

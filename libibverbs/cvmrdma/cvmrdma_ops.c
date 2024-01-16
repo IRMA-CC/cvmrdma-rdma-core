@@ -235,7 +235,7 @@ static struct ibv_qp *cvmrdma_create_qp(struct ibv_pd * ibpd,
 
 	/* Create the provider QP */
 	struct ibv_qp_init_attr_ex attr_ex = {0};
-	attr_ex.sq_sig_all = 0;
+	attr_ex.sq_sig_all = 1;
 	/* Direct send and recv WCs to the CQ server */
 	attr_ex.send_cq = ctxt->cvmrdma_cq_server.prov_cq;
 	attr_ex.recv_cq = ctxt->cvmrdma_cq_server.prov_cq;
@@ -244,7 +244,11 @@ static struct ibv_qp *cvmrdma_create_qp(struct ibv_pd * ibpd,
 	attr_ex.qp_type = IBV_QPT_RC;
 
 	/* Keep the user set QP capacity */
-	memcpy(&attr_ex.cap, &attr->cap, sizeof(struct ibv_qp_cap));
+	attr_ex.cap.max_recv_sge = 30;
+	attr_ex.cap.max_recv_wr = 4096;
+	attr_ex.cap.max_send_sge = 30;
+	attr_ex.cap.max_send_wr = 4096;
+	attr_ex.cap.max_inline_data = 0; /* we're not using inline */
 
 	attr_ex.pd = pd->provider_pd;
 	attr_ex.send_ops_flags = IBV_QP_EX_WITH_RDMA_WRITE_WITH_IMM;
@@ -280,12 +284,22 @@ static struct ibv_qp *cvmrdma_create_qp(struct ibv_pd * ibpd,
 	qp->cur_offt_in_sge = 0;
 	qp->wr_bytes_rcved = 0;
 
+	QpSendMetadata * send_metadata = alloc_qp_send_metadata();
+	if(! send_metadata)
+	{
+		fprintf(stderr, "Failed to allocated send metadata storage.\n");
+		goto free_recv_metadata;
+	}
+	qp->send_metadata = send_metadata;
+	qp->wr_chunks_sent = 0;
+
+
 	/* Allocate the bounce regions and ring buffer for this QP */
 	void * bounce_private_mem = mmap(0, CVMRDMA_PRIV_BOUNCE_TOTAL_BYTES, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
 	if (bounce_private_mem == MAP_FAILED) {
 		err = errno;
 		fprintf(stderr, "Failed to mmap bounce buffer %d\n", err);
-		goto free_recv_metadata;
+		goto free_send_metadata;
 	}
 	qp->bounce_private_mem = bounce_private_mem;
 
@@ -351,6 +365,8 @@ dereg_ring_mr:
 	close(dmabuf_fd);
 free_bounce_private:
 	munmap(bounce_private_mem, CVMRDMA_PRIV_BOUNCE_TOTAL_BYTES);
+free_send_metadata:
+	free_qp_send_metadata(send_metadata);
 free_recv_metadata:
 	free_qp_recv_metadata(recv_metadata);
 free_qp:
@@ -480,7 +496,7 @@ static int cvmrdma_post_recv(struct ibv_qp *ibqp, struct ibv_recv_wr *wr,
 }
 
 
-static int post_send_do_bounce(struct cvmrdma_qp * qp, struct ibv_send_wr *wrs, struct ibv_send_wr **bad_wr)
+int post_send_do_bounce(struct cvmrdma_qp * qp, struct ibv_send_wr *wrs, struct ibv_send_wr **bad_wr, bool write_for_read)
 {
 	struct cvmrdma_context * ctxt = cvmrdma_get_ctx(qp->user_qp.qp.context);
 	struct cvmrdma_pd * pd = (struct cvmrdma_pd *)qp->user_qp.qp.pd;
@@ -548,6 +564,15 @@ static int post_send_do_bounce(struct cvmrdma_qp * qp, struct ibv_send_wr *wrs, 
 
 		uint32_t rkey = this_wr->wr.rdma.rkey;
 		uint64_t remote_addr = this_wr->wr.rdma.remote_addr;
+
+
+		size_t total_bytes = 0;
+		for(size_t i = 0 ; i < nsge ; i++)
+			total_bytes += sgl[i].length;
+		size_t total_chunks = DIVIDE_ROUND_UP(total_bytes, CVMRDMA_PAYLOAD_BYTES);
+		/* XXX: pass the number of chunks to the CQ_server to know when to emit a send WC for user. Do it 
+		   BEFORE we start sending, so that CQ server has this informatin when WCs start to arrive  */
+		qp_send_metadata_push(qp->send_metadata, this_wr->wr_id, total_bytes, total_chunks, write_for_read);
 
 		while(cur_sge_idx < nsge)
 		{
@@ -782,8 +807,9 @@ static int post_send_do_bounce(struct cvmrdma_qp * qp, struct ibv_send_wr *wrs, 
 			chunks_in_wr++;
 		}
 
-		/* XXX: pass chunks_in_wr and IBV_SEND_SIGNALLED to CQ_server to know when to
-		   emit a send WC for user */
+
+		assert(bytes_sent == total_bytes);
+		assert(chunks_in_wr == total_chunks);
 	}
 
 	return 0;
@@ -815,7 +841,7 @@ static int cvmrdma_post_send(struct ibv_qp *ibqp, struct ibv_send_wr *wr,
 	- RPC send the dest hca_addr, rkey, imm, MAC, nonce
 	*/
 
-	ret = post_send_do_bounce(qp, wr, bad_wr);
+	ret = post_send_do_bounce(qp, wr, bad_wr, false);
 	if(ret < 0)
 	{
 		fprintf(stderr, "Failed to bounce before send!\n");
@@ -1015,7 +1041,7 @@ static struct verbs_context *cvmrdma_alloc_context(struct ibv_device *ibdev,
 	/* Get the root capability to the remote's RPC's API */
 	
 	/* Create a single CQ to get the send and recv WC for the chunks */
-	struct ibv_cq * ibcq = cvmrdma_ctx->prov_ops.create_cq(prov_ctx, 128, NULL, 0);
+	struct ibv_cq * ibcq = cvmrdma_ctx->prov_ops.create_cq(prov_ctx, 16384, NULL, 0);
 	if(! ibcq)
 	{
 		fprintf(stderr, "failed to create backend CQ for the CQ server\n");

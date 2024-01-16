@@ -6,6 +6,7 @@
 
 #include "crypto.h"
 #include "recv_metadata.h"
+#include "send_metadata.h"
 #include "notification_queue.h"
 #include "cvmrdma_network_client.h"
 #include "cvmrdma_network_server.h"
@@ -124,6 +125,15 @@ struct cvmrdma_qp {
 
 	/* Count the number of bytes recvd in this WR, to report in the WC */
 	size_t wr_bytes_rcved;
+
+	/* Save number of chunks of future sends in FIFO. When this many chunks are sent, report to
+	   user. */
+	QpSendMetadata * send_metadata;
+
+	/* Count the number of chunks sent in this WR, to know when to report WC */
+	size_t wr_chunks_sent;
+
+
 
 	/* Whether the user requests a SEND_WC by default */
 	bool user_sq_sig_all;
