@@ -57,7 +57,6 @@ static void * cq_server_loop(void * args)
             struct ibv_wc * this_wc = &wcs[i];
             enum ibv_wc_status status = this_wc->status;
             enum ibv_wc_opcode op = this_wc->opcode;
-            unsigned int wc_flags = this_wc->wc_flags;
             /* The user-defined immediate is sent on the other channel, the imm in the WC is unused for now! */
             // __be32 protocol_imm = this_wc->imm_data;
             uint32_t wc_length = this_wc->byte_len;
@@ -174,7 +173,7 @@ static void * cq_server_loop(void * args)
                 unsigned long long clen = wc_length;
                 unsigned long long mlen = CVMRDMA_RING_SLOT_BYTES;
 
-                DEBUG("nonce %lx %lx %lx\n", nonce[0], nonce[1], nonce[2]);
+                DEBUG("nonce %lx %lx\n", nonce[0], nonce[1]);
                 DEBUG("private %x %x %x ...\n", private[0], private[1], private[2]);
                 DEBUG("clen %llu\n", clen);
 
@@ -203,7 +202,6 @@ static void * cq_server_loop(void * args)
 
                     struct recv_metadata_entry * recv_info = qp_recv_metadata_front(qp->recv_metadata);
                     struct ibv_sge * rcv_sgl = recv_info->sgl;
-                    int rcv_nsge = recv_info->nsge;
                     struct ibv_sge * cur_sge = &rcv_sgl[qp->cur_sge_idx];
 
                     size_t plen = clen - crypto_aead_xchacha20poly1305_ietf_ABYTES;
@@ -219,7 +217,6 @@ static void * cq_server_loop(void * args)
                     }
                 }
 
-                TIMING("dec_t0");
                 err = crypto_aead_xchacha20poly1305_ietf_decrypt(
                     decrypted, &mlen,
                     NULL,
@@ -228,7 +225,6 @@ static void * cq_server_loop(void * args)
                     (unsigned char const *)nonce,
                     (unsigned char const *)rx_key
                 );
-                TIMING("dec_t1");
                 if(err)
                 {
                     fprintf(stderr, "WARN: Failed to decrypt bounce buffer, exiting.\n");
@@ -375,6 +371,7 @@ static void * cq_server_loop(void * args)
                 /* We can notify the remote thay this chunk can be reused for writing
                    XXX: this could be pushed all the way up right after copying into private memory
                    But what about failures to decrypt?*/
+                TIMING("chunk_notify_recv");
                 remote_qp_notify_chunk_recv(
                     ctxt->network_evloop, qp->remote_qnc
                 );

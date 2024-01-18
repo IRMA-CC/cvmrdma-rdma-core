@@ -78,8 +78,6 @@ static struct ibv_cq *cvmrdma_create_cq(struct ibv_context *ibcontext, int cqe,
 				struct ibv_comp_channel *channel,
 				int comp_vector)
 {
-    struct cvmrdma_context* ctxt = cvmrdma_get_ctx(ibcontext);
-
 	struct cvmrdma_cq * cq = calloc(1, sizeof(struct cvmrdma_cq));
 
 	cq->user_cq.cq.context = ibcontext;
@@ -226,7 +224,6 @@ static struct ibv_qp *cvmrdma_create_qp(struct ibv_pd * ibpd,
 				struct ibv_qp_init_attr *attr)
 {
 	struct cvmrdma_pd * pd = (struct cvmrdma_pd *)ibpd;
-	struct ibv_pd * prov_pd = pd->provider_pd;
 	struct ibv_context * prov_ctxt = pd->user_pd.context;
     struct cvmrdma_context * ctxt = cvmrdma_get_ctx(prov_ctxt);
 	int err;
@@ -353,7 +350,7 @@ static struct ibv_qp *cvmrdma_create_qp(struct ibv_pd * ibpd,
 
 
 	/* Generate a random tx key */
-	randombytes_buf(qp->tx_key, sizeof(qp->tx_key));
+	crypto_aead_xchacha20poly1305_ietf_keygen((unsigned char *)qp->tx_key);
 
 
 	return &qp->user_qp.qp;
@@ -496,7 +493,7 @@ static int cvmrdma_post_recv(struct ibv_qp *ibqp, struct ibv_recv_wr *wr,
 }
 
 
-int post_send_do_bounce(struct cvmrdma_qp * qp, struct ibv_send_wr *wrs, struct ibv_send_wr **bad_wr, bool write_for_read)
+static int post_send_do_bounce(struct cvmrdma_qp * qp, struct ibv_send_wr *wrs, struct ibv_send_wr **bad_wr, bool write_for_read)
 {
 	struct cvmrdma_context * ctxt = cvmrdma_get_ctx(qp->user_qp.qp.context);
 	struct cvmrdma_pd * pd = (struct cvmrdma_pd *)qp->user_qp.qp.pd;
@@ -630,7 +627,6 @@ int post_send_do_bounce(struct cvmrdma_qp * qp, struct ibv_send_wr *wrs, struct 
 				/* on-heap nonce ownership is passed to capnp client */
 				nonce_for_notif = NULL;
 			}
-			TIMING("chunk_notify_sch");
 
 			TIMING("gec_t0");
 			/***** GATHER ******/
@@ -717,9 +713,8 @@ int post_send_do_bounce(struct cvmrdma_qp * qp, struct ibv_send_wr *wrs, struct 
 
 			DEBUG("ptxt %x %x %x\n", ptxt[0], ptxt[1], ptxt[2]);
 			DEBUG("plen %zu\n", chunk_bytes);
-			DEBUG("nonce %lx %lx %lx\n", nonce[0], nonce[1], nonce[2]);
+			DEBUG("nonce %lx %lx\n", nonce[0], nonce[1]);
 
-			TIMING("enc_t0");
 			unsigned long long clen = CVMRDMA_RING_SLOT_BYTES;
 			err = crypto_aead_xchacha20poly1305_ietf_encrypt(
 				encrypted,
@@ -730,7 +725,6 @@ int post_send_do_bounce(struct cvmrdma_qp * qp, struct ibv_send_wr *wrs, struct 
 				(unsigned char *)nonce,
 				(unsigned char const *)tx_key
 			);
-			TIMING("enc_t1");
 			if(err)
 			{
 				fprintf(stderr, "Failed to encrypt chunk!\n");
