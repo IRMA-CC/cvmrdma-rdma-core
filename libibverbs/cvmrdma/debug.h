@@ -23,8 +23,9 @@
 
 #define TIMING(fmt, ...) \
     do { if(_PRINT_TIMINGS) { \
+    static size_t count = 0; \
     struct timespec t; \
     clock_gettime(CLOCK_MONOTONIC, &t); \
-    printf("TIME " fmt ",%ld%09ld\n", __VA_ARGS__  __VA_OPT__(,) t.tv_sec, t.tv_nsec); \
+    printf("TIME " fmt ",%zu,%ld%09ld\n", __VA_ARGS__  __VA_OPT__(,) count++, t.tv_sec, t.tv_nsec); \
     } \
   } while(0)
