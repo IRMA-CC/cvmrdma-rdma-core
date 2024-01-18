@@ -471,7 +471,45 @@ err:
 static int cvmrdma_poll_cq(struct ibv_cq * ibcq, int num_entries, struct ibv_wc *wc)
 {
 	struct cvmrdma_cq * cq = (struct cvmrdma_cq *)ibcq;
-	return wcq_pop_into(cq->wc_queue, wc, num_entries);
+	struct cvmrdma_context * ctxt = cvmrdma_get_ctx(cq->user_cq.cq.context);
+	int n_popped;
+	int err;
+
+	/* If there are notifications OR an error, return ... */
+	n_popped = wcq_pop_into(cq->wc_queue, wc, num_entries);
+	if(n_popped != 0)
+	{
+		return n_popped;
+	}
+
+	/* ... else, if the CQ "server" is not running yet, run it on this thread. */
+	CQServer * server = &ctxt->cvmrdma_cq_server;
+
+	/*
+		! is_running => (is_running = true && first = true)
+		  is_running => (is_running = true && first = false)
+
+		If the server is NOT running, mark it as running and run it.
+		If it is running, leave it marked as such and do nothing.
+	*/
+
+	bool expected = false;
+	bool first = atomic_compare_exchange_strong(&server->is_running, &expected, true);
+	if(first)
+	{
+		err = cq_server_loop_once(ctxt);
+		if(err)
+		{
+			return - err;
+		}
+
+		/* And bring it down */
+		atomic_store(&server->is_running, false);
+	}
+	
+	/* Let tje next poll return */
+	return 0;
+
 }
 
 
@@ -1045,16 +1083,9 @@ static struct verbs_context *cvmrdma_alloc_context(struct ibv_device *ibdev,
 	verbs_init_cq(ibcq, prov_ctx, NULL, NULL);
 
 
-	/* Initialize the CQ polling server */
-	cq_server_context_init(&cvmrdma_ctx->cvmrdma_cq_server, cvmrdma_ctx, ibcq);
+	/* Initialize the CQ polling metadata */
+	cq_server_context_init(&cvmrdma_ctx->cvmrdma_cq_server, ibcq);
 
-	/* And run the server loop in another thread */
-	ret = cq_server_run(&cvmrdma_ctx->cvmrdma_cq_server, &cvmrdma_ctx->cvmrdma_cq_server_thread);
-	if(ret)
-	{
-		fprintf(stderr, "Failed to start CQ server %d\n", ret);
-		exit(1);
-	}
 
 #ifndef DUMMY_SYSTEM_HEAP
 	int system_heap_fd = open_system_heap();

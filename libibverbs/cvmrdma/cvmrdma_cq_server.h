@@ -10,9 +10,9 @@
  * a notification can be queued for the user.
  */
 
-#include "cvmrdma_cq_server.h"
+#include <stdatomic.h>
 
-
+#include <pthread.h>
 #include <infiniband/verbs.h>
 
 
@@ -27,17 +27,13 @@ extern "C" {
 
 typedef struct CQServer
 {
-    /* ctxt that the CQ server is operating in */
-    struct cvmrdma_context * ctxt;
-
     /* CQ that this server is polling */
     struct ibv_cq * prov_cq;
 
     /* Map to the notification channels for the QPs using this CQ */
     QPMetadataManager * qp_metadata_manager;
 
-    /* Pass WCs to the upper level through this queue */
-    WCQueue * wc_queue;
+    _Atomic bool is_running;
 } CQServer;
 
 
@@ -47,9 +43,12 @@ typedef struct CQServer
     @server: storage for the CQServer to be created
     @cq: CQ that this server will poll
 */
-void  cq_server_context_init(CQServer * server, struct cvmrdma_context * ctxt, struct ibv_cq * prov_cq);
+void cq_server_context_init(CQServer * server, struct ibv_cq * prov_cq);
 void cq_server_context_destroy(CQServer * server);
-int cq_server_run(CQServer * server, pthread_t * newthread);
+
+struct cvmrdma_context;
+int cq_server_loop_once(struct cvmrdma_context * ctxt);
+
 
 int cq_server_register_qp(CQServer * server, struct cvmrdma_qp * qp);
 

@@ -12,7 +12,7 @@
 #include "cvmrdma_network_server.h"
 #include "cvmrdma_network_evloop.h"
 #include "cvmrdma_cq_server.h"
-#include "wc_queue.h"
+#include "qp_metadata_manager.h"
 
 /* the library code modifies the user visible verbs_context quite a bit, it's difficult
    to wrap it! instead, include cvmrdma_context _in_ verbs_context (in verbs.h) */
@@ -24,8 +24,6 @@ struct cvmrdma_context {
 
     /* CQ server for every QP is in this process */
     CQServer cvmrdma_cq_server;
-    pthread_t cvmrdma_cq_server_thread;
-
 
     /* Server and client for IP based RPCs.
         The event loop runs the server by default, and later on CVMRDMA layer can
