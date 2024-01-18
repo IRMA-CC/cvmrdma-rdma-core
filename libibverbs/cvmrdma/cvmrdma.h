@@ -6,7 +6,7 @@
 #define DIVIDE_ROUND_UP(x,y) ((x + y - 1) / y)
 
 
-#define CVMRDMA_RING_SLOT_BYTES (8 * PAGE_SIZE)
+#define CVMRDMA_RING_SLOT_BYTES ((unsigned long long)32 * PAGE_SIZE)
 #define CVMRDMA_HEADER_BYTES crypto_aead_xchacha20poly1305_ietf_ABYTES
 #define CVMRDMA_PAYLOAD_BYTES (CVMRDMA_RING_SLOT_BYTES - CVMRDMA_HEADER_BYTES)
 #define CVMRDMA_RING_ENTRIES 8
