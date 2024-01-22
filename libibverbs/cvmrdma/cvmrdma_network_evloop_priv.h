@@ -31,11 +31,9 @@ QPNotificationClient * get_qp_notification_client(CapnpEvloopThread * evloop, CV
 void set_remote_params(CapnpEvloopThread * evloop, QPNotificationClient *qnc, uint64_t const * tx_key, uint32_t local_ring_rkey);
 
 
-/* The notification functions take ownership of nonce and pass it to the RPC function ! */
 void remote_qp_notify_chunk(CapnpEvloopThread *cev, QPNotificationClient *qnc,
     enum ibv_wr_opcode op,
     uint32_t rkey, uint64_t hca_addr, 
-    uint64_t const * nonce,
     bool last_chunk, uint32_t imm
 );
 void remote_qp_notify_chunk_recv(CapnpEvloopThread *cev, QPNotificationClient *qnc);

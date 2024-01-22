@@ -157,21 +157,24 @@ int cq_server_loop_once(struct cvmrdma_context * ctxt)
             memcpy(private, slot, CVMRDMA_RING_SLOT_BYTES);
 
             /**** DECRYPT *****/
-            /* Decrypt the ctxt+MAC from the slot using the nonce provided on the IP-based channel */
+            /* Decrypt the ctxt+MAC from the slot */
 
             NotificationQueue * nq = qp->notification_queue;
             assert(nq);
 
-            /* The nonce for this chunk has/will be delivered on the IP server */
+            /* The metadata for this chunk has/will be delivered on the IP server */
             TIMING("pop_chunk_notify");
             struct cq_server_notification const * notification = notification_queue_front(nq);
 
             enum ibv_wr_opcode wr_op = notification->op;
             bool is_write = (wr_op == IBV_WR_RDMA_WRITE) || (wr_op == IBV_WR_RDMA_WRITE_WITH_IMM);
 
-            uint64_t const * nonce = notification->nonce;
             unsigned long long clen = wc_length;
             unsigned long long mlen = CVMRDMA_RING_SLOT_BYTES;
+
+            /* The nonce is the rx counter */
+            uint64_t * nonce = qp->rx_nonce;
+
 
             DEBUG("nonce %lx %lx\n", nonce[0], nonce[1]);
             DEBUG("private %x %x %x ...\n", private[0], private[1], private[2]);
@@ -234,6 +237,9 @@ int cq_server_loop_once(struct cvmrdma_context * ctxt)
             }
 
             DEBUG("decrypted %x %x %x\n", decrypted[0], decrypted[1], decrypted[2]);
+
+            /* Immediatly increment the nonce */
+            nonce[0] += 1;
 
             /*** SCATTER ****/
             /* Scatter the plaintext to user memory. If the op is a WRITE, the remote has set the destination address,

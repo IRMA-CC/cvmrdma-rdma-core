@@ -272,7 +272,6 @@ void set_remote_params(CapnpEvloopThread * evloop, QPNotificationClient *qnc, ui
 void remote_qp_notify_chunk(CapnpEvloopThread *cev, QPNotificationClient *qnc,
     enum ibv_wr_opcode op,
     uint32_t rkey, uint64_t hca_addr, 
-    uint64_t const * nonce,
     bool last_chunk, uint32_t imm
 )
 {
@@ -282,7 +281,7 @@ void remote_qp_notify_chunk(CapnpEvloopThread *cev, QPNotificationClient *qnc,
     cev->get_executor().executeSync(
         [=]() {
             cev->get_taskset().add(
-                remote_qp_notify_chunk_rpc(qnc, op, rkey, hca_addr, nonce, last_chunk, imm)
+                remote_qp_notify_chunk_rpc(qnc, op, rkey, hca_addr, last_chunk, imm)
             );
         }
     );

@@ -71,13 +71,6 @@ kj::Promise<void> QpNotificationChannel::notifyChunk(NotifyChunkContext context)
 
     auto notification = std::make_unique<struct cq_server_notification>();
 
-    /* Pass nonce from their uint64 form to CQ server */
-    uint64_t * nonce64 = notification->nonce;
-    nonce64[0] = p.getNonce0();
-    nonce64[1] = p.getNonce1();
-    nonce64[2] = p.getNonce2();
-
-
     notification->hca_addr = p.getHcaAddr();
     notification->op = capnp_to_ibv_opcode(p.getOp());
     notification->rkey = p.getRkey();

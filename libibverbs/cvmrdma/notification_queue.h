@@ -15,7 +15,6 @@ extern "C" {
 
 struct cq_server_notification
 {
-    uint64_t nonce[crypto_aead_xchacha20poly1305_ietf_NPUB_WORDS];
     uint64_t hca_addr;
     enum ibv_wr_opcode op;
     uint32_t rkey;

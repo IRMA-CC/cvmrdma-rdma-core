@@ -344,6 +344,7 @@ static struct ibv_qp *cvmrdma_create_qp(struct ibv_pd * ibpd,
 	qp->remote_qnc = NULL;
 	qp->remote_ring_rkey = 0;
 	memset(qp->rx_key, 0, sizeof(qp->rx_key));
+	memset(qp->rx_nonce, 0, cvmrdma_aead_NPUBBYTES);
 	qp->remote_params_set = false;
 	pthread_mutex_init(&qp->remote_params_lock, NULL);
 	pthread_cond_init(&qp->remote_params_set_cv, NULL);
@@ -351,7 +352,7 @@ static struct ibv_qp *cvmrdma_create_qp(struct ibv_pd * ibpd,
 
 	/* Generate a random tx key */
 	randombytes_buf(qp->tx_key, cvmrdma_aead_KEYBYTES);
-
+	memset(qp->tx_nonce, 0, cvmrdma_aead_NPUBBYTES);
 
 	return &qp->user_qp.qp;
 
@@ -618,22 +619,10 @@ static int post_send_do_bounce(struct cvmrdma_qp * qp, struct ibv_send_wr *wrs, 
 			bool last_chunk = ((cur_sge_idx + 1) == nsge) && ((cur_sge_offt + CVMRDMA_PAYLOAD_BYTES) >= cur_sge->length);
 
 
-			/* Store the nonce word aligned to make serialization easier
-			Store on the heap  */
-			uint64_t nonce[crypto_aead_xchacha20poly1305_ietf_NPUB_WORDS];
-
-
-			/* Generate the nonce to use for the encryption */
-			randombytes_buf(nonce, sizeof(nonce));
-
 			/***** NOTIFY ******/
 			/* The notification happens off-thread, and will happen in parallel to the GATHER, ENCRYPT, COPY and SEND */
 			TIMING("chunk_notify");
 			{
-				/* Make a copy of the nonce on the heap to pass ownership to another thread */
-				uint64_t * nonce_for_notif = malloc(sizeof(nonce));
-				memcpy(nonce_for_notif, &nonce, sizeof(nonce));
-
 				if(is_write)
 				{
 					/* This chunk will be directly written at the destination */
@@ -643,7 +632,6 @@ static int post_send_do_bounce(struct cvmrdma_qp * qp, struct ibv_send_wr *wrs, 
 						this_op,
 						rkey,
 						remote_addr + bytes_sent,
-						nonce_for_notif,
 						last_chunk,
 						this_imm
 					);
@@ -657,14 +645,11 @@ static int post_send_do_bounce(struct cvmrdma_qp * qp, struct ibv_send_wr *wrs, 
 						this_op,
 						0,
 						0,
-						nonce_for_notif,
 						last_chunk,
 						this_imm
 					);
 
 				}
-				/* on-heap nonce ownership is passed to capnp client */
-				nonce_for_notif = NULL;
 			}
 
 			TIMING("gec_t0");
@@ -750,19 +735,23 @@ static int post_send_do_bounce(struct cvmrdma_qp * qp, struct ibv_send_wr *wrs, 
 			}
 			/**** ENCRYPT *****/
 
+			/* The nonce to use is the tx_counter */
+			uint64_t * nonce = qp->tx_nonce;
+
 			DEBUG("ptxt %x %x %x\n", ptxt[0], ptxt[1], ptxt[2]);
 			DEBUG("plen %zu\n", chunk_bytes);
 			DEBUG("nonce %lx %lx\n", nonce[0], nonce[1]);
 
 			unsigned long long clen = CVMRDMA_RING_SLOT_BYTES;
-			err = crypto_aead_xchacha20poly1305_ietf_encrypt(
+			err = cvmrdma_encrypt(
 				encrypted,
 				&clen,
 				ptxt, chunk_bytes,
 				NULL, 0,
 				NULL,
 				(unsigned char *)nonce,
-				(unsigned char const *)tx_key
+				(unsigned char const *)tx_key,
+				aead
 			);
 			if(err)
 			{
@@ -774,8 +763,8 @@ static int post_send_do_bounce(struct cvmrdma_qp * qp, struct ibv_send_wr *wrs, 
 			DEBUG("encrypted %x %x %x ...\n", encrypted[0], encrypted[1], encrypted[2]);
 			DEBUG("clen %llu\n", clen);
 
-			/* The ciphertext has length (plen + maclen) */
-			assert(clen == (chunk_bytes + crypto_aead_xchacha20poly1305_ietf_ABYTES));
+			/* Immediately increment the nonce */
+			nonce[0] += 1;
 
 
 			/***** COPY ******/
@@ -868,10 +857,10 @@ static int cvmrdma_post_send(struct ibv_qp *ibqp, struct ibv_send_wr *wr,
     
     on WRITE
 	- find the local (base_addr, bounce_addr) for lkey
-	- xchachapoly1305 the plaintext region to the bounce buffer,
+	- AEAD the plaintext region to the bounce buffer,
 	  keeping the same offset
 	- change WRITE into WRITE_WITH_IMM to notify the remote.
-	- RPC send the dest hca_addr, rkey, imm, MAC, nonce
+	- RPC send the dest hca_addr, rkey, imm
 	*/
 
 	ret = post_send_do_bounce(qp, wr, bad_wr, false);

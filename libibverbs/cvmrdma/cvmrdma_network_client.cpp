@@ -33,7 +33,6 @@ kj::Promise<void> remote_qp_notify_chunk_rpc(
     QPNotificationClient * qnc,
     enum ibv_wr_opcode op,
     uint32_t rkey, uint64_t hca_addr, 
-    uint64_t const * nonce,
     bool last_chunk, uint32_t imm
 )
 {
@@ -44,14 +43,8 @@ kj::Promise<void> remote_qp_notify_chunk_rpc(
     req.setRkey(rkey);
     req.setHcaAddr(hca_addr);
 
-    req.setNonce0(nonce[0]);
-    req.setNonce1(nonce[1]);
-    req.setNonce2(nonce[2]);
-
     req.setLastChunk(last_chunk);
     req.setImm(imm);
-
-    free((void*)nonce);
 
     return req.send().ignoreResult();
 }

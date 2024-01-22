@@ -17,7 +17,6 @@ interface CVMRDMA {
         notifyChunk @0 (
             op :IBVOp,
             rkey :UInt32, hcaAddr :UInt64, # for WRITE_* variants
-            nonce0 :UInt64, nonce1 :UInt64, nonce2 :UInt64,
             lastChunk :Bool, imm :UInt32
         ) -> ();
 
