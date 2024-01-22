@@ -53,7 +53,7 @@ public:
         DEBUG("setting rx_key and ring rkey %" PRIx32 "on QNC for local QPN %" PRIx32 "\n", ring_rkey, m_qpn);
 
         pthread_mutex_lock(m_remote_params_lock_ptr);
-        memcpy(m_rx_key_ptr, rx_key, crypto_aead_xchacha20poly1305_ietf_KEYBYTES);
+        memcpy(m_rx_key_ptr, rx_key, cvmrdma_aead_KEYBYTES);
         *m_remote_ring_rkey_ptr = ring_rkey;
         *m_remote_params_set_ptr = true;
         pthread_mutex_unlock(m_remote_params_lock_ptr);

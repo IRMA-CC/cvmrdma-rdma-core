@@ -109,7 +109,7 @@ kj::Promise<void> QpNotificationChannel::setRemoteParams(SetRemoteParamsContext 
 
     /* Let's associate the remote's Tx key with this local qpn.
     The remote's Tx key is an Rx key for us. */
-    uint64_t rx_key[crypto_aead_xchacha20poly1305_ietf_KEY_WORDS] = {
+    uint64_t rx_key[cvmrdma_aead_KEY_WORDS] = {
         p.getTxKey0(),
         p.getTxKey1(),
         p.getTxKey2(),

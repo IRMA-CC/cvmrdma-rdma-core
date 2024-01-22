@@ -350,7 +350,7 @@ static struct ibv_qp *cvmrdma_create_qp(struct ibv_pd * ibpd,
 
 
 	/* Generate a random tx key */
-	crypto_aead_xchacha20poly1305_ietf_keygen((unsigned char *)qp->tx_key);
+	randombytes_buf(qp->tx_key, cvmrdma_aead_KEYBYTES);
 
 
 	return &qp->user_qp.qp;
@@ -535,6 +535,7 @@ static int post_send_do_bounce(struct cvmrdma_qp * qp, struct ibv_send_wr *wrs, 
 {
 	struct cvmrdma_context * ctxt = cvmrdma_get_ctx(qp->user_qp.qp.context);
 	struct cvmrdma_pd * pd = (struct cvmrdma_pd *)qp->user_qp.qp.pd;
+    enum sodium_crypto_aead aead = ctxt->aead;
 
 	int err;
 
@@ -1007,7 +1008,17 @@ struct verbs_context_ops cvmrdma_ops = {
     .reg_mr = cvmrdma_reg_mr
 };
 
-
+static int find_in_array(char const ** array, size_t entries, char const * str)
+{
+	for(int i = 0 ; i < entries ; i++)
+	{
+		if(strcmp(str, array[i]) == 0)
+		{
+			return i;
+		}
+	}
+	return -1;
+}
 
 static struct verbs_context *cvmrdma_alloc_context(struct ibv_device *ibdev,
 						  int cmd_fd,
@@ -1033,6 +1044,31 @@ static struct verbs_context *cvmrdma_alloc_context(struct ibv_device *ibdev,
 		fprintf(stderr, "ERROR: No environment variable CVMRDMA_BIND_ADDR.\n");
 		goto err;
 	}
+
+	char const * aead_str = getenv("CVMRDMA_AEAD");
+	enum sodium_crypto_aead aead = SODIUM_AEAD_XCHACHAPOLY;
+	char const * sodium_aead_str[__SODIUM_AEAD_NR] = {
+		[SODIUM_AEAD_NONE] = "none",
+		[SODIUM_AEAD_XCHACHAPOLY] = "xchachapoly",
+		[SODIUM_AEAD_AEGIS128L] = "aegis128l",
+		[SODIUM_AEAD_AES256GCM] = "aes256gcm",
+	};
+	if(aead_str)
+	{
+		int i = find_in_array(sodium_aead_str, __SODIUM_AEAD_NR, aead_str);
+		if(i < 0)
+		{
+			fprintf(stderr, "ERROR: unknown AEAD '%s'\n", aead_str);
+			goto err;
+		}
+		else
+		{
+		}
+		aead = (enum sodium_crypto_aead)i;
+	}
+
+	DEBUG("AEAD is %s\n", sodium_aead_str[aead]);
+
 
 	/* Initialize cryptographic APIs (can be called multiple times) */
 	if (sodium_init() < 0) {
@@ -1097,6 +1133,8 @@ static struct verbs_context *cvmrdma_alloc_context(struct ibv_device *ibdev,
 	}
 	cvmrdma_ctx->dma_heap = system_heap_fd;
 #endif
+
+	cvmrdma_ctx->aead = aead;
 
 	return prov_verbs_context;
 

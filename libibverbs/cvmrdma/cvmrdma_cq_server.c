@@ -34,6 +34,8 @@ int cq_server_loop_once(struct cvmrdma_context * ctxt)
     struct ibv_cq * prov_cq = server->prov_cq;
     QPMetadataManager * qp_metadata_manager = server->qp_metadata_manager;
 
+    enum sodium_crypto_aead aead = ctxt->aead;
+
     int err;
 
     struct ibv_wc wcs[CQ_SERVER_NUM_WCS];
@@ -202,8 +204,9 @@ int cq_server_loop_once(struct cvmrdma_context * ctxt)
                 struct ibv_sge * rcv_sgl = recv_info->sgl;
                 struct ibv_sge * cur_sge = &rcv_sgl[qp->cur_sge_idx];
 
-                size_t plen = clen - crypto_aead_xchacha20poly1305_ietf_ABYTES;
-                if(qp->cur_offt_in_sge + plen <= cur_sge->length)
+                /* Assume the worst case: plen = clan. In most cases plen < clen */
+                size_t plen_max = clen;
+                if(qp->cur_offt_in_sge + plen_max <= cur_sge->length)
                 {
                     /* can write directly to dest! */
                     struct cvmrdma_mr * cur_mr = get_bounce_metadata_for_lkey(pd->bounce_metadata, cur_sge->lkey);
@@ -215,13 +218,14 @@ int cq_server_loop_once(struct cvmrdma_context * ctxt)
                 }
             }
 
-            err = crypto_aead_xchacha20poly1305_ietf_decrypt(
+            err = cvmrdma_decrypt(
                 decrypted, &mlen,
                 NULL,
                 private, clen,
                 NULL, 0,
                 (unsigned char const *)nonce,
-                (unsigned char const *)rx_key
+                (unsigned char const *)rx_key,
+                aead
             );
             if(err)
             {

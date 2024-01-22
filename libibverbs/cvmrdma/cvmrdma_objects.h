@@ -41,6 +41,9 @@ struct cvmrdma_context {
 
 	/* dma heap to allocate the public buffers on */
 	int dma_heap;
+
+	/* AEAD method to use in sodium */
+	enum sodium_crypto_aead aead;
 };
 
 
@@ -80,7 +83,8 @@ struct cvmrdma_qp {
 	/* Capability of the remote QP to notify on WRITEs */
 	QPNotificationClient * remote_qnc;
 	/* Transmission key Generate the tx key, and receive the rx key */
-	uint64_t tx_key[crypto_aead_xchacha20poly1305_ietf_KEY_WORDS];
+	uint64_t tx_key[cvmrdma_aead_KEY_WORDS];
+	uint64_t tx_nonce[cvmrdma_aead_NPUB_WORDS];
 
 	/* The IP based server will enqueue notifications related to this QP on this queue */
 	NotificationQueue * notification_queue;
@@ -106,7 +110,8 @@ struct cvmrdma_qp {
 	int last_line_acked;
 
 	/* Remote params */
-	uint64_t rx_key[crypto_aead_xchacha20poly1305_ietf_KEY_WORDS];
+	uint64_t rx_key[cvmrdma_aead_KEY_WORDS];
+	uint64_t rx_nonce[cvmrdma_aead_NPUB_WORDS];
 	uint32_t remote_ring_rkey;
 	bool remote_params_set;
 	pthread_mutex_t remote_params_lock;
