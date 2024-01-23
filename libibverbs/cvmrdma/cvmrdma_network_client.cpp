@@ -29,28 +29,6 @@ static CVMRDMA::IBVOp ibv_to_capnp_opcode(enum ibv_wr_opcode op)
 
 
 
-kj::Promise<void> remote_qp_notify_chunk_rpc(
-    QPNotificationClient * qnc,
-    enum ibv_wr_opcode op,
-    uint32_t rkey, uint64_t hca_addr, 
-    bool last_chunk, uint32_t imm
-)
-{
-    auto req = qnc->notifyChunkRequest();
-
-    req.setOp(ibv_to_capnp_opcode(op));
-    
-    req.setRkey(rkey);
-    req.setHcaAddr(hca_addr);
-
-    req.setLastChunk(last_chunk);
-    req.setImm(imm);
-
-    return req.send().ignoreResult();
-}
-
-
-
 kj::Promise<void> remote_qp_notify_chunk_recv_rpc(QPNotificationClient * qnc)
 {
     auto req = qnc->notifyChunkRecvRequest();

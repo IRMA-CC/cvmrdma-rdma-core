@@ -8,12 +8,6 @@
 #ifdef __cplusplus
 
 /* C++ API */
-kj::Promise<void> remote_qp_notify_chunk_rpc(
-    QPNotificationClient * qnc,
-    enum ibv_wr_opcode op,
-    uint32_t rkey, uint64_t hca_addr, 
-    bool last_chunk, uint32_t imm
-);
 
 kj::Promise<void> remote_qp_notify_chunk_recv_rpc(QPNotificationClient * qnc);
 

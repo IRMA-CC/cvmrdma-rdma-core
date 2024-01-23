@@ -24,7 +24,6 @@
 #include "cvmrdma_network_client_priv.h"
 #include "cvmrdma_network_server_priv.h"
 #include "cvmrdma_network_evloop_priv.h"
-#include "notification_queue.h"
 #include "recv_metadata.h"
 #include "wc_queue.h"
 #include "dma_heap.h"
@@ -98,8 +97,6 @@ static int attach_qp_to_cq_server(struct cvmrdma_context * ctxt, struct cvmrdma_
 	int err;
 
 	uint32_t qpn = qp->user_qp.qp.qp_num;
-	DEBUG("Create notification queue ->CQ server for QPN %" PRIx32 "\n", qpn);
-	qp->notification_queue = alloc_notification_queue();
 
 
 	err = cq_server_register_qp(&ctxt->cvmrdma_cq_server, qp);
@@ -116,7 +113,6 @@ static int attach_qp_to_cq_server(struct cvmrdma_context * ctxt, struct cvmrdma_
 	DEBUG("Create QpNotificationChannel cap QNC using notification queue\n");
 	cvmrdma_server_register_qp(
 		ctxt->network_server,
-		qp->notification_queue,
 		qpn,
 		&qp->send_lines_full,
 		&qp->send_lines_full_lock,
@@ -538,6 +534,10 @@ static int post_send_do_bounce(struct cvmrdma_qp * qp, struct ibv_send_wr *wrs, 
 	struct cvmrdma_pd * pd = (struct cvmrdma_pd *)qp->user_qp.qp.pd;
     enum sodium_crypto_aead aead = ctxt->aead;
 
+	unsigned long long tag_bytes = cvmrdma_ABYTES(aead);
+	unsigned long long header_bytes = cvmrdma_header_bytes(aead);
+	unsigned long long payload_bytes = cvmrdma_payload_bytes(aead);
+
 	int err;
 
 	if(qp->user_qp.qp.qp_type != IBV_QPT_RC)
@@ -606,9 +606,11 @@ static int post_send_do_bounce(struct cvmrdma_qp * qp, struct ibv_send_wr *wrs, 
 		size_t total_bytes = 0;
 		for(size_t i = 0 ; i < nsge ; i++)
 			total_bytes += sgl[i].length;
-		size_t total_chunks = DIVIDE_ROUND_UP(total_bytes, CVMRDMA_PAYLOAD_BYTES);
+		size_t total_chunks = DIVIDE_ROUND_UP(total_bytes, payload_bytes);
 		/* XXX: pass the number of chunks to the CQ_server to know when to emit a send WC for user. Do it 
-		   BEFORE we start sending, so that CQ server has this informatin when WCs start to arrive  */
+		   BEFORE we start sending, so that CQ server has this informatin when WCs start to arrive
+		   This means that each chunk has to send EXACTLY payload_bytes, even if the tag ends up
+		   being shorter (bc of the AEAD choice) */
 		qp_send_metadata_push(qp->send_metadata, this_wr->wr_id, total_bytes, total_chunks, write_for_read);
 
 		while(cur_sge_idx < nsge)
@@ -616,40 +618,66 @@ static int post_send_do_bounce(struct cvmrdma_qp * qp, struct ibv_send_wr *wrs, 
 			struct ibv_sge * cur_sge = &sgl[cur_sge_idx];
 
 			/* If this is the last chunk, we'll need to notify that it's a WC generating chunk (if op != WRITE) */
-			bool last_chunk = ((cur_sge_idx + 1) == nsge) && ((cur_sge_offt + CVMRDMA_PAYLOAD_BYTES) >= cur_sge->length);
+			bool last_chunk = ((cur_sge_idx + 1) == nsge) && ((cur_sge_offt + payload_bytes) >= cur_sge->length);
+
+
+			/* Prepare the two nonces: for notif and for payload */
+			uint64_t * qp_nonce = qp->tx_nonce;
+
+			uint64_t nonce0[cvmrdma_aead_NPUB_WORDS], nonce1[cvmrdma_aead_NPUB_WORDS];
+			memcpy(nonce0, qp_nonce, cvmrdma_aead_NPUBBYTES);
+			
+			memcpy(nonce1, qp_nonce, cvmrdma_aead_NPUBBYTES);
+			nonce1[0] += 1;
+			
+			/* and increment nonce */
+			qp_nonce[0] += 2;
 
 
 			/***** NOTIFY ******/
 			/* The notification happens off-thread, and will happen in parallel to the GATHER, ENCRYPT, COPY and SEND */
 			TIMING("chunk_notify");
+			unsigned long long notif_clen;
 			{
+				struct cq_server_notification notif = {0};
+
 				if(is_write)
 				{
 					/* This chunk will be directly written at the destination */
-					remote_qp_notify_chunk(
-						ctxt->network_evloop,
-						qp->remote_qnc,
-						this_op,
-						rkey,
-						remote_addr + bytes_sent,
-						last_chunk,
-						this_imm
-					);
+					notif.hca_addr = remote_addr + bytes_sent; /* include the current offt */
+					notif.op = this_op;
+					notif.rkey = rkey;
+					notif.imm = this_imm;
+					notif.last_chunk = last_chunk;
 				}
 				else
 				{
 					/* All these chunks will be written to the same RR, until last_chunk is reached */
-					remote_qp_notify_chunk(
-						ctxt->network_evloop,
-						qp->remote_qnc,
-						this_op,
-						0,
-						0,
-						last_chunk,
-						this_imm
-					);
+					notif.hca_addr = 0;
+					notif.op = this_op;
+					notif.rkey = 0;
+					notif.imm = this_imm;
+					notif.last_chunk = last_chunk;
 
 				}
+
+				notif_clen = header_bytes;
+				err = cvmrdma_encrypt(
+					encrypted, &notif_clen,
+					(unsigned char const *)&notif, sizeof(notif),
+					NULL, 0,
+					0,
+					(unsigned char *)nonce0,
+					(unsigned char const *)tx_key,
+					aead
+				);
+				if(err)
+				{
+					fprintf(stderr, "Failed to encrypt chunk!\n");
+					exit(1);
+				}
+
+				assert(notif_clen == header_bytes);
 			}
 
 			TIMING("gec_t0");
@@ -664,15 +692,15 @@ static int post_send_do_bounce(struct cvmrdma_qp * qp, struct ibv_send_wr *wrs, 
 			struct cvmrdma_mr * cur_mr = get_bounce_metadata_for_lkey(pd->bounce_metadata, cur_sge->lkey);
 
 			/* We can avoid the GATHER step if current (sge, offt) gives a contiguous chunk */
-			if(cur_sge_offt + CVMRDMA_PAYLOAD_BYTES <= cur_sge->length)
+			if(cur_sge_offt + payload_bytes <= cur_sge->length)
 			{
 				/* offt in MR*/
 				uint64_t offt = (cur_sge->addr - cur_mr->hca_va) + cur_sge_offt;
 				/* location in memory */
 				ptxt = cur_mr->user_mr.ibv_mr.addr + offt;
 
-				cur_sge_offt += CVMRDMA_PAYLOAD_BYTES;
-				chunk_bytes = CVMRDMA_PAYLOAD_BYTES;
+				cur_sge_offt += payload_bytes;
+				chunk_bytes = payload_bytes;
 
 				if(cur_sge_offt >= cur_sge->length)
 				{
@@ -699,7 +727,7 @@ static int post_send_do_bounce(struct cvmrdma_qp * qp, struct ibv_send_wr *wrs, 
 			/* Else we need to gather bytes from different sges in a contiguous block */
 			else
 			{
-				while((chunk_bytes < CVMRDMA_PAYLOAD_BYTES) && (cur_sge_idx < nsge))
+				while((chunk_bytes < payload_bytes) && (cur_sge_idx < nsge))
 				{
 					cur_sge = &sgl[cur_sge_idx];
 					cur_mr = get_bounce_metadata_for_lkey(pd->bounce_metadata, cur_sge->lkey);
@@ -707,7 +735,7 @@ static int post_send_do_bounce(struct cvmrdma_qp * qp, struct ibv_send_wr *wrs, 
 					unsigned char * mr_addr = cur_mr->user_mr.ibv_mr.addr;
 
 					/* bytes needed to fill up chunk */
-					size_t remaining = CVMRDMA_PAYLOAD_BYTES - chunk_bytes;
+					size_t remaining = payload_bytes - chunk_bytes;
 					/* bytes still available in this sge */
 					size_t available = cur_sge->length - cur_sge_offt;
 
@@ -735,21 +763,18 @@ static int post_send_do_bounce(struct cvmrdma_qp * qp, struct ibv_send_wr *wrs, 
 			}
 			/**** ENCRYPT *****/
 
-			/* The nonce to use is the tx_counter */
-			uint64_t * nonce = qp->tx_nonce;
-
 			DEBUG("ptxt %x %x %x\n", ptxt[0], ptxt[1], ptxt[2]);
 			DEBUG("plen %zu\n", chunk_bytes);
-			DEBUG("nonce %lx %lx\n", nonce[0], nonce[1]);
+			DEBUG("nonce %lx %lx\n", nonce1[0], nonce1[1]);
 
-			unsigned long long clen = CVMRDMA_RING_SLOT_BYTES;
+			unsigned long long payload_clen = CVMRDMA_RING_SLOT_BYTES;
 			err = cvmrdma_encrypt(
-				encrypted,
-				&clen,
+				encrypted + notif_clen, /* start after the notif */
+				&payload_clen,
 				ptxt, chunk_bytes,
 				NULL, 0,
 				NULL,
-				(unsigned char *)nonce,
+				(unsigned char *)nonce1,
 				(unsigned char const *)tx_key,
 				aead
 			);
@@ -759,12 +784,10 @@ static int post_send_do_bounce(struct cvmrdma_qp * qp, struct ibv_send_wr *wrs, 
 				exit(1);
 			}
 
+			unsigned long long total_clen = notif_clen + payload_clen;
 
 			DEBUG("encrypted %x %x %x ...\n", encrypted[0], encrypted[1], encrypted[2]);
-			DEBUG("clen %llu\n", clen);
-
-			/* Immediately increment the nonce */
-			nonce[0] += 1;
+			DEBUG("clen %llu\n", total_clen);
 
 
 			/***** COPY ******/
@@ -792,7 +815,7 @@ static int post_send_do_bounce(struct cvmrdma_qp * qp, struct ibv_send_wr *wrs, 
 			}
 
 			unsigned char * slot = ringbuf_out + slot_id * CVMRDMA_RING_SLOT_BYTES;
-			memcpy(slot, encrypted, clen);
+			memcpy(slot, encrypted, total_clen);
 
 
 			TIMING("gec_t1");
@@ -815,7 +838,7 @@ static int post_send_do_bounce(struct cvmrdma_qp * qp, struct ibv_send_wr *wrs, 
 			ibv_wr_set_sge(prov_qpx,
 				local_ring_lkey,
 				slot_id * CVMRDMA_RING_SLOT_BYTES,
-				clen /* includes mac */
+				total_clen /* includes mac */
 			);
 
 			TIMING("send_chunk_wr");

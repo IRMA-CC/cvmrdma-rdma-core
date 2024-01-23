@@ -4,7 +4,6 @@
 #include <mutex>
 #include <memory>
 
-#include "notification_queue.hpp"
 #include "debug.h"
 
 struct QPMetadataManager

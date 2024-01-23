@@ -6,7 +6,6 @@
 
 #include <pthread.h>
 
-#include "notification_queue.h"
 #include "bounce_metadata.h"
 #include "recv_metadata.h"
 
@@ -15,7 +14,6 @@
 
 #include "ThreadsafeMap.hpp"
 #include "crypto.h"
-#include "notification_queue.hpp"
 
 #include "debug.h"
 
@@ -27,7 +25,6 @@ class QpNotificationChannel : public CVMRDMA::QpNotificationChannel::Server
 {
 public:
     QpNotificationChannel(
-        NotificationQueue * nq,
         uint32_t qpn,
         int * send_lines_full_ptr,
         pthread_mutex_t * send_lines_lock_ptr,
@@ -39,7 +36,6 @@ public:
         pthread_cond_t * remote_params_set_cv_ptr
     );
     
-    kj::Promise<void> notifyChunk(NotifyChunkContext context) override;
     kj::Promise<void> notifyChunkRecv(NotifyChunkRecvContext context) override;
     kj::Promise<void> setRemoteParams(SetRemoteParamsContext context) override;
     
@@ -64,9 +60,6 @@ public:
 private:
     uint32_t m_qpn = 0;
 
-    /* Queue to CQ server. Owned by the CQ server through the NotificationQueueManager */
-    NotificationQueue * m_notification_queue = nullptr;
-
     uint64_t * m_rx_key_ptr = nullptr;
     uint32_t * m_remote_ring_rkey_ptr = nullptr; 
 	bool * m_remote_params_set_ptr = nullptr;
@@ -86,7 +79,6 @@ public:
     kj::Promise<void> registerQpWithRemoteQp(RegisterQpWithRemoteQpContext context) override;
 
     void qp_notification_channel_create(
-        NotificationQueue * nq,
         uint32_t local_qpn,
         int * send_lines_full_ptr,
         pthread_mutex_t * send_lines_lock_ptr,
@@ -110,7 +102,6 @@ extern "C" {
 /* C API */
 
 void cvmrdma_server_register_qp(CVMRDMAServer * cs,
-    NotificationQueue * nq,
     uint32_t local_qpn,
     int * send_lines_full_ptr,
     pthread_mutex_t * send_lines_lock_ptr,

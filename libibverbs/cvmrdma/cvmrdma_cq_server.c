@@ -4,6 +4,7 @@
 #include <stdio.h>
 #include <stdbool.h>
 #include <pthread.h>
+#include <string.h>
 
 #include <sodium.h>
 
@@ -35,6 +36,10 @@ int cq_server_loop_once(struct cvmrdma_context * ctxt)
     QPMetadataManager * qp_metadata_manager = server->qp_metadata_manager;
 
     enum sodium_crypto_aead aead = ctxt->aead;
+	unsigned long long tag_bytes = cvmrdma_ABYTES(aead);
+	unsigned long long header_bytes = cvmrdma_header_bytes(aead);
+	unsigned long long max_payload_bytes = cvmrdma_payload_bytes(aead);
+
 
     int err;
 
@@ -157,29 +162,56 @@ int cq_server_loop_once(struct cvmrdma_context * ctxt)
             memcpy(private, slot, CVMRDMA_RING_SLOT_BYTES);
 
             /**** DECRYPT *****/
-            /* Decrypt the ctxt+MAC from the slot */
+            /* Decrypt the notification, then the payload */
 
-            NotificationQueue * nq = qp->notification_queue;
-            assert(nq);
+			/* Prepare the two nonces: for notif and for payload */
+			uint64_t * qp_nonce = qp->rx_nonce;
 
-            /* The metadata for this chunk has/will be delivered on the IP server */
-            TIMING("pop_chunk_notify");
-            struct cq_server_notification const * notification = notification_queue_front(nq);
+			uint64_t nonce0[cvmrdma_aead_NPUB_WORDS], nonce1[cvmrdma_aead_NPUB_WORDS];
+			memcpy(nonce0, qp_nonce, cvmrdma_aead_NPUBBYTES);
+			
+			memcpy(nonce1, qp_nonce, cvmrdma_aead_NPUBBYTES);
+			nonce1[0] += 1;
+			
+			/* and increment nonce */
+			qp_nonce[0] += 2;
 
-            enum ibv_wr_opcode wr_op = notification->op;
+            struct cq_server_notification notif = {0};
+
+            unsigned char * notif_start = private;
+            unsigned long long notif_clen = header_bytes; /* Q: if I put "wc_length" here, does it work ?*/
+            if(header_bytes > wc_length)
+            {
+                fprintf(stderr, "Failed to decrypt: chunk too short\n");
+                exit(1);
+            }
+
+            unsigned long long notif_mlen = sizeof(notif);
+            err = cvmrdma_decrypt(
+                (unsigned char *)&notif, &notif_mlen,
+                NULL,
+                notif_start, notif_clen,
+                NULL, 0,
+                (unsigned char const *)nonce0,
+                (unsigned char const *)rx_key,
+                aead
+            );
+            if(err)
+            {
+                fprintf(stderr, "WARN: Failed to decrypt bounce buffer, exiting.\n");
+                exit(1);
+            }
+
+            enum ibv_wr_opcode wr_op = notif.op;
             bool is_write = (wr_op == IBV_WR_RDMA_WRITE) || (wr_op == IBV_WR_RDMA_WRITE_WITH_IMM);
 
-            unsigned long long clen = wc_length;
-            unsigned long long mlen = CVMRDMA_RING_SLOT_BYTES;
 
-            /* The nonce is the rx counter */
-            uint64_t * nonce = qp->rx_nonce;
+            unsigned char * payload_start = private + header_bytes;
+            unsigned long long payload_clen = wc_length - header_bytes;
 
-
-            DEBUG("nonce %lx %lx\n", nonce[0], nonce[1]);
+            DEBUG("nonce %lx %lx\n", nonce1[0], nonce1[1]);
             DEBUG("private %x %x %x ...\n", private[0], private[1], private[2]);
-            DEBUG("clen %llu\n", clen);
-
+            DEBUG("clen %llu\n", payload_clen);
 
             // Decrypt directly to destination !
             bool bypass_scatter = false;
@@ -187,8 +219,8 @@ int cq_server_loop_once(struct cvmrdma_context * ctxt)
             {
                 /* The operation is a WRITE: use the remote_addr and rkey provided by the requester. We
                 always write in a contiguous block, so always bypass scatter */
-                uint32_t rkey = notification->rkey;
-                uint64_t hca_addr = notification->hca_addr;
+                uint32_t rkey = notif.rkey;
+                uint64_t hca_addr = notif.hca_addr;
 
                 struct cvmrdma_mr * mr = get_bounce_metadata_for_rkey(pd->bounce_metadata, rkey);
 
@@ -207,8 +239,8 @@ int cq_server_loop_once(struct cvmrdma_context * ctxt)
                 struct ibv_sge * rcv_sgl = recv_info->sgl;
                 struct ibv_sge * cur_sge = &rcv_sgl[qp->cur_sge_idx];
 
-                /* Assume the worst case: plen = clan. In most cases plen < clen */
-                size_t plen_max = clen;
+                /* plen = clen - size(MAC) */
+                size_t plen_max = payload_clen - tag_bytes;
                 if(qp->cur_offt_in_sge + plen_max <= cur_sge->length)
                 {
                     /* can write directly to dest! */
@@ -221,12 +253,13 @@ int cq_server_loop_once(struct cvmrdma_context * ctxt)
                 }
             }
 
+            unsigned long long payload_mlen = CVMRDMA_RING_SLOT_BYTES;
             err = cvmrdma_decrypt(
-                decrypted, &mlen,
+                decrypted, &payload_mlen,
                 NULL,
-                private, clen,
+                payload_start, payload_clen,
                 NULL, 0,
-                (unsigned char const *)nonce,
+                (unsigned char const *)nonce1,
                 (unsigned char const *)rx_key,
                 aead
             );
@@ -237,9 +270,6 @@ int cq_server_loop_once(struct cvmrdma_context * ctxt)
             }
 
             DEBUG("decrypted %x %x %x\n", decrypted[0], decrypted[1], decrypted[2]);
-
-            /* Immediatly increment the nonce */
-            nonce[0] += 1;
 
             /*** SCATTER ****/
             /* Scatter the plaintext to user memory. If the op is a WRITE, the remote has set the destination address,
@@ -255,14 +285,14 @@ int cq_server_loop_once(struct cvmrdma_context * ctxt)
                 
                 size_t bytes_copied = 0;
 
-                while((bytes_copied < mlen) && (qp->cur_sge_idx < rcv_nsge))
+                while((bytes_copied < payload_mlen) && (qp->cur_sge_idx < rcv_nsge))
                 {
                     struct ibv_sge * cur_sge = &rcv_sgl[qp->cur_sge_idx];
                     struct cvmrdma_mr * cur_mr = get_bounce_metadata_for_lkey(pd->bounce_metadata, cur_sge->lkey);
                     unsigned char * mr_addr = cur_mr->user_mr.ibv_mr.addr;
 
 
-                    size_t remaining = mlen - bytes_copied;
+                    size_t remaining = payload_mlen - bytes_copied;
                     size_t available = cur_sge->length - qp->cur_offt_in_sge;
 
                     uint64_t offt = (cur_sge->addr - cur_mr->hca_va) + qp->cur_offt_in_sge;
@@ -285,10 +315,10 @@ int cq_server_loop_once(struct cvmrdma_context * ctxt)
                 }
 
 
-                if(bytes_copied < mlen)
+                if(bytes_copied < payload_mlen)
                 {
                     /* Early loop exit bc the sglist is empty. This is an error ! */
-                    fprintf(stderr, "Incoming chunk would exceed the end of the receive request! (chunk %llu > recv %zu)\n", mlen, bytes_copied);
+                    fprintf(stderr, "Incoming chunk would exceed the end of the receive request! (chunk %llu > recv %zu)\n", payload_mlen, bytes_copied);
                     exit(1);
                     /* TODO: emit IBV_WC_LOC_LEN_ERR in WC status for user !*/
                 }
@@ -300,7 +330,7 @@ int cq_server_loop_once(struct cvmrdma_context * ctxt)
                 struct ibv_sge * rcv_sgl = recv_info->sgl;
                 struct ibv_sge * cur_sge = &rcv_sgl[qp->cur_sge_idx];
 
-                qp->cur_offt_in_sge += mlen;
+                qp->cur_offt_in_sge += payload_mlen;
                 if(qp->cur_offt_in_sge >= cur_sge->length)
                 {
                     qp->cur_offt_in_sge = 0;
@@ -308,14 +338,14 @@ int cq_server_loop_once(struct cvmrdma_context * ctxt)
                 }
             }
 
-            qp->wr_bytes_rcved += mlen;
+            qp->wr_bytes_rcved += payload_mlen;
 
             DEBUG("after chunk: rcved 0x%zx bytes of WR\n", qp->wr_bytes_rcved);
 
             TIMING("cds_t1");
 
             /* Is this the end of a WR? */
-            if(notification->last_chunk)
+            if(notif.last_chunk)
             {
                 DEBUG("last_chunk!\n");
                 if(op == IBV_WR_RDMA_WRITE)
@@ -337,7 +367,7 @@ int cq_server_loop_once(struct cvmrdma_context * ctxt)
 
                     /* The WR may carry an immediate */
                     bool has_imm = (wr_op == IBV_WR_RDMA_WRITE_WITH_IMM) || (wr_op == IBV_WR_SEND_WITH_IMM);
-                    uint32_t imm = notification->imm;
+                    uint32_t imm = notif.imm;
 
                     /* The RR consuming ops also generate a WC. Convert the WR opcode to a WC opcode */
                     enum ibv_wc_opcode wc_op;
@@ -371,10 +401,6 @@ int cq_server_loop_once(struct cvmrdma_context * ctxt)
                     qp->wr_bytes_rcved = 0;
                 }
             }
-
-
-            /* The chunk notification has been used. */
-            notification_queue_pop(nq);
 
             /* We can notify the remote thay this chunk can be reused for writing
                 XXX: this could be pushed all the way up right after copying into private memory

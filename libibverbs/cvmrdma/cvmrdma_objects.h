@@ -7,7 +7,6 @@
 #include "crypto.h"
 #include "recv_metadata.h"
 #include "send_metadata.h"
-#include "notification_queue.h"
 #include "cvmrdma_network_client.h"
 #include "cvmrdma_network_server.h"
 #include "cvmrdma_network_evloop.h"
@@ -85,9 +84,6 @@ struct cvmrdma_qp {
 	/* Transmission key Generate the tx key, and receive the rx key */
 	uint64_t tx_key[cvmrdma_aead_KEY_WORDS];
 	uint64_t tx_nonce[cvmrdma_aead_NPUB_WORDS];
-
-	/* The IP based server will enqueue notifications related to this QP on this queue */
-	NotificationQueue * notification_queue;
 
 	/* Preserve order of post_* and the related notifications */
 	pthread_mutex_t cvmrdma_send_lock;

@@ -11,20 +11,11 @@ interface CVMRDMA {
 
     interface QpNotificationChannel {
 
-        # notify the arrival of a chunk with WWI on the ring buffer
-        # the length will be present in the WWI_WC ; and decryption will
-        # fail if the length is altered
-        notifyChunk @0 (
-            op :IBVOp,
-            rkey :UInt32, hcaAddr :UInt64, # for WRITE_* variants
-            lastChunk :Bool, imm :UInt32
-        ) -> ();
-
         # called on WC for a WWI, freeing up a slot in the ring buffer
-        notifyChunkRecv @1 () -> ();
+        notifyChunkRecv @0 () -> ();
 
         # tx key for client, rx on server
-        setRemoteParams @2 (
+        setRemoteParams @1 (
             localRingRkey :UInt32,
             txKey0 :UInt64, txKey1 :UInt64, txKey2 :UInt64, txKey3 :UInt64
         ) -> ();

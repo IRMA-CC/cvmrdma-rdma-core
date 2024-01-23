@@ -40,7 +40,6 @@ static enum ibv_wr_opcode capnp_to_ibv_opcode(CVMRDMA::IBVOp op)
 
 
 QpNotificationChannel::QpNotificationChannel(
-    NotificationQueue * nq,
     uint32_t qpn,
     int * send_lines_full_ptr,
     pthread_mutex_t * send_lines_lock_ptr,
@@ -52,7 +51,6 @@ QpNotificationChannel::QpNotificationChannel(
     pthread_cond_t * remote_params_set_cv_ptr
 )
 : m_qpn{qpn},
-m_notification_queue{nq},
 m_send_lines_full_ptr{send_lines_full_ptr},
 m_send_lines_lock_ptr{send_lines_lock_ptr},
 m_send_lines_avail_cv_ptr{send_lines_avail_ptr},
@@ -64,24 +62,6 @@ m_remote_params_set_cv_ptr{remote_params_set_cv_ptr}
 { }
 
 
-kj::Promise<void> QpNotificationChannel::notifyChunk(NotifyChunkContext context)
-{
-    auto p = context.getParams();
-
-
-    auto notification = std::make_unique<struct cq_server_notification>();
-
-    notification->hca_addr = p.getHcaAddr();
-    notification->op = capnp_to_ibv_opcode(p.getOp());
-    notification->rkey = p.getRkey();
-    notification->imm = p.getImm();
-    notification->last_chunk = p.getLastChunk();
-
-    TIMING("push_chunk_notify");
-    notification_queue_push(m_notification_queue, std::move(notification));
-
-    return kj::READY_NOW;
-}
 
 kj::Promise<void> QpNotificationChannel::notifyChunkRecv(NotifyChunkRecvContext context)
 {
@@ -135,7 +115,6 @@ kj::Promise<void> CVMRDMAServer::registerQpWithRemoteQp(RegisterQpWithRemoteQpCo
 }
 
 void CVMRDMAServer::qp_notification_channel_create(
-    NotificationQueue * nq,
     uint32_t local_qpn,
     int * send_lines_full_ptr,
     pthread_mutex_t * send_lines_lock_ptr,
@@ -147,7 +126,7 @@ void CVMRDMAServer::qp_notification_channel_create(
     pthread_cond_t * remote_params_set_cv_ptr
 )
 {
-    auto qnc_server = kj::heap<QpNotificationChannel>(nq, local_qpn, send_lines_full_ptr, send_lines_lock_ptr, send_lines_avail_ptr,
+    auto qnc_server = kj::heap<QpNotificationChannel>(local_qpn, send_lines_full_ptr, send_lines_lock_ptr, send_lines_avail_ptr,
         rx_key_ptr, remote_ring_rkey_ptr, remote_params_set_ptr, remote_params_lock_ptr, remote_params_set_cv_ptr);
     DEBUG("Register fresh notification channel for qpn 0x%" PRIx32 "\n", local_qpn);
 
@@ -173,7 +152,6 @@ void CVMRDMAServer::qp_notification_channel_destroy(QpNotificationChannel * pnc)
 
 
 void cvmrdma_server_register_qp(CVMRDMAServer * cs,
-    NotificationQueue * nq,
     uint32_t local_qpn,
     int * send_lines_full_ptr,
     pthread_mutex_t * send_lines_lock_ptr,
@@ -185,6 +163,6 @@ void cvmrdma_server_register_qp(CVMRDMAServer * cs,
     pthread_cond_t * remote_params_set_cv_ptr
 )
 {
-    cs->qp_notification_channel_create(nq, local_qpn, send_lines_full_ptr, send_lines_lock_ptr, send_lines_avail_ptr,
+    cs->qp_notification_channel_create(local_qpn, send_lines_full_ptr, send_lines_lock_ptr, send_lines_avail_ptr,
         rx_key_ptr, remote_ring_rkey_ptr, remote_params_set_ptr, remote_params_lock_ptr, remote_params_set_cv_ptr);
 }

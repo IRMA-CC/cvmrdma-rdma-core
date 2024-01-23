@@ -29,8 +29,6 @@ publish_internal_headers(infiniband/cvmrdma
   cvmrdma/cvmrdma_network_evloop_priv.h
   cvmrdma/cvmrdma_network_server_priv.h
   cvmrdma/bounce_metadata.h
-  cvmrdma/notification_queue.h
-  cvmrdma/notification_queue.hpp
   cvmrdma/cvmrdma_ops.h
   cvmrdma/qp_metadata_manager.h
   cvmrdma/recv_metadata.h
@@ -92,7 +90,6 @@ rdma_library(ibverbs "${CMAKE_CURRENT_BINARY_DIR}/libibverbs.map"
   cvmrdma/cvmrdma_network_evloop.cpp
   cvmrdma/cvmrdma_network_server.cpp
   cvmrdma/cvmrdma_ops.c
-  cvmrdma/notification_queue.cpp
   cvmrdma/qp_metadata_manager.cpp
   cvmrdma/recv_metadata.cpp
   cvmrdma/send_metadata.cpp
