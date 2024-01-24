@@ -37,7 +37,7 @@ static inline unsigned long long cvmrdma_ABYTES(enum sodium_crypto_aead aead)
         case SODIUM_AEAD_AEGIS128L:
             return crypto_aead_aegis128l_ABYTES;
         case SODIUM_AEAD_AES256GCM:
-            return crypto_aead_aegis128l_ABYTES;
+            return crypto_aead_aes256gcm_ABYTES;
     }
 }
 
@@ -62,7 +62,7 @@ static inline int cvmrdma_encrypt(unsigned char *c,
         case SODIUM_AEAD_XCHACHAPOLY:
             return crypto_aead_xchacha20poly1305_ietf_encrypt(c, clen_p, m, mlen, ad, adlen, nsec, npub, k);
         case SODIUM_AEAD_AEGIS128L:
-            return crypto_aead_aes256gcm_encrypt(c, clen_p, m, mlen, ad, adlen, nsec, npub, k);
+            return crypto_aead_aegis128l_encrypt(c, clen_p, m, mlen, ad, adlen, nsec, npub, k);
         case SODIUM_AEAD_AES256GCM:
             return crypto_aead_aes256gcm_encrypt(c, clen_p, m, mlen, ad, adlen, nsec, npub, k);
     }
@@ -89,7 +89,7 @@ static inline int cvmrdma_decrypt(unsigned char *m,
         case SODIUM_AEAD_XCHACHAPOLY:
             return crypto_aead_xchacha20poly1305_ietf_decrypt(m, mlen_p, nsec, c, clen, ad, adlen, npub, k);
         case SODIUM_AEAD_AEGIS128L:
-            return crypto_aead_aes256gcm_decrypt(m, mlen_p, nsec, c, clen, ad, adlen, npub, k);
+            return crypto_aead_aegis128l_decrypt(m, mlen_p, nsec, c, clen, ad, adlen, npub, k);
         case SODIUM_AEAD_AES256GCM:
             return crypto_aead_aes256gcm_decrypt(m, mlen_p, nsec, c, clen, ad, adlen, npub, k);
     }
