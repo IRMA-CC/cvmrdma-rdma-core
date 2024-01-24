@@ -482,28 +482,13 @@ static int cvmrdma_poll_cq(struct ibv_cq * ibcq, int num_entries, struct ibv_wc 
 	/* ... else, if the CQ "server" is not running yet, run it on this thread. */
 	CQServer * server = &ctxt->cvmrdma_cq_server;
 
-	/*
-		! is_running => (is_running = true && first = true)
-		  is_running => (is_running = true && first = false)
-
-		If the server is NOT running, mark it as running and run it.
-		If it is running, leave it marked as such and do nothing.
-	*/
-
-	bool expected = false;
-	bool first = atomic_compare_exchange_strong(&server->is_running, &expected, true);
-	if(first)
+	/* run it ONLY if it is not running yet */
+	err = cvmrdma_cq_server_run_once_if_idle(ctxt);
+	if(err < 0)
 	{
-		err = cq_server_loop_once(ctxt);
-		if(err)
-		{
-			return - err;
-		}
-
-		/* And bring it down */
-		atomic_store(&server->is_running, false);
+		return err;
 	}
-	
+
 	/* Let tje next poll return */
 	return 0;
 
@@ -846,10 +831,21 @@ static int post_send_do_bounce(struct cvmrdma_qp * qp, struct ibv_send_wr *wrs, 
 			if(err)
 			{
 				fprintf(stderr, "Failed to post WWI for a chunk (%d)\n", err);
+				exit(1);
 			}
 
 			bytes_sent += chunk_bytes;
 			chunks_in_wr++;
+
+			/* after each send, try to dequeue some SEND WC from the CQ (if no other thread is polling the CQ)
+			   XXX: for performance, ideally don't dequeue after every send, and don't signal every send
+			*/
+			err = cvmrdma_cq_server_run_once_if_idle(ctxt);
+			if(err)
+			{
+				fprintf(stderr, "Polling the CQ after a post_send failed %d\n", err);
+				exit(1);
+			}
 		}
 
 

@@ -47,7 +47,7 @@ void cq_server_context_init(CQServer * server, struct ibv_cq * prov_cq);
 void cq_server_context_destroy(CQServer * server);
 
 struct cvmrdma_context;
-int cq_server_loop_once(struct cvmrdma_context * ctxt);
+int cvmrdma_cq_server_run_once_if_idle(struct cvmrdma_context * ctxt);
 
 
 int cq_server_register_qp(CQServer * server, struct cvmrdma_qp * qp);

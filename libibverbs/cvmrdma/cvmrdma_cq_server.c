@@ -28,8 +28,8 @@ void cq_server_context_destroy(CQServer * server)
     qp_metadata_manager_destroy(server->qp_metadata_manager);
 }
 
-#define CQ_SERVER_NUM_WCS 16
-int cq_server_loop_once(struct cvmrdma_context * ctxt)
+#define CQ_SERVER_NUM_WCS 32
+static int cq_server_loop_once(struct cvmrdma_context * ctxt)
 {
     CQServer * server = &ctxt->cvmrdma_cq_server;
     struct ibv_cq * prov_cq = server->prov_cq;
@@ -413,6 +413,36 @@ int cq_server_loop_once(struct cvmrdma_context * ctxt)
         }
     }
 
+    return 0;
+}
+
+
+int cvmrdma_cq_server_run_once_if_idle(struct cvmrdma_context * ctxt)
+{
+    CQServer * server = &ctxt->cvmrdma_cq_server;
+    int err;
+
+    /*
+    ! is_running => (is_running = true && first = true)
+        is_running => (is_running = true && first = false)
+
+    If the server is NOT running, mark it as running and run it.
+    If it is running, leave it marked as such and do nothing.
+	*/
+
+	bool expected = false;
+	bool first = atomic_compare_exchange_strong(&server->is_running, &expected, true);
+	if(first)
+	{
+		err = cq_server_loop_once(ctxt);
+		if(err)
+		{
+			return - err;
+		}
+
+		/* And bring it down */
+		atomic_store(&server->is_running, false);
+	}
     return 0;
 }
 

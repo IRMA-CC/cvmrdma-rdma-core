@@ -20,7 +20,7 @@ struct cq_server_notification
 
 #define CVMRDMA_RING_SLOT_BYTES ((unsigned long long)32 * PAGE_SIZE)
 
-static inline unsigned long long cvmrdma_header_bytes(aead)
+static inline unsigned long long cvmrdma_header_bytes(enum sodium_crypto_aead aead)
 {
 	return sizeof(struct cq_server_notification) + cvmrdma_ABYTES(aead);
 }
