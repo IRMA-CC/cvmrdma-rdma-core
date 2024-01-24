@@ -396,17 +396,33 @@ static struct verbs_device *try_driver(const struct verbs_device_ops *ops,
 	   
 	   First save the provider operations for the CVM layer:   
 	*/
+	int cvmrdma_enabled = 1;
 
-	vdev->cvmrdma.alloc_context = ops->alloc_context;
-	vdev->cvmrdma.uninit_device = ops->uninit_device;
+	{
+		char const * cvmrdma_disable = getenv("CVMRDMA_DISABLE");
+		if(cvmrdma_disable && (strcmp(cvmrdma_disable, "0") != 0))
+		{
+			cvmrdma_enabled = 0;
+		}
+	}
 
-	/* Then register the CVM wrappers as the device operations
-	   XXX; this adds a layer of function pointers, although these function pointers
-	   could be replaced by static function calls. I.e: this could be optimized by changing
-	   the call sites to calls to CVM-aware functions, but this is more work for potentially
-	   little gain.
-	*/
-	vdev->ops = &cvmrdma_device_ops;
+	if(cvmrdma_enabled)
+	{
+		vdev->cvmrdma.alloc_context = ops->alloc_context;
+		vdev->cvmrdma.uninit_device = ops->uninit_device;
+
+		/* Then register the CVM wrappers as the device operations
+		XXX; this adds a layer of function pointers, although these function pointers
+		could be replaced by static function calls. I.e: this could be optimized by changing
+		the call sites to calls to CVM-aware functions, but this is more work for potentially
+		little gain.
+		*/
+		vdev->ops = &cvmrdma_device_ops;
+	}
+	else
+	{
+		vdev->ops = ops;
+	}
 
 	atomic_init(&vdev->refcount, 1);
 	dev = &vdev->device;
