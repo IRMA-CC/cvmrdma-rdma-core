@@ -405,10 +405,10 @@ static int cq_server_loop_once(struct cvmrdma_context * ctxt)
             /* We can notify the remote thay this chunk can be reused for writing
                 XXX: this could be pushed all the way up right after copying into private memory
                 But what about failures to decrypt?*/
-            TIMING("chunk_notify_recv");
-            remote_qp_notify_chunk_recv(
-                ctxt->network_evloop, qp->remote_qnc
-            );
+            // TIMING("chunk_notify_recv");
+            // remote_qp_notify_chunk_recv(
+            //     ctxt->network_evloop, qp->remote_qnc
+            // );
 
         }
     }
