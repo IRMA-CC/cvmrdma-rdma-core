@@ -198,7 +198,7 @@ static int cq_server_loop_once(struct cvmrdma_context * ctxt)
             );
             if(err)
             {
-                fprintf(stderr, "WARN: Failed to decrypt bounce buffer, exiting.\n");
+                fprintf(stderr, "WARN: Failed to decrypt bounce buffer for notif, exiting.\n");
                 exit(1);
             }
 
@@ -265,7 +265,7 @@ static int cq_server_loop_once(struct cvmrdma_context * ctxt)
             );
             if(err)
             {
-                fprintf(stderr, "WARN: Failed to decrypt bounce buffer, exiting.\n");
+                fprintf(stderr, "WARN: Failed to decrypt bounce buffer for payload, exiting.\n");
                 exit(1);
             }
 
