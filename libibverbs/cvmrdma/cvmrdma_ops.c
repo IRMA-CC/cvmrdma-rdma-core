@@ -782,13 +782,13 @@ static int post_send_do_bounce(struct cvmrdma_qp * qp, struct ibv_send_wr *wrs, 
 			int slot_id = 0;
 			{
 				/* LOCK */
-				// pthread_mutex_lock(&qp->send_lines_full_lock);
-// 
-				// while(qp->send_lines_full >= CVMRDMA_RING_ENTRIES)
-				// {
-				// 	TIMING("wait_free_sendlines!");
-				// 	pthread_cond_wait(&qp->send_lines_avail, &qp->send_lines_full_lock);
-				// }
+				pthread_mutex_lock(&qp->send_lines_full_lock);
+
+				while(qp->send_lines_full >= CVMRDMA_RING_ENTRIES)
+				{
+					TIMING("wait_free_sendlines!");
+					pthread_cond_wait(&qp->send_lines_avail, &qp->send_lines_full_lock);
+				}
 
 				slot_id = qp->next_send_slot;
 
@@ -798,7 +798,7 @@ static int post_send_do_bounce(struct cvmrdma_qp * qp, struct ibv_send_wr *wrs, 
 				DEBUG("slot_id %d\n", slot_id);
 				DEBUG("send_lines_full %d\n", qp->send_lines_full);
 
-				// pthread_mutex_unlock(&qp->send_lines_full_lock);
+				pthread_mutex_unlock(&qp->send_lines_full_lock);
 				/*  UNLOCK */
 			}
 
