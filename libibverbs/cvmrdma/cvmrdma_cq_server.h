@@ -52,6 +52,9 @@ int cvmrdma_cq_server_run_once_if_idle(struct cvmrdma_context * ctxt);
 
 int cq_server_register_qp(CQServer * server, struct cvmrdma_qp * qp);
 
+struct control_metadata;
+int send_ack(struct cvmrdma_context * ctxt, struct cvmrdma_qp * qp, struct control_metadata * md);
+
 
 #ifdef __cplusplus
 }

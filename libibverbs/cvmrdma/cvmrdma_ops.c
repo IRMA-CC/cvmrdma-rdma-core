@@ -199,7 +199,7 @@ static struct ibv_mr * alloc_public_mr(struct cvmrdma_context * ctxt, struct cvm
 	mr->pd = &pd->user_pd;
 	mr->length = size;
 
-	DEBUG("public mr: dmabuf %d va %p len %zu\n", *dmabuf_fd, va, size);
+	DEBUG("public mr: dmabuf %d va %p len %zu\n", dma_buf, va, size);
 
 	*dmabuf_fd = dma_buf;
 	*ringbuf_va = va;
@@ -254,6 +254,45 @@ static struct ibv_qp *cvmrdma_create_qp(struct ibv_pd * ibpd,
     }
 
 	qp->provider_qp = ibqp;
+
+	/* Create the control Completion Queue */
+	struct ibv_cq * control_ibcq = ctxt->prov_ops.create_cq(prov_ctxt, 16384, NULL, 0);
+	if(! control_ibcq)
+	{
+		fprintf(stderr, "failed to create backend CQ for the control CQ\n");
+		exit(1);
+	}
+	/* see ibv_create_cq */
+	verbs_init_cq(control_ibcq, prov_ctxt, NULL, NULL);
+	qp->control_cq = control_ibcq;
+
+
+	/* Create the control Queue Pair */
+	struct ibv_qp_init_attr_ex control_attr_ex = {0};
+	control_attr_ex.sq_sig_all = 1;
+	/* Direct send and recv WCs to the CQ server */
+	control_attr_ex.send_cq = qp->control_cq;
+	control_attr_ex.recv_cq = qp->control_cq;
+
+	control_attr_ex.qp_type = IBV_QPT_RC;
+
+	control_attr_ex.cap.max_recv_sge = 16;
+	control_attr_ex.cap.max_recv_wr = 128;
+	control_attr_ex.cap.max_send_sge = 16;
+	control_attr_ex.cap.max_send_wr = 128;
+	control_attr_ex.cap.max_inline_data = 0; /* we're not using inline */
+
+	control_attr_ex.pd = pd->provider_pd;
+	control_attr_ex.send_ops_flags = IBV_QP_EX_WITH_RDMA_WRITE_WITH_IMM;
+	control_attr_ex.comp_mask = IBV_QP_INIT_ATTR_PD | IBV_QP_INIT_ATTR_SEND_OPS_FLAGS;
+
+    struct ibv_qp * control_ibqp = ctxt->prov_ops.create_qp_ex(prov_ctxt, &control_attr_ex);
+    if(! ibqp)
+    {
+        goto err;
+    }
+
+	qp->control_qp = control_ibqp;
 
 	/* Initialize user visible fields */
 	qp->user_qp.qp.context = prov_ctxt;
@@ -315,9 +354,23 @@ static struct ibv_qp *cvmrdma_create_qp(struct ibv_pd * ibpd,
 	qp->next_send_slot = 0;
 	qp->next_recv_slot = 0;
 	qp->send_lines_full = 0;
-	qp->last_line_acked = CVMRDMA_RING_ENTRIES;
 
 	qp->user_sq_sig_all = attr->sq_sig_all;
+
+	/* Allocate rungbuffer where the other side writes the ACKs to*/
+	size_t control_rings_bytes = 1024; //__CVMRDMA_RING_NR * CVMRDMA_RING_TOTAL_BYTES;
+
+	int control_dmabuf_fd = -1;
+	void * control_buf_va = NULL;
+	struct ibv_mr * control_buf_mr = alloc_public_mr(ctxt, pd, control_rings_bytes, &control_dmabuf_fd, &control_buf_va);
+    if(! control_buf_mr)
+    {
+        goto free_bounce_private;
+    }
+
+	qp->control_buf_mr = control_buf_mr;
+	qp->control_buf_va = control_buf_va;
+
 
 	/* Initialize the send mutex */
 	err = pthread_mutex_init(&qp->cvmrdma_send_lock, NULL);
@@ -376,6 +429,7 @@ static int cvmrdma_modify_qp(struct ibv_qp *ibqp, struct ibv_qp_attr *attr,
 {
 	struct cvmrdma_qp * qp = (struct cvmrdma_qp *)ibqp;
 	struct ibv_qp * prov_qp = qp->provider_qp;
+	struct ibv_qp * control_qp = qp->control_qp;
 
     struct cvmrdma_context * ctxt = cvmrdma_get_ctx(qp->user_qp.qp.context);
     int ret = 0;
@@ -389,6 +443,35 @@ static int cvmrdma_modify_qp(struct ibv_qp *ibqp, struct ibv_qp_attr *attr,
 	/* Update the state on the user-visible qp fields */
 	qp->user_qp.qp.state = prov_qp->state;
 
+
+	/* control CQ to INIT*/
+	if((attr_mask & IBV_QP_STATE) && (attr->qp_state == IBV_QPS_INIT)){
+		if (control_qp->state != IBV_QPS_RESET)
+		{
+			fprintf(stderr, "control QP to init is not in RESET state!\n");
+			goto err;
+		}
+
+
+		assert(attr_mask & IBV_QP_PORT);
+		uint8_t myport = attr->port_num;
+
+		int qp_attr_mask = IBV_QP_STATE | IBV_QP_PKEY_INDEX | IBV_QP_PORT;
+		struct ibv_qp_attr control_qp_attrs = {
+			.qp_state = IBV_QPS_INIT,
+			.pkey_index = 0,
+			.port_num = myport,
+		};
+		control_qp_attrs.qp_access_flags = IBV_ACCESS_REMOTE_READ | IBV_ACCESS_REMOTE_WRITE;
+		qp_attr_mask |= IBV_QP_ACCESS_FLAGS;
+
+		ret = ctxt->prov_ops.modify_qp(control_qp, &control_qp_attrs, qp_attr_mask);
+		if(ret)
+		{
+			fprintf(stderr, "Failed to modify control QP to INIT\n");
+			goto err;
+		}
+	}
 
 	/* The RPC object need to be connected to send, but this is not required for receive (the RPC server
 	   is already running). However, since the user passes the QPN in the INIT->RTR transition,
@@ -431,30 +514,117 @@ static int cvmrdma_modify_qp(struct ibv_qp *ibqp, struct ibv_qp_attr *attr,
 			}
 		}
 
-			/* Prepare all the slots: need one RR per WRITE_WITH_IMM. Can only post recv  
-			   after RTR state */
-			struct ibv_recv_wr recv_wr[1] = {0};
-			for(int i = 0 ; i < CVMRDMA_RING_ENTRIES ; i++)
+		/* Prepare all the slots: need one RR per WRITE_WITH_IMM. Can only post recv  
+			after RTR state */
+		struct ibv_recv_wr recv_wr[1] = {0};
+		for(int i = 0 ; i < CVMRDMA_RING_ENTRIES ; i++)
+		{
+			struct ibv_recv_wr * bad_wr = NULL;
+			ret = ctxt->prov_ops.post_recv(prov_qp, recv_wr, &bad_wr);
+			if(ret)
 			{
-				struct ibv_recv_wr * bad_wr = NULL;
-				ret = ctxt->prov_ops.post_recv(prov_qp, recv_wr, &bad_wr);
-				if(ret)
-				{
-					fprintf(stderr, "Failed to post recv initial RR for ring slots (%d)\n", ret);
-					exit(1);
-				}
+				fprintf(stderr, "Failed to post recv initial RR for ring slots (%d)\n", ret);
+				exit(1);
 			}
+	}
 
-			/* Before we can receive anything, we need to wait for the remote to send us its rx key.
-			   Note that it also sets the ring_rkey, needed later for send */
-			DEBUG("INIT->RECV: wait for rx key...\n");
-			pthread_mutex_lock(&qp->remote_params_lock);
-			while(! qp->remote_params_set)
+		/* Before we can receive anything, we need to wait for the remote to send us its rx key.
+			Note that it also sets the ring_rkey, needed later for send */
+		DEBUG("INIT->RECV: wait for rx key...\n");
+		pthread_mutex_lock(&qp->remote_params_lock);
+		while(! qp->remote_params_set)
+		{
+			pthread_cond_wait(&qp->remote_params_set_cv, &qp->remote_params_lock);
+		}
+		pthread_mutex_unlock(&qp->remote_params_lock);
+
+
+		/*
+			Setup control qp
+		*/
+
+		// --> INIT
+		
+
+		// --> RTR
+		assert(attr_mask & IBV_QP_DEST_QPN);
+		uint32_t control_remote_qpn = attr->dest_qp_num + 1;
+		assert(attr_mask & IBV_QP_RQ_PSN);
+		uint32_t control_remote_psn = attr->rq_psn;
+		assert(attr_mask & IBV_QP_AV);
+		struct ibv_ah_attr * control_remote_dest = &attr->ah_attr;
+
+
+		int control_qp_attr_mask = IBV_QP_STATE;
+		struct ibv_qp_attr control_qp_attrs = (struct ibv_qp_attr) {
+			.qp_state = IBV_QPS_RTR,
+		};
+		control_qp_attrs.ah_attr.dlid = control_remote_dest->dlid;
+		control_qp_attrs.ah_attr.port_num = control_remote_dest->port_num;
+		control_qp_attrs.ah_attr.is_global = 1;
+
+		control_qp_attrs.ah_attr.grh.hop_limit = 8;
+		control_qp_attrs.ah_attr.grh.sgid_index = control_remote_dest->grh.sgid_index;
+		control_qp_attrs.ah_attr.grh.dgid = control_remote_dest->grh.dgid;
+
+		control_qp_attrs.path_mtu = IBV_MTU_1024;
+		control_qp_attrs.dest_qp_num = control_remote_qpn;
+		control_qp_attrs.rq_psn = control_remote_psn;
+
+		control_qp_attr_mask |= IBV_QP_AV | IBV_QP_PATH_MTU | IBV_QP_DEST_QPN | IBV_QP_RQ_PSN;
+
+		control_qp_attrs.max_dest_rd_atomic = 1; /* ??? */
+		control_qp_attrs.min_rnr_timer = 12;     /* ??? */
+
+		control_qp_attr_mask |= IBV_QP_MAX_DEST_RD_ATOMIC | IBV_QP_MIN_RNR_TIMER;
+
+		ret = ctxt->prov_ops.modify_qp(control_qp, &control_qp_attrs, control_qp_attr_mask);
+		if(ret)
+		{
+			goto err;
+		}
+
+		for (int i = 0; i < 10; i++)
+		{
+			struct ibv_recv_wr control_recv_wr[1] = {0};
+			struct ibv_recv_wr * control_bad_wr = NULL;
+			ret = ctxt->prov_ops.post_recv(control_qp, control_recv_wr, &control_bad_wr);
+			if(ret)
 			{
-				pthread_cond_wait(&qp->remote_params_set_cv, &qp->remote_params_lock);
+				fprintf(stderr, "Failed to post recv initial RR for control qp (%d)\n", ret);
+				exit(1);
 			}
-			pthread_mutex_unlock(&qp->remote_params_lock);
+		}
+	}
 
+	if((attr_mask & IBV_QP_STATE) && (attr->qp_state == IBV_QPS_RTS))
+	{
+		// --> RTS
+		assert(attr_mask & IBV_QP_SQ_PSN);
+		uint32_t control_sq_psn = attr->sq_psn;
+
+		int control_qp_attr_mask = 0;
+		control_qp_attr_mask = IBV_QP_STATE | IBV_QP_SQ_PSN;
+		struct ibv_qp_attr control_qp_attrs = (struct ibv_qp_attr) {
+			.qp_state = IBV_QPS_RTS,
+			.sq_psn = 0,
+		};
+		/* SQ PSN is remote's RQ PSN */
+		control_qp_attrs.sq_psn = control_sq_psn;
+		control_qp_attr_mask |= IBV_QP_SQ_PSN;
+
+		control_qp_attrs.timeout = 14;           /* ??? */
+		control_qp_attrs.retry_cnt = 7;          /* ??? */
+		control_qp_attrs.rnr_retry = 7;          /* ??? */
+		control_qp_attrs.max_dest_rd_atomic = 1; /* ??? */
+
+		control_qp_attr_mask |= IBV_QP_MAX_QP_RD_ATOMIC | IBV_QP_RETRY_CNT | IBV_QP_RNR_RETRY | IBV_QP_TIMEOUT;
+
+		int ret = ctxt->prov_ops.modify_qp(control_qp, &control_qp_attrs, control_qp_attr_mask);
+		if(ret)
+		{
+			goto err;
+		}
 	}
 
     return 0;

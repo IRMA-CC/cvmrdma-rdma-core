@@ -79,6 +79,10 @@ struct cvmrdma_qp {
 	/* Actual provider qp */
 	struct ibv_qp * provider_qp;
 
+	/* Second control channel hidden from the user */
+	struct ibv_qp * control_qp;
+	struct ibv_cq * control_cq;
+
 	/* Capability of the remote QP to notify on WRITEs */
 	QPNotificationClient * remote_qnc;
 	/* Transmission key Generate the tx key, and receive the rx key */
@@ -101,9 +105,16 @@ struct cvmrdma_qp {
 	int ringbuf_dmabuf_fd;
 
 	int next_send_slot;
-	int send_lines_full;
 	int next_recv_slot;
-	int last_line_acked;
+	/* Amount of entries in the send line
+	   increased during post_send, decreased in 
+	   QpNotificationChannel::notifyChunkRecv
+	*/
+	int send_lines_full;
+
+	/* Ringbuffer where ACKs are written to */
+	struct ibv_mr * control_buf_mr;
+	void * control_buf_va;
 
 	/* Remote params */
 	uint64_t rx_key[cvmrdma_aead_KEY_WORDS];
@@ -138,3 +149,6 @@ struct cvmrdma_qp {
 	bool user_sq_sig_all;
 };
 
+struct control_metadata {
+	uint64_t ack_revc_slot;
+};
