@@ -17,6 +17,7 @@ interface CVMRDMA {
         # tx key for client, rx on server
         setRemoteParams @1 (
             localRingRkey :UInt32,
+            localControlRkey :UInt32,
             txKey0 :UInt64, txKey1 :UInt64, txKey2 :UInt64, txKey3 :UInt64
         ) -> ();
     }

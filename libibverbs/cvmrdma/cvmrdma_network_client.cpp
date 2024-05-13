@@ -36,7 +36,7 @@ kj::Promise<void> remote_qp_notify_chunk_recv_rpc(QPNotificationClient * qnc)
     return req.send().ignoreResult();
 }
 
-kj::Promise<void> set_remote_params_rpc(QPNotificationClient * qnc, uint64_t const * tx_key, uint32_t local_ring_rkey)
+kj::Promise<void> set_remote_params_rpc(QPNotificationClient * qnc, uint64_t const * tx_key, uint32_t local_ring_rkey, uint32_t local_control_rkey)
 {
     auto req = qnc->setRemoteParamsRequest();
 
@@ -46,6 +46,7 @@ kj::Promise<void> set_remote_params_rpc(QPNotificationClient * qnc, uint64_t con
     req.setTxKey3(tx_key[3]);
 
     req.setLocalRingRkey(local_ring_rkey);
+    req.setLocalControlRkey(local_control_rkey);
 
     return req.send().ignoreResult();
 }

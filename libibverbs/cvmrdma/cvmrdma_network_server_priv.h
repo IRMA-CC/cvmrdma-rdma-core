@@ -31,6 +31,7 @@ public:
         pthread_cond_t * send_lines_avail_ptr,
         uint64_t * rx_key_ptr,
         uint32_t * remote_ring_rkey_ptr,
+        uint32_t * remote_control_rkey_ptr,
         bool * remote_params_set_ptr,
         pthread_mutex_t *  remote_params_lock_ptr,
         pthread_cond_t * remote_params_set_cv_ptr
@@ -44,13 +45,14 @@ public:
         return m_qpn;
     }
 
-    void set_qp_remote_params(uint64_t const * rx_key, uint32_t ring_rkey)
+    void set_qp_remote_params(uint64_t const * rx_key, uint32_t ring_rkey, uint32_t control_rkey)
     {
-        DEBUG("setting rx_key and ring rkey %" PRIx32 "on QNC for local QPN %" PRIx32 "\n", ring_rkey, m_qpn);
+        DEBUG("setting rx_key and ring rkey %" PRIx32 " and control rkey %" PRIx32 " on QNC for local QPN %" PRIx32 "\n", ring_rkey, control_rkey, m_qpn);
 
         pthread_mutex_lock(m_remote_params_lock_ptr);
         memcpy(m_rx_key_ptr, rx_key, cvmrdma_aead_KEYBYTES);
         *m_remote_ring_rkey_ptr = ring_rkey;
+        *m_remote_control_rkey_ptr = control_rkey;
         *m_remote_params_set_ptr = true;
         pthread_mutex_unlock(m_remote_params_lock_ptr);
 
@@ -62,6 +64,7 @@ private:
 
     uint64_t * m_rx_key_ptr = nullptr;
     uint32_t * m_remote_ring_rkey_ptr = nullptr; 
+    uint32_t * m_remote_control_rkey_ptr = nullptr; 
 	bool * m_remote_params_set_ptr = nullptr;
 	pthread_mutex_t * m_remote_params_lock_ptr = nullptr;
 	pthread_cond_t * m_remote_params_set_cv_ptr = nullptr;
@@ -85,6 +88,7 @@ public:
         pthread_cond_t * send_lines_avail_ptr,
         uint64_t * rx_key_ptr,
         uint32_t * remote_ring_rkey_ptr,
+        uint32_t * remote_control_rkey_ptr,
         bool * remote_params_set_ptr,
         pthread_mutex_t *  remote_params_lock_ptr,
         pthread_cond_t * remote_params_set_cv_ptr
@@ -108,6 +112,7 @@ void cvmrdma_server_register_qp(CVMRDMAServer * cs,
     pthread_cond_t * send_lines_avail_ptr,
     uint64_t * rx_key_ptr,
     uint32_t * remote_ring_rkey_ptr,
+    uint32_t * remote_control_rkey_ptr,
     bool * remote_params_set_ptr,
     pthread_mutex_t *  remote_params_lock_ptr,
     pthread_cond_t * remote_params_set_cv_ptr

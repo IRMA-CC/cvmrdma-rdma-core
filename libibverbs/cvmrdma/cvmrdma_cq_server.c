@@ -406,20 +406,16 @@ static int cq_server_loop_once(struct cvmrdma_context * ctxt)
                 XXX: this could be pushed all the way up right after copying into private memory
                 But what about failures to decrypt?*/
             TIMING("chunk_notify_recv");
-            remote_qp_notify_chunk_recv(
-                ctxt->network_evloop, qp->remote_qnc
-            );
+            // remote_qp_notify_chunk_recv(
+            //     ctxt->network_evloop, qp->remote_qnc
+            // );
 
-            struct control_metadata cm = {
-                .ack_revc_slot = this_recv_slot_id
-            };
-            int ret = send_ack(ctxt, qp, &cm);
-            if(ret)
+            pthread_mutex_lock(&qp->received_lines_lock);
+            if ( ++qp->received_lines >= CVMRDMA_ACK_THRESHOLD)
             {
-                fprintf(stderr, "Failed to send ack\n");
-                exit(1);
+                pthread_cond_signal(&qp->recv_lines_ack);
             }
-
+            pthread_mutex_unlock(&qp->received_lines_lock);
         }
     }
 
@@ -463,65 +459,4 @@ int cvmrdma_cq_server_run_once_if_idle(struct cvmrdma_context * ctxt)
 int cq_server_register_qp(CQServer * server, struct cvmrdma_qp * qp)
 {
     return qp_metadata_manager_register_qp(server->qp_metadata_manager, qp->user_qp.qp.qp_num, qp);
-}
-
-
-int send_ack(struct cvmrdma_context * ctxt, struct cvmrdma_qp * qp, struct control_metadata * md)
-{
-    struct ibv_qp * cqp = qp->control_qp;
-    struct ibv_qp_ex * cqpx = ibv_qp_to_qp_ex(cqp);
-    int ret;
-
-    memcpy(qp->control_buf_va, md, sizeof(struct control_metadata));
-    
-    ibv_wr_start(cqpx);
-    cqpx->wr_id = 0;
-    cqpx->wr_flags = IBV_SEND_SIGNALED;
-
-    // Say where we want to write on the remote
-    ibv_wr_rdma_write_imm(
-        cqpx, 
-        qp->remote_ring_rkey, 
-        1 * sizeof(struct control_metadata),
-        0
-    );
-    // What do we want to write
-    ibv_wr_set_sge(
-        cqpx,
-        qp->control_buf_mr->lkey,
-        0,
-        sizeof(struct control_metadata)
-    );
-
-    ret = ibv_wr_complete(cqpx);
-    if(ret)
-    {
-        fprintf(stderr, "Failed to complete control WR\n");
-        return ret;
-    }
-
-    // Poll for completion
-    DEBUG("Polling for control CQ\n");
-    struct ibv_wc wc;
-    int num_comp;
-    do
-    {
-        num_comp = ctxt->prov_ops.poll_cq(qp->control_cq, 1, &wc);
-    } while(num_comp == 0);
-
-    DEBUG("Control CQ polled: %d, status: %d opcode: %d \n", num_comp, wc.status, wc.opcode); 
-
-    if(num_comp < 0)
-    {
-        fprintf(stderr, "Failed to poll control CQ: %d\n", num_comp);
-        return num_comp;
-    }
-
-    if (wc.status != IBV_WC_SUCCESS)
-    {
-        fprintf(stderr, "Failed status %s (%d) for wr_id %d\n", ibv_wc_status_str(wc.status), wc.status, (int)wc.wr_id);
-        return -1;
-    }
-
-    return 0;
 }

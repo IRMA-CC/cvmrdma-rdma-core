@@ -1,5 +1,6 @@
 #include "cvmrdma_ops.h"
 
+#include <pthread.h>
 #include <stdio.h>
 #include <stdlib.h>
 
@@ -24,6 +25,7 @@
 #include "cvmrdma_network_client_priv.h"
 #include "cvmrdma_network_server_priv.h"
 #include "cvmrdma_network_evloop_priv.h"
+#include "cvmrdma_control_server.h"
 #include "recv_metadata.h"
 #include "wc_queue.h"
 #include "dma_heap.h"
@@ -119,6 +121,7 @@ static int attach_qp_to_cq_server(struct cvmrdma_context * ctxt, struct cvmrdma_
 		&qp->send_lines_avail,
 		qp->rx_key,
 		&qp->remote_ring_rkey,
+		&qp->remote_control_rkey,
 		&qp->remote_params_set,
 		&qp->remote_params_lock,
 		&qp->remote_params_set_cv
@@ -358,7 +361,7 @@ static struct ibv_qp *cvmrdma_create_qp(struct ibv_pd * ibpd,
 	qp->user_sq_sig_all = attr->sq_sig_all;
 
 	/* Allocate rungbuffer where the other side writes the ACKs to*/
-	size_t control_rings_bytes = 1024; //__CVMRDMA_RING_NR * CVMRDMA_RING_TOTAL_BYTES;
+	size_t control_rings_bytes = PAGE_SIZE; //__CVMRDMA_RING_NR * CVMRDMA_RING_TOTAL_BYTES;
 
 	int control_dmabuf_fd = -1;
 	void * control_buf_va = NULL;
@@ -372,11 +375,35 @@ static struct ibv_qp *cvmrdma_create_qp(struct ibv_pd * ibpd,
 	qp->control_buf_va = control_buf_va;
 
 
-	/* Initialize the send mutex */
+	/* Initialize the mutex */
 	err = pthread_mutex_init(&qp->cvmrdma_send_lock, NULL);
 	if(err)
 	{
-		fprintf(stderr, "Failed to initialize the CVMRDMA recv mutex %d\n", err);
+		fprintf(stderr, "Failed to initialize the CVMRDMA cvmrdma_send_lock mutex %d\n", err);
+		goto dereg_ring_mr;
+	}
+	err = pthread_mutex_init(&qp->send_lines_full_lock, NULL);
+	if(err)
+	{
+		fprintf(stderr, "Failed to initialize the CVMRDMA send_lines_full_lock mutex %d\n", err);
+		goto dereg_ring_mr;
+	}
+	err = pthread_mutex_init(&qp->received_lines_lock, NULL);
+	if(err)
+	{
+		fprintf(stderr, "Failed to initialize the CVMRDMA received_lines_lock mutex %d\n", err);
+		goto dereg_ring_mr;
+	}
+	err = pthread_cond_init(&qp->send_lines_avail, NULL);
+	if(err)
+	{
+		fprintf(stderr, "Failed to initialize the CVMRDMA send_lines_avail cond var %d\n", err);
+		goto dereg_ring_mr;
+	}
+	err = pthread_cond_init(&qp->recv_lines_ack, NULL);
+	if(err)
+	{
+		fprintf(stderr, "Failed to initialize the CVMRDMA recv_lines_ack cond var %d\n", err);
 		goto dereg_ring_mr;
 	}
 
@@ -444,7 +471,7 @@ static int cvmrdma_modify_qp(struct ibv_qp *ibqp, struct ibv_qp_attr *attr,
 	qp->user_qp.qp.state = prov_qp->state;
 
 
-	/* control CQ to INIT*/
+	/* control QP to INIT*/
 	if((attr_mask & IBV_QP_STATE) && (attr->qp_state == IBV_QPS_INIT)){
 		if (control_qp->state != IBV_QPS_RESET)
 		{
@@ -505,7 +532,7 @@ static int cvmrdma_modify_qp(struct ibv_qp *ibqp, struct ibv_qp_attr *attr,
 
 				/* Blocking: set the tx_key and the qp's ring rkey. Block because recv cannot proceed until
 				   remote has our rkey */
-				   set_remote_params(ctxt->network_evloop, qp->remote_qnc, qp->tx_key, qp->ringbuf_mr->rkey);
+				   set_remote_params(ctxt->network_evloop, qp->remote_qnc, qp->tx_key, qp->ringbuf_mr->rkey, qp->control_buf_mr->rkey);
 				break;
 			}
 			default: {
@@ -594,6 +621,25 @@ static int cvmrdma_modify_qp(struct ibv_qp *ibqp, struct ibv_qp_attr *attr,
 				fprintf(stderr, "Failed to post recv initial RR for control qp (%d)\n", ret);
 				exit(1);
 			}
+		}
+
+		struct thread_args *args1 = calloc(1, sizeof(struct thread_args));
+		args1->qp = qp;
+		args1->ctxt = ctxt;
+		ret = pthread_create(&qp->control_server_send_acks_thread, NULL, &control_server_send_acks, (void *)args1);
+		if (ret)
+		{
+			fprintf(stderr, "Failed to create control_server_send_acks thread\n");
+			goto err;
+		}
+		struct thread_args *args2 = calloc(1, sizeof(struct thread_args));
+		args2->qp = qp;
+		args2->ctxt = ctxt;
+		ret = pthread_create(&qp->control_server_receive_acks_thread, NULL, &control_server_receive_acks, (void *)args2);
+		if (ret)
+		{
+			fprintf(stderr, "Failed to create control_server_receive_acks thread\n");
+			goto err;
 		}
 	}
 
@@ -941,7 +987,7 @@ static int post_send_do_bounce(struct cvmrdma_qp * qp, struct ibv_send_wr *wrs, 
 
 			unsigned long long total_clen = notif_clen + payload_clen;
 
-			DEBUG("encrypted %x %x %x ...\n", encrypted[0], encrypted[1], encrypted[2]);
+			DEBUG("encrypted %x %x %x ...\n", encrypted[notif_clen + 0], encrypted[notif_clen + 1], encrypted[notif_clen + 2]);
 			DEBUG("clen %llu\n", total_clen);
 
 
@@ -1168,6 +1214,46 @@ static struct ibv_mr *cvmrdma_reg_mr(struct ibv_pd *ibpd, void *addr, size_t len
 	return &mr->user_mr.ibv_mr;
 }
 
+int cvmrdma_destroy_qp(struct ibv_qp *ibqp)
+{
+	struct cvmrdma_qp * qp = (struct cvmrdma_qp *)ibqp;
+	void* t_ret;
+	int ret = pthread_cancel(qp->control_server_send_acks_thread);
+	if(ret)
+	{
+		fprintf(stderr, "Failed to cancel control_server_send_acks_thread\n");
+	}
+	ret = pthread_join(qp->control_server_send_acks_thread, &t_ret);
+	if(ret)
+	{
+		fprintf(stderr, "Failed to join control_server_send_acks_thread\n");
+	}
+	if (t_ret != PTHREAD_CANCELED)
+	{
+		fprintf(stderr, "control_server_send_acks_thread was not canceled\n");
+	}
+
+	ret = pthread_cancel(qp->control_server_receive_acks_thread);
+	if(ret)
+	{
+		fprintf(stderr, "Failed to cancel control_server_receive_acks_thread\n");
+	}
+	ret = pthread_join(qp->control_server_receive_acks_thread, &t_ret);
+	if(ret)
+	{
+		fprintf(stderr, "Failed to join control_server_receive_acks_thread\n");
+	}
+	if (t_ret != PTHREAD_CANCELED)
+	{
+		fprintf(stderr, "control_server_receive_acks_thread was not canceled\n");
+	}
+
+	DEBUG("Successfully joined control_server_send_acks_thread and control_server_receive_acks_thread: %ld %ld\n", (long)qp->control_server_send_acks_thread, (long)qp->control_server_receive_acks_thread);
+
+	// TODO(@ANONYMIZED): This should likely do more cleanup
+
+	return 0;
+}
 
 struct verbs_context_ops cvmrdma_ops = {
     .alloc_pd = cvmrdma_alloc_pd,
@@ -1176,7 +1262,7 @@ struct verbs_context_ops cvmrdma_ops = {
     // .dealloc_pd = cvmrdma_dealloc_pd,
     // .dereg_mr = cvmrdma_dereg_mr,
     // .destroy_cq = cvmrdma_destroy_cq,
-    // .destroy_qp = cvmrdma_destroy_qp,
+    .destroy_qp = cvmrdma_destroy_qp,
     // .free_context = cvmrdma_free_context,
     .modify_qp = cvmrdma_modify_qp,
     .poll_cq = cvmrdma_poll_cq,
