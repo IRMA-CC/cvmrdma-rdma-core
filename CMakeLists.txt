@@ -589,6 +589,8 @@ set_target_properties(CapnProto::capnpc_capnp PROPERTIES
 
 # Libsodim
 find_package(Sodium MODULE REQUIRED)
+# Libaegis
+find_package(aegis REQUIRED)
 
 
 #-------------------------

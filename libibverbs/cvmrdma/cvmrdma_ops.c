@@ -1317,8 +1317,10 @@ static struct verbs_context *cvmrdma_alloc_context(struct ibv_device *ibdev,
 	char const * sodium_aead_str[__SODIUM_AEAD_NR] = {
 		[SODIUM_AEAD_NONE] = "none",
 		[SODIUM_AEAD_XCHACHAPOLY] = "xchachapoly",
-		[SODIUM_AEAD_AEGIS128L] = "aegis128l",
 		[SODIUM_AEAD_AES256GCM] = "aes256gcm",
+		[SODIUM_AEAD_AEGIS128L] = "aegis128l",
+		[LIBAEGIS_AEAD_AEGIS128X2] = "aegis128x2",
+		[LIBAEGIS_AEAD_AEGIS128X4] = "aegis128x4",
 	};
 	if(aead_str)
 	{

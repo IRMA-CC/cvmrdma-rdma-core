@@ -3,13 +3,16 @@
 #include <assert.h>
 
 #include <sodium.h>
+#include <aegis.h>
 
 enum sodium_crypto_aead {
     SODIUM_AEAD_NONE,
     SODIUM_AEAD_XCHACHAPOLY,
-    SODIUM_AEAD_AEGIS128L,
     SODIUM_AEAD_AES256GCM,
-    __SODIUM_AEAD_MAX = SODIUM_AEAD_AES256GCM
+    SODIUM_AEAD_AEGIS128L,
+    LIBAEGIS_AEAD_AEGIS128X2,
+    LIBAEGIS_AEAD_AEGIS128X4,
+    __SODIUM_AEAD_MAX = LIBAEGIS_AEAD_AEGIS128X4
 };
 #define __SODIUM_AEAD_NR (__SODIUM_AEAD_MAX + 1)
 
@@ -38,6 +41,10 @@ static inline unsigned long long cvmrdma_ABYTES(enum sodium_crypto_aead aead)
             return crypto_aead_aegis128l_ABYTES;
         case SODIUM_AEAD_AES256GCM:
             return crypto_aead_aes256gcm_ABYTES;
+        case LIBAEGIS_AEAD_AEGIS128X2:
+            return aegis256x2_ABYTES_MAX;
+        case LIBAEGIS_AEAD_AEGIS128X4:
+            return aegis256x4_ABYTES_MAX;
     }
 }
 
@@ -65,6 +72,12 @@ static inline int cvmrdma_encrypt(unsigned char *c,
             return crypto_aead_aegis128l_encrypt(c, clen_p, m, mlen, ad, adlen, nsec, npub, k);
         case SODIUM_AEAD_AES256GCM:
             return crypto_aead_aes256gcm_encrypt(c, clen_p, m, mlen, ad, adlen, nsec, npub, k);
+        case LIBAEGIS_AEAD_AEGIS128X2:
+            *clen_p = mlen + aegis256x2_ABYTES_MAX;
+            return aegis128x2_encrypt(c, aegis256x2_ABYTES_MAX, m, mlen, ad, adlen, npub, k);
+        case LIBAEGIS_AEAD_AEGIS128X4:
+            *clen_p = mlen + aegis256x4_ABYTES_MAX;
+            return aegis128x4_encrypt(c, aegis256x4_ABYTES_MAX, m, mlen, ad, adlen, npub, k);
     }
 }
 
@@ -92,5 +105,11 @@ static inline int cvmrdma_decrypt(unsigned char *m,
             return crypto_aead_aegis128l_decrypt(m, mlen_p, nsec, c, clen, ad, adlen, npub, k);
         case SODIUM_AEAD_AES256GCM:
             return crypto_aead_aes256gcm_decrypt(m, mlen_p, nsec, c, clen, ad, adlen, npub, k);
+        case LIBAEGIS_AEAD_AEGIS128X2:
+            *mlen_p = clen - aegis256x2_ABYTES_MAX;
+            return aegis128x2_decrypt(m, c, clen, aegis256x2_ABYTES_MAX, ad, adlen, npub, k);
+        case LIBAEGIS_AEAD_AEGIS128X4:
+            *mlen_p = clen - aegis256x4_ABYTES_MAX;
+            return aegis128x4_decrypt(m, c, clen, aegis256x4_ABYTES_MAX, ad, adlen, npub, k);
     }
 }

@@ -120,6 +120,7 @@ target_link_libraries(ibverbs PRIVATE
 
   CapnProto::capnp-rpc
   Sodium::sodium
+  aegis
   )
 
 
