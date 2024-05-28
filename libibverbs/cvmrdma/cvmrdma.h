@@ -32,7 +32,7 @@ static inline unsigned long long cvmrdma_payload_bytes(enum sodium_crypto_aead a
 #define CVMRDMA_RING_ENTRIES 64
 #define CVMRDMA_RING_TOTAL_BYTES (CVMRDMA_RING_ENTRIES * CVMRDMA_RING_SLOT_BYTES)
 
-#define CVMRDMA_ACK_THRESHOLD DIVIDE_ROUND_UP(CVMRDMA_RING_ENTRIES, 2)
+#define CVMRDMA_ACK_THRESHOLD DIVIDE_ROUND_UP(CVMRDMA_RING_ENTRIES, 4)
 
 enum cvmrdma_ring_types {
 	CVMRDMA_RING_SEND,
