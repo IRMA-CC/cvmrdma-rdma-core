@@ -28,7 +28,7 @@ void cq_server_context_destroy(CQServer * server)
     qp_metadata_manager_destroy(server->qp_metadata_manager);
 }
 
-#define CQ_SERVER_NUM_WCS 32
+#define CQ_SERVER_NUM_WCS CVMRDMA_RING_ENTRIES //32
 static int cq_server_loop_once(struct cvmrdma_context * ctxt)
 {
     CQServer * server = &ctxt->cvmrdma_cq_server;
