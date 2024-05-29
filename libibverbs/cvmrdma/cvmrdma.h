@@ -29,10 +29,10 @@ static inline unsigned long long cvmrdma_payload_bytes(enum sodium_crypto_aead a
 	return CVMRDMA_RING_SLOT_BYTES - (cvmrdma_header_bytes(aead) + cvmrdma_ABYTES(aead));  
 }
 
-#define CVMRDMA_RING_ENTRIES 512
+#define CVMRDMA_RING_ENTRIES 2048
 #define CVMRDMA_RING_TOTAL_BYTES (CVMRDMA_RING_ENTRIES * CVMRDMA_RING_SLOT_BYTES)
 
-#define CVMRDMA_ACK_THRESHOLD DIVIDE_ROUND_UP(CVMRDMA_RING_ENTRIES, 4)
+#define CVMRDMA_ACK_THRESHOLD DIVIDE_ROUND_UP(CVMRDMA_RING_ENTRIES, 2)
 
 enum cvmrdma_ring_types {
 	CVMRDMA_RING_SEND,
