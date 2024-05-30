@@ -241,7 +241,7 @@ static struct ibv_qp *cvmrdma_create_qp(struct ibv_pd * ibpd,
 
 	/* Keep the user set QP capacity */
 	attr_ex.cap.max_recv_sge = 30;
-	attr_ex.cap.max_recv_wr = 4096;
+	attr_ex.cap.max_recv_wr = CVMRDMA_RING_ENTRIES;
 	attr_ex.cap.max_send_sge = 30;
 	attr_ex.cap.max_send_wr = 4096;
 	attr_ex.cap.max_inline_data = 0; /* we're not using inline */
