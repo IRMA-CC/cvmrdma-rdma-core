@@ -825,18 +825,15 @@ static int post_send_do_bounce(struct cvmrdma_qp * qp, struct ibv_send_wr *wrs, 
 			/* Prepare the two nonces: for notif and for payload */
 			uint64_t * qp_nonce = qp->tx_nonce;
 
-			uint64_t nonce0[cvmrdma_aead_NPUB_WORDS], nonce1[cvmrdma_aead_NPUB_WORDS];
-			memcpy(nonce0, qp_nonce, cvmrdma_aead_NPUBBYTES);
-			
-			memcpy(nonce1, qp_nonce, cvmrdma_aead_NPUBBYTES);
-			nonce1[0] += 1;
-			
+			uint64_t nonce_metadata[cvmrdma_aead_NPUB_WORDS], nonce_payload[cvmrdma_aead_NPUB_WORDS];
+			memcpy(nonce_metadata, qp_nonce, cvmrdma_aead_NPUBBYTES);
 			/* and increment nonce */
-			qp_nonce[0] += 2;
-
+			qp_nonce[0] += 1;
+			
+			/* generate new payload nonce */
+			randombytes_buf(nonce_payload, cvmrdma_aead_NPUBBYTES);
 
 			/***** NOTIFY ******/
-			/* The notification happens off-thread, and will happen in parallel to the GATHER, ENCRYPT, COPY and SEND */
 			TIMING("chunk_notify");
 			unsigned long long notif_clen;
 			{
@@ -849,6 +846,7 @@ static int post_send_do_bounce(struct cvmrdma_qp * qp, struct ibv_send_wr *wrs, 
 					notif.op = this_op;
 					notif.rkey = rkey;
 					notif.imm = this_imm;
+					memcpy(notif.payload_nonce, nonce_payload, cvmrdma_aead_NPUBBYTES);
 					notif.last_chunk = last_chunk;
 				}
 				else
@@ -858,8 +856,8 @@ static int post_send_do_bounce(struct cvmrdma_qp * qp, struct ibv_send_wr *wrs, 
 					notif.op = this_op;
 					notif.rkey = 0;
 					notif.imm = this_imm;
+					memcpy(notif.payload_nonce, nonce_payload, cvmrdma_aead_NPUBBYTES);
 					notif.last_chunk = last_chunk;
-
 				}
 
 				notif_clen = header_bytes;
@@ -868,7 +866,7 @@ static int post_send_do_bounce(struct cvmrdma_qp * qp, struct ibv_send_wr *wrs, 
 					(unsigned char const *)&notif, sizeof(notif),
 					NULL, 0,
 					0,
-					(unsigned char *)nonce0,
+					(unsigned char *)nonce_metadata,
 					(unsigned char const *)tx_key,
 					aead
 				);
@@ -966,7 +964,7 @@ static int post_send_do_bounce(struct cvmrdma_qp * qp, struct ibv_send_wr *wrs, 
 
 			DEBUG("ptxt %x %x %x\n", ptxt[0], ptxt[1], ptxt[2]);
 			DEBUG("plen %zu\n", chunk_bytes);
-			DEBUG("nonce %lx %lx\n", nonce1[0], nonce1[1]);
+			DEBUG("nonce %lx %lx\n", nonce_payload[0], nonce_payload[1]);
 
 			unsigned long long payload_clen = CVMRDMA_RING_SLOT_BYTES;
 			err = cvmrdma_encrypt(
@@ -975,7 +973,7 @@ static int post_send_do_bounce(struct cvmrdma_qp * qp, struct ibv_send_wr *wrs, 
 				ptxt, chunk_bytes,
 				NULL, 0,
 				NULL,
-				(unsigned char *)nonce1,
+				(unsigned char *)nonce_payload,
 				(unsigned char const *)tx_key,
 				aead
 			);

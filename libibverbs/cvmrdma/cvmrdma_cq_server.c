@@ -164,17 +164,14 @@ static int cq_server_loop_once(struct cvmrdma_context * ctxt)
             /**** DECRYPT *****/
             /* Decrypt the notification, then the payload */
 
-			/* Prepare the two nonces: for notif and for payload */
+			/* Get notif nonce */
 			uint64_t * qp_nonce = qp->rx_nonce;
 
-			uint64_t nonce0[cvmrdma_aead_NPUB_WORDS], nonce1[cvmrdma_aead_NPUB_WORDS];
-			memcpy(nonce0, qp_nonce, cvmrdma_aead_NPUBBYTES);
-			
-			memcpy(nonce1, qp_nonce, cvmrdma_aead_NPUBBYTES);
-			nonce1[0] += 1;
+			uint64_t nonce_metadata[cvmrdma_aead_NPUB_WORDS], nonce_payload[cvmrdma_aead_NPUB_WORDS];
+			memcpy(nonce_metadata, qp_nonce, cvmrdma_aead_NPUBBYTES);
 			
 			/* and increment nonce */
-			qp_nonce[0] += 2;
+			qp_nonce[0] += 1;
 
             struct cq_server_notification notif = {0};
 
@@ -192,7 +189,7 @@ static int cq_server_loop_once(struct cvmrdma_context * ctxt)
                 NULL,
                 notif_start, notif_clen,
                 NULL, 0,
-                (unsigned char const *)nonce0,
+                (unsigned char const *)nonce_metadata,
                 (unsigned char const *)rx_key,
                 aead
             );
@@ -209,7 +206,9 @@ static int cq_server_loop_once(struct cvmrdma_context * ctxt)
             unsigned char * payload_start = private + header_bytes;
             unsigned long long payload_clen = wc_length - header_bytes;
 
-            DEBUG("nonce %lx %lx\n", nonce1[0], nonce1[1]);
+            memcpy(nonce_payload, notif.payload_nonce, cvmrdma_aead_NPUBBYTES);
+
+            DEBUG("nonce %lx %lx\n", nonce_payload[0], nonce_payload[1]);
             DEBUG("private %x %x %x ...\n", private[0], private[1], private[2]);
             DEBUG("clen %llu\n", payload_clen);
 
@@ -259,7 +258,7 @@ static int cq_server_loop_once(struct cvmrdma_context * ctxt)
                 NULL,
                 payload_start, payload_clen,
                 NULL, 0,
-                (unsigned char const *)nonce1,
+                (unsigned char const *)nonce_payload,
                 (unsigned char const *)rx_key,
                 aead
             );

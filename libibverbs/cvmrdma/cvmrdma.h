@@ -13,7 +13,8 @@ struct cq_server_notification
     enum ibv_wr_opcode op; // 12
     uint32_t rkey; // 16
     uint32_t imm; // 20
-    bool last_chunk; // 24
+	uint64_t payload_nonce[cvmrdma_aead_NPUBBYTES]; // 44
+    bool last_chunk; // 45
 };
 
 
