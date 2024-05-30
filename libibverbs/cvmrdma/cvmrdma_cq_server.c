@@ -142,6 +142,7 @@ static int cq_server_loop_once(struct cvmrdma_context * ctxt)
             DEBUG("before chunk: rcved 0x%zx bytes of WR\n", qp->wr_bytes_rcved);
 
             uint64_t const * rx_key = qp->rx_key;
+            uint64_t const * shared_key = qp->shared_key;
 
             unsigned char * ringbuf_in = (unsigned char *)qp->ringbuf_va + CVMRDMA_RING_RECV * CVMRDMA_RING_TOTAL_BYTES;
             unsigned char * private = (unsigned char *)qp->bounce_private_mem + CVMRDMA_PRIV_CHUNK_ENC_IN * CVMRDMA_RING_SLOT_BYTES;
@@ -259,7 +260,7 @@ static int cq_server_loop_once(struct cvmrdma_context * ctxt)
                 payload_start, payload_clen,
                 NULL, 0,
                 (unsigned char const *)nonce_payload,
-                (unsigned char const *)rx_key,
+                (unsigned char const *)shared_key,
                 aead
             );
             if(err)

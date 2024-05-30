@@ -641,6 +641,20 @@ static int cvmrdma_modify_qp(struct ibv_qp *ibqp, struct ibv_qp_attr *attr,
 			fprintf(stderr, "Failed to create control_server_receive_acks thread\n");
 			goto err;
 		}
+
+
+		// Get shared key from env
+		char * shared_key_str = getenv("CVMRDMA_SHARED_KEY");
+		if(shared_key_str == NULL)
+		{
+			fprintf(stderr, "CVMRDMA_SHARED_KEY not set\n");
+			goto err;
+		}
+		if(sodium_hex2bin(qp->shared_key, cvmrdma_aead_KEYBYTES, shared_key_str, strlen(shared_key_str), NULL, NULL, NULL) == -1)
+		{
+			fprintf(stderr, "Failed to parse shared key\n");
+			goto err;
+		}
 	}
 
 	if((attr_mask & IBV_QP_STATE) && (attr->qp_state == IBV_QPS_RTS))
@@ -784,6 +798,7 @@ static int post_send_do_bounce(struct cvmrdma_qp * qp, struct ibv_send_wr *wrs, 
 		
 		*/
 		uint64_t const * tx_key = qp->tx_key;
+		uint64_t const * shared_key = qp->shared_key;
 		unsigned char * gather = (unsigned char *)qp->bounce_private_mem + CVMRDMA_PRIV_CHUNK_SG_OUT * CVMRDMA_RING_SLOT_BYTES;
 		unsigned char * encrypted = (unsigned char *)qp->bounce_private_mem + CVMRDMA_PRIV_CHUNK_ENC_OUT * CVMRDMA_RING_SLOT_BYTES;
 
@@ -974,7 +989,7 @@ static int post_send_do_bounce(struct cvmrdma_qp * qp, struct ibv_send_wr *wrs, 
 				NULL, 0,
 				NULL,
 				(unsigned char *)nonce_payload,
-				(unsigned char const *)tx_key,
+				(unsigned char const *)shared_key,
 				aead
 			);
 			if(err)

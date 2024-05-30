@@ -80,6 +80,13 @@ struct cvmrdma_qp {
 	struct ibv_qp *control_qp;
 	struct ibv_cq *control_cq;
 
+	/* Key shared between all endpoints used to encrypt payloads.
+	   In contrast, the tx_key and rx_key are unique to the endpoints
+	   and are used to encrypt the nonce for the payload. The nonce for this
+	   encryption is a counter between the endpoints.
+	 */
+	uint64_t shared_key[cvmrdma_aead_KEY_WORDS];
+
 	/* Capability of the remote QP to notify on WRITEs */
 	QPNotificationClient *remote_qnc;
 	/* Transmission key Generate the tx key, and receive the rx key */

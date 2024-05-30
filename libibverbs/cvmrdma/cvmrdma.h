@@ -17,6 +17,7 @@ struct cq_server_notification
     bool last_chunk; // 45
 };
 
+#define CVMRDMA_SHARED_KEY_ENV "CVMRDMA_SHARED_KEY"
 
 
 #define CVMRDMA_RING_SLOT_BYTES ((unsigned long long)32 * PAGE_SIZE)
