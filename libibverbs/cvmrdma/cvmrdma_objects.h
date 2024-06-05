@@ -57,6 +57,16 @@ struct cvmrdma_mr {
 	/* Fake user-visible data */
 	struct verbs_mr user_mr;
 
+	/* Encrypted provider shadow region */
+	struct ibv_mr *provider_mr;
+	void *provider_va;
+	int provider_dmabuf_fd;
+
+	/* Array to track information about the chunk.
+	   The array is indexed by the chunk number.
+	 */
+	struct chunk_tracking_info *chunk_tracking;
+
 	uint64_t hca_va;
 };
 
@@ -163,4 +173,14 @@ struct cvmrdma_qp {
 
 struct control_metadata {
 	uint64_t ack_revc_lines;
+};
+
+/* Keep track of the nonce used to encrypt a certain payload chunk
+   and also whether the chunk must be updated since the changed data
+   in the user MR.
+*/
+struct chunk_tracking_info {
+	uint64_t nonce[cvmrdma_aead_NPUB_WORDS]; // 24 bytes
+	/* If the chink is not dirty this is true */
+	bool cached; // 1 byte
 };

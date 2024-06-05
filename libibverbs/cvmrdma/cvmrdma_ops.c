@@ -330,7 +330,7 @@ static struct ibv_qp *cvmrdma_create_qp(struct ibv_pd * ibpd,
 
 
 	/* Allocate the bounce regions and ring buffer for this QP */
-	void * bounce_private_mem = mmap(0, CVMRDMA_PRIV_BOUNCE_TOTAL_BYTES, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
+	void * bounce_private_mem = mmap(0, cvmrdma_priv_bounce_total_bytes(ctxt->aead), PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
 	if (bounce_private_mem == MAP_FAILED) {
 		err = errno;
 		fprintf(stderr, "Failed to mmap bounce buffer %d\n", err);
@@ -340,7 +340,7 @@ static struct ibv_qp *cvmrdma_create_qp(struct ibv_pd * ibpd,
 
 
     /* To perform the bounce, we'll need to read and write the ring buffers */
-	size_t all_rings_bytes = __CVMRDMA_RING_NR * CVMRDMA_RING_TOTAL_BYTES;
+	size_t all_rings_bytes = cvmrdma_ring_slot_bytes(ctxt->aead) * CVMRDMA_RING_ENTRIES;
 
 	int dmabuf_fd = -1;
 	void * ringbuf_va = NULL;
@@ -361,7 +361,7 @@ static struct ibv_qp *cvmrdma_create_qp(struct ibv_pd * ibpd,
 	qp->user_sq_sig_all = attr->sq_sig_all;
 
 	/* Allocate rungbuffer where the other side writes the ACKs to*/
-	size_t control_rings_bytes = PAGE_SIZE; //__CVMRDMA_RING_NR * CVMRDMA_RING_TOTAL_BYTES;
+	size_t control_rings_bytes = PAGE_SIZE;
 
 	int control_dmabuf_fd = -1;
 	void * control_buf_va = NULL;
@@ -438,7 +438,7 @@ dereg_ring_mr:
 	ctxt->prov_ops.dereg_mr(verbs_get_mr(ringbuf_mr));
 	close(dmabuf_fd);
 free_bounce_private:
-	munmap(bounce_private_mem, CVMRDMA_PRIV_BOUNCE_TOTAL_BYTES);
+	munmap(bounce_private_mem, cvmrdma_priv_bounce_total_bytes(ctxt->aead));
 free_send_metadata:
 	free_qp_send_metadata(send_metadata);
 free_recv_metadata:
@@ -650,7 +650,7 @@ static int cvmrdma_modify_qp(struct ibv_qp *ibqp, struct ibv_qp_attr *attr,
 			fprintf(stderr, "CVMRDMA_SHARED_KEY not set\n");
 			goto err;
 		}
-		if(sodium_hex2bin(qp->shared_key, cvmrdma_aead_KEYBYTES, shared_key_str, strlen(shared_key_str), NULL, NULL, NULL) == -1)
+		if(sodium_hex2bin((char *) qp->shared_key, cvmrdma_aead_KEYBYTES, shared_key_str, strlen(shared_key_str), NULL, NULL, NULL) == -1)
 		{
 			fprintf(stderr, "Failed to parse shared key\n");
 			goto err;
@@ -680,7 +680,7 @@ static int cvmrdma_modify_qp(struct ibv_qp *ibqp, struct ibv_qp_attr *attr,
 
 		control_qp_attr_mask |= IBV_QP_MAX_QP_RD_ATOMIC | IBV_QP_RETRY_CNT | IBV_QP_RNR_RETRY | IBV_QP_TIMEOUT;
 
-		int ret = ctxt->prov_ops.modify_qp(control_qp, &control_qp_attrs, control_qp_attr_mask);
+		ret = ctxt->prov_ops.modify_qp(control_qp, &control_qp_attrs, control_qp_attr_mask);
 		if(ret)
 		{
 			goto err;
@@ -708,9 +708,6 @@ static int cvmrdma_poll_cq(struct ibv_cq * ibcq, int num_entries, struct ibv_wc 
 	{
 		return n_popped;
 	}
-
-	/* ... else, if the CQ "server" is not running yet, run it on this thread. */
-	CQServer * server = &ctxt->cvmrdma_cq_server;
 
 	/* run it ONLY if it is not running yet */
 	err = cvmrdma_cq_server_run_once_if_idle(ctxt);
@@ -749,9 +746,7 @@ static int post_send_do_bounce(struct cvmrdma_qp * qp, struct ibv_send_wr *wrs, 
 	struct cvmrdma_pd * pd = (struct cvmrdma_pd *)qp->user_qp.qp.pd;
     enum sodium_crypto_aead aead = ctxt->aead;
 
-	unsigned long long tag_bytes = cvmrdma_ABYTES(aead);
 	unsigned long long header_bytes = cvmrdma_header_bytes(aead);
-	unsigned long long payload_bytes = cvmrdma_payload_bytes(aead);
 
 	int err;
 
@@ -764,8 +759,6 @@ static int post_send_do_bounce(struct cvmrdma_qp * qp, struct ibv_send_wr *wrs, 
 	struct ibv_qp * prov_qp = qp->provider_qp;
 	struct ibv_qp_ex * prov_qpx = ibv_qp_to_qp_ex(prov_qp);
 
-	uint32_t local_ring_lkey = qp->ringbuf_mr->lkey;
-	uint32_t remote_ring_rkey = qp->remote_ring_rkey;
 
 	for(struct ibv_send_wr * this_wr = wrs ; this_wr != NULL ; this_wr = this_wr->next)
 	{
@@ -799,10 +792,8 @@ static int post_send_do_bounce(struct cvmrdma_qp * qp, struct ibv_send_wr *wrs, 
 		*/
 		uint64_t const * tx_key = qp->tx_key;
 		uint64_t const * shared_key = qp->shared_key;
-		unsigned char * gather = (unsigned char *)qp->bounce_private_mem + CVMRDMA_PRIV_CHUNK_SG_OUT * CVMRDMA_RING_SLOT_BYTES;
-		unsigned char * encrypted = (unsigned char *)qp->bounce_private_mem + CVMRDMA_PRIV_CHUNK_ENC_OUT * CVMRDMA_RING_SLOT_BYTES;
+		unsigned char * encrypted = (unsigned char *)qp->bounce_private_mem + CVMRDMA_PRIV_CHUNK_ENC_OUT * cvmrdma_ring_slot_bytes(ctxt->aead);
 
-		unsigned char * ringbuf_out = qp->ringbuf_va + CVMRDMA_RING_SEND * CVMRDMA_RING_TOTAL_BYTES;;
 
 		struct ibv_sge * sgl = this_wr->sg_list;
 		size_t nsge = this_wr->num_sge;
@@ -820,9 +811,12 @@ static int post_send_do_bounce(struct cvmrdma_qp * qp, struct ibv_send_wr *wrs, 
 
 
 		size_t total_bytes = 0;
-		for(size_t i = 0 ; i < nsge ; i++)
+		size_t total_chunks = 0;
+		for(size_t i = 0 ; i < nsge ; i++) {
 			total_bytes += sgl[i].length;
-		size_t total_chunks = DIVIDE_ROUND_UP(total_bytes, payload_bytes);
+			size_t sge_chunks = DIVIDE_ROUND_UP(sgl[i].length + (sgl[i].addr % CVMRDMA_CHUNK_BYTES), CVMRDMA_CHUNK_BYTES);
+			total_chunks += sge_chunks;
+		}
 		/* XXX: pass the number of chunks to the CQ_server to know when to emit a send WC for user. Do it 
 		   BEFORE we start sending, so that CQ server has this informatin when WCs start to arrive
 		   This means that each chunk has to send EXACTLY payload_bytes, even if the tag ends up
@@ -833,8 +827,21 @@ static int post_send_do_bounce(struct cvmrdma_qp * qp, struct ibv_send_wr *wrs, 
 		{
 			struct ibv_sge * cur_sge = &sgl[cur_sge_idx];
 
+			struct cvmrdma_mr * cur_mr = get_bounce_metadata_for_lkey(pd->bounce_metadata, cur_sge->lkey);
+			uint64_t offt = (cur_sge->addr - cur_mr->hca_va) + cur_sge_offt;
+
 			/* If this is the last chunk, we'll need to notify that it's a WC generating chunk (if op != WRITE) */
-			bool last_chunk = ((cur_sge_idx + 1) == nsge) && ((cur_sge_offt + payload_bytes) >= cur_sge->length);
+			size_t chunks_num = DIVIDE_ROUND_UP(cur_sge->length + (offt % CVMRDMA_CHUNK_BYTES), CVMRDMA_CHUNK_BYTES);
+			
+			
+
+			bool last_chunk = chunks_in_wr + 1 == chunks_num;
+
+			DEBUG("chunks_in_wr %lu\n", chunks_in_wr);
+			DEBUG("cur_sge->length %lu\n", cur_sge->length);
+			DEBUG("offt %lx", offt);
+			DEBUG("chunks_num %lu\n", chunks_num);
+			DEBUG("last_chunk %d\n", last_chunk);
 
 
 			/* Prepare the two nonces: for notif and for payload */
@@ -844,9 +851,38 @@ static int post_send_do_bounce(struct cvmrdma_qp * qp, struct ibv_send_wr *wrs, 
 			memcpy(nonce_metadata, qp_nonce, cvmrdma_aead_NPUBBYTES);
 			/* and increment nonce */
 			qp_nonce[0] += 1;
+
+
+			/* offt in MR*/
+			uint64_t chunk_idx = offt / CVMRDMA_CHUNK_BYTES;
+
+			uint64_t alinged_offset = offt - (offt % CVMRDMA_CHUNK_BYTES);
+			/* location in memory */
+			unsigned char * ptxt = cur_mr->user_mr.ibv_mr.addr + alinged_offset;
+
+			uint64_t true_payload_bytes = 0; 
+
+			if (!last_chunk){
+				true_payload_bytes = CVMRDMA_CHUNK_BYTES - (offt % CVMRDMA_CHUNK_BYTES);
+				cur_sge_offt += true_payload_bytes;
+			} else {
+				true_payload_bytes = cur_sge->length - cur_sge_offt;
+				cur_sge_idx++;
+				cur_sge_offt = 0;
+			}
+
+			DEBUG("chunk_idx %lu\n", chunk_idx);
+			DEBUG("true_payload_bytes %lu\n", true_payload_bytes);
+
+			struct chunk_tracking_info* chunk_info = &cur_mr->chunk_tracking[chunk_idx];
 			
 			/* generate new payload nonce */
-			randombytes_buf(nonce_payload, cvmrdma_aead_NPUBBYTES);
+			if (!chunk_info->cached){
+				DEBUG("Generating new nonce for chunk %lu\n", chunk_idx);
+				randombytes_buf(chunk_info->nonce, cvmrdma_aead_NPUBBYTES);
+				DEBUG("nonce %lx %lx\n", chunk_info->nonce[0], chunk_info->nonce[1]);
+			}
+			memcpy(nonce_payload, chunk_info->nonce, cvmrdma_aead_NPUBBYTES);
 
 			/***** NOTIFY ******/
 			TIMING("chunk_notify");
@@ -862,6 +898,8 @@ static int post_send_do_bounce(struct cvmrdma_qp * qp, struct ibv_send_wr *wrs, 
 					notif.rkey = rkey;
 					notif.imm = this_imm;
 					memcpy(notif.payload_nonce, nonce_payload, cvmrdma_aead_NPUBBYTES);
+					notif.chunk_offt = offt - (offt % CVMRDMA_CHUNK_BYTES);
+					notif.chunk_len = true_payload_bytes;
 					notif.last_chunk = last_chunk;
 				}
 				else
@@ -872,6 +910,8 @@ static int post_send_do_bounce(struct cvmrdma_qp * qp, struct ibv_send_wr *wrs, 
 					notif.rkey = 0;
 					notif.imm = this_imm;
 					memcpy(notif.payload_nonce, nonce_payload, cvmrdma_aead_NPUBBYTES);
+					notif.chunk_offt = offt - (offt % CVMRDMA_CHUNK_BYTES);
+					notif.chunk_len = true_payload_bytes;
 					notif.last_chunk = last_chunk;
 				}
 
@@ -895,97 +935,20 @@ static int post_send_do_bounce(struct cvmrdma_qp * qp, struct ibv_send_wr *wrs, 
 			}
 
 			TIMING("gec_t0");
-			/***** GATHER ******/
-
-			/* bytes already copied in the chunk */
-			size_t chunk_bytes = 0;
-
-
-			unsigned char * ptxt = NULL;
-
-			struct cvmrdma_mr * cur_mr = get_bounce_metadata_for_lkey(pd->bounce_metadata, cur_sge->lkey);
-
-			/* We can avoid the GATHER step if current (sge, offt) gives a contiguous chunk */
-			if(cur_sge_offt + payload_bytes <= cur_sge->length)
-			{
-				/* offt in MR*/
-				uint64_t offt = (cur_sge->addr - cur_mr->hca_va) + cur_sge_offt;
-				/* location in memory */
-				ptxt = cur_mr->user_mr.ibv_mr.addr + offt;
-
-				cur_sge_offt += payload_bytes;
-				chunk_bytes = payload_bytes;
-
-				if(cur_sge_offt >= cur_sge->length)
-				{
-					cur_sge_idx++;
-					cur_sge_offt = 0;
-				}
-			}
-			/* Or if this is the last sge */
-			else if(cur_sge_idx + 1 >= nsge)
-			{
-				/* bytes available in this sge */
-				size_t available = cur_sge->length - cur_sge_offt;
-
-				/* offt in MR */
-				uint64_t offt = (cur_sge->addr - cur_mr->hca_va) + cur_sge_offt;
-				/* location in memory */
-				ptxt = cur_mr->user_mr.ibv_mr.addr + offt;
-
-				chunk_bytes = available;
-
-				cur_sge_offt = 0;
-				cur_sge_idx++;
-			}
-			/* Else we need to gather bytes from different sges in a contiguous block */
-			else
-			{
-				while((chunk_bytes < payload_bytes) && (cur_sge_idx < nsge))
-				{
-					cur_sge = &sgl[cur_sge_idx];
-					cur_mr = get_bounce_metadata_for_lkey(pd->bounce_metadata, cur_sge->lkey);
-
-					unsigned char * mr_addr = cur_mr->user_mr.ibv_mr.addr;
-
-					/* bytes needed to fill up chunk */
-					size_t remaining = payload_bytes - chunk_bytes;
-					/* bytes still available in this sge */
-					size_t available = cur_sge->length - cur_sge_offt;
-
-					/* offt in MR */
-					uint64_t offt = (cur_sge->addr - cur_mr->hca_va) + cur_sge_offt;
-
-
-					if(remaining < available)
-					{
-						memcpy(gather + chunk_bytes, mr_addr + offt, remaining);
-						chunk_bytes += remaining;
-						cur_sge_offt += remaining;
-					}
-					else
-					{
-						memcpy(gather + chunk_bytes, mr_addr + offt, available);
-						chunk_bytes += available;
-						/* move to next sge */
-						cur_sge_idx++;
-						cur_sge_offt = 0;
-					}
-				}
-
-				ptxt = gather;
-			}
 			/**** ENCRYPT *****/
+			uint64_t bytes_to_copy_from_encrypted = notif_clen;
+			if(chunk_info->cached){
+				goto skip_payload_encryption;
+			}
 
 			DEBUG("ptxt %x %x %x\n", ptxt[0], ptxt[1], ptxt[2]);
-			DEBUG("plen %zu\n", chunk_bytes);
 			DEBUG("nonce %lx %lx\n", nonce_payload[0], nonce_payload[1]);
 
-			unsigned long long payload_clen = CVMRDMA_RING_SLOT_BYTES;
+			unsigned long long payload_clen = CVMRDMA_CHUNK_BYTES;
 			err = cvmrdma_encrypt(
 				encrypted + notif_clen, /* start after the notif */
 				&payload_clen,
-				ptxt, chunk_bytes,
+				ptxt, CVMRDMA_CHUNK_BYTES,
 				NULL, 0,
 				NULL,
 				(unsigned char *)nonce_payload,
@@ -998,14 +961,23 @@ static int post_send_do_bounce(struct cvmrdma_qp * qp, struct ibv_send_wr *wrs, 
 				exit(1);
 			}
 
-			unsigned long long total_clen = notif_clen + payload_clen;
+			bytes_to_copy_from_encrypted += payload_clen;
 
-			DEBUG("encrypted %x %x %x ...\n", encrypted[notif_clen + 0], encrypted[notif_clen + 1], encrypted[notif_clen + 2]);
-			DEBUG("clen %llu\n", total_clen);
+			assert(bytes_to_copy_from_encrypted == cvmrdma_ring_slot_bytes(ctxt->aead));
 
+			DEBUG("encrypted[0] %x %x %x ...\n", encrypted[0], encrypted[1], encrypted[2]);
+			DEBUG("encrypted[notif_clen + 0] %x %x %x ...\n", encrypted[notif_clen + 0], encrypted[notif_clen + 1], encrypted[notif_clen + 2]);
+			DEBUG("notif_clen %llu\npayload_clen %llu\n", notif_clen, payload_clen);
+
+skip_payload_encryption:
 
 			/***** COPY ******/
-			/* Copy ciphertext (with MAC) from private memory into a ring buffer slot */
+			/* Copy private bounce buffer from private memory into the shared shadow region */
+			char * slot = cur_mr->provider_va + (chunk_idx * cvmrdma_ring_slot_bytes(ctxt->aead));
+			memcpy(slot, encrypted, bytes_to_copy_from_encrypted);
+
+			DEBUG("slot %x %x %x ...\n", slot[0], slot[1], slot[2]);
+			DEBUG("bytes_to_copy_from_encrypted %llu\n", bytes_to_copy_from_encrypted);
 
 			/* Get a slot. If all the slots are full, wait for a slot to be acked */
 			int slot_id = 0;
@@ -1031,10 +1003,6 @@ static int post_send_do_bounce(struct cvmrdma_qp * qp, struct ibv_send_wr *wrs, 
 				/*  UNLOCK */
 			}
 
-			unsigned char * slot = ringbuf_out + slot_id * CVMRDMA_RING_SLOT_BYTES;
-			memcpy(slot, encrypted, total_clen);
-
-
 			TIMING("gec_t1");
 
 			/****** POST SEND WWI ******/
@@ -1042,6 +1010,9 @@ static int post_send_do_bounce(struct cvmrdma_qp * qp, struct ibv_send_wr *wrs, 
 			   Rings MR are 0-indexed. The send ring starts at 0, the recv 
 			   ring starts at CVMRDMA_RING_ENTRIES * CVMRDMA_CHUNK_SIZE.
 			*/
+			uint32_t local_provider_lkey = cur_mr->provider_mr->lkey;
+			uint32_t remote_ring_rkey = qp->remote_ring_rkey;
+
 
 			ibv_wr_start(prov_qpx);
 
@@ -1049,13 +1020,13 @@ static int post_send_do_bounce(struct cvmrdma_qp * qp, struct ibv_send_wr *wrs, 
             prov_qpx->wr_flags = IBV_SEND_SIGNALED; /* XXX: in the future could avoid signalling all !*/
 			ibv_wr_rdma_write_imm(prov_qpx,
 				remote_ring_rkey,
-				(CVMRDMA_RING_ENTRIES + slot_id) * CVMRDMA_RING_SLOT_BYTES,
+				slot_id * cvmrdma_ring_slot_bytes(ctxt->aead),
 				0	
 			);
 			ibv_wr_set_sge(prov_qpx,
-				local_ring_lkey,
-				slot_id * CVMRDMA_RING_SLOT_BYTES,
-				total_clen /* includes mac */
+				local_provider_lkey,
+				chunk_idx * cvmrdma_ring_slot_bytes(ctxt->aead),
+				cvmrdma_ring_slot_bytes(ctxt->aead) /* includes mac */
 			);
 
 			TIMING("send_chunk_wr");
@@ -1066,7 +1037,7 @@ static int post_send_do_bounce(struct cvmrdma_qp * qp, struct ibv_send_wr *wrs, 
 				exit(1);
 			}
 
-			bytes_sent += chunk_bytes;
+			bytes_sent += true_payload_bytes;
 			chunks_in_wr++;
 
 			/* after each send, try to dequeue some SEND WC from the CQ (if no other thread is polling the CQ)
@@ -1199,7 +1170,36 @@ static struct ibv_mr *cvmrdma_reg_mr(struct ibv_pd *ibpd, void *addr, size_t len
         Allocating in public memory can be done with a dma-heap.
     */
 
+	// Allocate encrypted provider shadow MR
+	
 	struct cvmrdma_mr * mr = calloc(1, sizeof(struct cvmrdma_mr));
+
+	uint64_t num_chunks = DIVIDE_ROUND_UP(length, CVMRDMA_CHUNK_BYTES);
+	uint64_t provider_mr_size = num_chunks * cvmrdma_ring_slot_bytes(ctxt->aead);
+
+	DEBUG("Allocating provider buffer MR of size %lu for user MR of size %lu\n", provider_mr_size, length);
+
+	int dmabuf_fd = -1;
+	void * provider_va = NULL;
+	struct ibv_mr * provider_mr = alloc_public_mr(ctxt, pd, provider_mr_size, &dmabuf_fd, &provider_va);
+    if(! provider_mr)
+    {
+        fprintf(stderr, "Failed to allocate provider MR with size %lu\n", provider_mr_size);
+		exit(1);
+    }
+
+	mr->provider_mr = provider_mr;
+	mr->provider_va = provider_va;
+	mr->provider_dmabuf_fd = dmabuf_fd;
+
+	// Allocate chunk tracking array
+	mr->chunk_tracking = calloc(num_chunks, sizeof(struct chunk_tracking_info));
+	if (!mr->chunk_tracking)
+	{
+		fprintf(stderr, "Failed to allocate chunk tracking array\n");
+		exit(1);
+	}
+
 	/*
 		The CVMRDMA MR exposes ibv_mr fields to the user containing data (eg the address)
 		related to the user region, whereas the buffer actually registered as an MR is kept

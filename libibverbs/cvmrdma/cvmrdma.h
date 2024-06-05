@@ -14,33 +14,30 @@ struct cq_server_notification
     uint32_t rkey; // 16
     uint32_t imm; // 20
 	uint64_t payload_nonce[cvmrdma_aead_NPUBBYTES]; // 44
-    bool last_chunk; // 45
+	uint64_t chunk_offt; // 52
+	uint64_t chunk_len; // 60
+    bool last_chunk; // 61
 };
 
 #define CVMRDMA_SHARED_KEY_ENV "CVMRDMA_SHARED_KEY"
 
+#define CVMRDMA_CHUNK_BYTES ((unsigned long long)32 * PAGE_SIZE)
 
-#define CVMRDMA_RING_SLOT_BYTES ((unsigned long long)32 * PAGE_SIZE)
+static inline unsigned long long cvmrdma_ring_slot_bytes(enum sodium_crypto_aead aead)
+{
+	return CVMRDMA_CHUNK_BYTES + cvmrdma_ABYTES(aead) 
+			+ sizeof(struct cq_server_notification) + cvmrdma_ABYTES(aead);
+}
+
 
 static inline unsigned long long cvmrdma_header_bytes(enum sodium_crypto_aead aead)
 {
 	return sizeof(struct cq_server_notification) + cvmrdma_ABYTES(aead);
 }
-static inline unsigned long long cvmrdma_payload_bytes(enum sodium_crypto_aead aead)
-{
-	return CVMRDMA_RING_SLOT_BYTES - (cvmrdma_header_bytes(aead) + cvmrdma_ABYTES(aead));  
-}
 
-#define CVMRDMA_RING_ENTRIES 8192
-#define CVMRDMA_RING_TOTAL_BYTES (CVMRDMA_RING_ENTRIES * CVMRDMA_RING_SLOT_BYTES)
+#define CVMRDMA_RING_ENTRIES 512
 
 #define CVMRDMA_ACK_THRESHOLD DIVIDE_ROUND_UP(CVMRDMA_RING_ENTRIES, 2)
-
-enum cvmrdma_ring_types {
-	CVMRDMA_RING_SEND,
-	CVMRDMA_RING_RECV,
-	__CVMRDMA_RING_NR,
-};
 
 enum cvmrdma_priv_chunk_id {
 	CVMRDMA_PRIV_CHUNK_SG_OUT,
@@ -50,4 +47,7 @@ enum cvmrdma_priv_chunk_id {
 	__CVMRDMA_PRIV_CHUNK_NR,
 };
 
-#define CVMRDMA_PRIV_BOUNCE_TOTAL_BYTES (__CVMRDMA_PRIV_CHUNK_NR * CVMRDMA_RING_SLOT_BYTES)
+static inline unsigned long long cvmrdma_priv_bounce_total_bytes(enum sodium_crypto_aead aead)
+{
+	return __CVMRDMA_PRIV_CHUNK_NR * cvmrdma_ring_slot_bytes(aead);
+}

@@ -36,9 +36,7 @@ static int cq_server_loop_once(struct cvmrdma_context * ctxt)
     QPMetadataManager * qp_metadata_manager = server->qp_metadata_manager;
 
     enum sodium_crypto_aead aead = ctxt->aead;
-	unsigned long long tag_bytes = cvmrdma_ABYTES(aead);
 	unsigned long long header_bytes = cvmrdma_header_bytes(aead);
-	unsigned long long max_payload_bytes = cvmrdma_payload_bytes(aead);
 
 
     int err;
@@ -144,23 +142,23 @@ static int cq_server_loop_once(struct cvmrdma_context * ctxt)
             uint64_t const * rx_key = qp->rx_key;
             uint64_t const * shared_key = qp->shared_key;
 
-            unsigned char * ringbuf_in = (unsigned char *)qp->ringbuf_va + CVMRDMA_RING_RECV * CVMRDMA_RING_TOTAL_BYTES;
-            unsigned char * private = (unsigned char *)qp->bounce_private_mem + CVMRDMA_PRIV_CHUNK_ENC_IN * CVMRDMA_RING_SLOT_BYTES;
-            unsigned char * decrypted = (unsigned char *)qp->bounce_private_mem + CVMRDMA_PRIV_CHUNK_SG_IN * CVMRDMA_RING_SLOT_BYTES;
+            unsigned char * ringbuf_in = (unsigned char *)qp->ringbuf_va;
+            unsigned char * private = (unsigned char *)qp->bounce_private_mem + CVMRDMA_PRIV_CHUNK_ENC_IN * cvmrdma_priv_bounce_total_bytes(ctxt->aead);
+            unsigned char * decrypted = (unsigned char *)qp->bounce_private_mem + CVMRDMA_PRIV_CHUNK_SG_IN * cvmrdma_priv_bounce_total_bytes(ctxt->aead);
 
             int this_recv_slot_id = qp->next_recv_slot;
-            unsigned char * slot = ringbuf_in + this_recv_slot_id * CVMRDMA_RING_SLOT_BYTES;
+            unsigned char * slot = ringbuf_in + this_recv_slot_id * cvmrdma_ring_slot_bytes(aead);
 
             /* And update the slot idx */
             qp->next_recv_slot = (this_recv_slot_id + 1) % CVMRDMA_RING_ENTRIES;
 
 
             /**** COPY *****/
-            /* Copy the chunk into private memory to prevent TOCTOU */
+            /* Copy the ring slot into private memory to prevent TOCTOU */
 
             TIMING("cds_t0");
 
-            memcpy(private, slot, CVMRDMA_RING_SLOT_BYTES);
+            memcpy(private, slot, cvmrdma_ring_slot_bytes(aead));
 
             /**** DECRYPT *****/
             /* Decrypt the notification, then the payload */
@@ -215,6 +213,7 @@ static int cq_server_loop_once(struct cvmrdma_context * ctxt)
 
             // Decrypt directly to destination !
             bool bypass_scatter = false;
+            void * dest = NULL;
             if(is_write)
             {
                 /* The operation is a WRITE: use the remote_addr and rkey provided by the requester. We
@@ -225,10 +224,12 @@ static int cq_server_loop_once(struct cvmrdma_context * ctxt)
                 struct cvmrdma_mr * mr = get_bounce_metadata_for_rkey(pd->bounce_metadata, rkey);
 
                 uint64_t offt = hca_addr - mr->hca_va;
-                void * dest = (unsigned char *)mr->user_mr.ibv_mr.addr + offt;
+                dest = (unsigned char *)mr->user_mr.ibv_mr.addr + offt;
 
-                decrypted = dest;
-                bypass_scatter = true;
+                if(notif.chunk_len == CVMRDMA_CHUNK_BYTES){
+                    decrypted = dest;
+                    bypass_scatter = true;
+                }
             }
             else
             {
@@ -239,9 +240,9 @@ static int cq_server_loop_once(struct cvmrdma_context * ctxt)
                 struct ibv_sge * rcv_sgl = recv_info->sgl;
                 struct ibv_sge * cur_sge = &rcv_sgl[qp->cur_sge_idx];
 
-                /* plen = clen - size(MAC) */
-                size_t plen_max = payload_clen - tag_bytes;
-                if(qp->cur_offt_in_sge + plen_max <= cur_sge->length)
+
+                if(notif.chunk_len == CVMRDMA_CHUNK_BYTES 
+                    && qp->cur_offt_in_sge + notif.chunk_len <= cur_sge->length)
                 {
                     /* can write directly to dest! */
                     struct cvmrdma_mr * cur_mr = get_bounce_metadata_for_lkey(pd->bounce_metadata, cur_sge->lkey);
@@ -253,7 +254,7 @@ static int cq_server_loop_once(struct cvmrdma_context * ctxt)
                 }
             }
 
-            unsigned long long payload_mlen = CVMRDMA_RING_SLOT_BYTES;
+            unsigned long long payload_mlen = CVMRDMA_CHUNK_BYTES;
             err = cvmrdma_decrypt(
                 decrypted, &payload_mlen,
                 NULL,
@@ -278,49 +279,53 @@ static int cq_server_loop_once(struct cvmrdma_context * ctxt)
 
             if(! bypass_scatter)
             {
-                /* The operation is a SEND: use the next chunk on the current recv request */
-                struct recv_metadata_entry * recv_info = qp_recv_metadata_front(qp->recv_metadata);
-                struct ibv_sge * rcv_sgl = recv_info->sgl;
-                int rcv_nsge = recv_info->nsge;
-                
-                size_t bytes_copied = 0;
+                if (is_write){
+                    memcpy(dest, decrypted + notif.chunk_offt, notif.chunk_len);
+                } else {
+                    /* The operation is a SEND: use the next chunk on the current recv request */
+                    struct recv_metadata_entry * recv_info = qp_recv_metadata_front(qp->recv_metadata);
+                    struct ibv_sge * rcv_sgl = recv_info->sgl;
+                    int rcv_nsge = recv_info->nsge;
+                    
+                    size_t bytes_copied = 0;
 
-                while((bytes_copied < payload_mlen) && (qp->cur_sge_idx < rcv_nsge))
-                {
-                    struct ibv_sge * cur_sge = &rcv_sgl[qp->cur_sge_idx];
-                    struct cvmrdma_mr * cur_mr = get_bounce_metadata_for_lkey(pd->bounce_metadata, cur_sge->lkey);
-                    unsigned char * mr_addr = cur_mr->user_mr.ibv_mr.addr;
-
-
-                    size_t remaining = payload_mlen - bytes_copied;
-                    size_t available = cur_sge->length - qp->cur_offt_in_sge;
-
-                    uint64_t offt = (cur_sge->addr - cur_mr->hca_va) + qp->cur_offt_in_sge;
-
-                    if(remaining < available)
+                    while((bytes_copied < notif.chunk_len) && (qp->cur_sge_idx < rcv_nsge))
                     {
-                        memcpy(mr_addr + offt, decrypted + bytes_copied, remaining);
-                        bytes_copied += remaining;
-                        qp->cur_offt_in_sge += remaining;
+                        struct ibv_sge * cur_sge = &rcv_sgl[qp->cur_sge_idx];
+                        struct cvmrdma_mr * cur_mr = get_bounce_metadata_for_lkey(pd->bounce_metadata, cur_sge->lkey);
+                        unsigned char * mr_addr = cur_mr->user_mr.ibv_mr.addr;
+
+
+                        size_t remaining = notif.chunk_len - bytes_copied;
+                        size_t available = cur_sge->length - qp->cur_offt_in_sge;
+
+                        uint64_t offt = (cur_sge->addr - cur_mr->hca_va) + qp->cur_offt_in_sge;
+
+                        if(remaining < available)
+                        {
+                            memcpy(mr_addr + offt, decrypted + notif.chunk_offt + bytes_copied, remaining);
+                            bytes_copied += remaining;
+                            qp->cur_offt_in_sge += remaining;
+                        }
+                        else
+                        {
+                            memcpy(mr_addr + offt, decrypted + notif.chunk_offt + bytes_copied, available);
+                            bytes_copied += available;
+                            
+                            /* move to next sge */
+                            qp->cur_sge_idx++;
+                            qp->cur_offt_in_sge = 0;
+                        }
                     }
-                    else
+
+
+                    if(bytes_copied < notif.chunk_len)
                     {
-                        memcpy(mr_addr + offt, decrypted + bytes_copied, available);
-                        bytes_copied += available;
-                        
-                        /* move to next sge */
-                        qp->cur_sge_idx++;
-                        qp->cur_offt_in_sge = 0;
+                        /* Early loop exit bc the sglist is empty. This is an error ! */
+                        fprintf(stderr, "Incoming chunk would exceed the end of the receive request! (notif.chunk_len 0x%"PRIx64" > recv %zu)\n", notif.chunk_len, bytes_copied);
+                        exit(1);
+                        /* TODO: emit IBV_WC_LOC_LEN_ERR in WC status for user !*/
                     }
-                }
-
-
-                if(bytes_copied < payload_mlen)
-                {
-                    /* Early loop exit bc the sglist is empty. This is an error ! */
-                    fprintf(stderr, "Incoming chunk would exceed the end of the receive request! (chunk %llu > recv %zu)\n", payload_mlen, bytes_copied);
-                    exit(1);
-                    /* TODO: emit IBV_WC_LOC_LEN_ERR in WC status for user !*/
                 }
             }
             else
@@ -330,7 +335,7 @@ static int cq_server_loop_once(struct cvmrdma_context * ctxt)
                 struct ibv_sge * rcv_sgl = recv_info->sgl;
                 struct ibv_sge * cur_sge = &rcv_sgl[qp->cur_sge_idx];
 
-                qp->cur_offt_in_sge += payload_mlen;
+                qp->cur_offt_in_sge += notif.chunk_len;
                 if(qp->cur_offt_in_sge >= cur_sge->length)
                 {
                     qp->cur_offt_in_sge = 0;
@@ -338,7 +343,7 @@ static int cq_server_loop_once(struct cvmrdma_context * ctxt)
                 }
             }
 
-            qp->wr_bytes_rcved += payload_mlen;
+            qp->wr_bytes_rcved += notif.chunk_len;
 
             DEBUG("after chunk: rcved 0x%zx bytes of WR\n", qp->wr_bytes_rcved);
 
