@@ -25,6 +25,10 @@ void qp_metadata_manager_destroy(QPMetadataManager * qp_metadata_manager)
 
 int qp_metadata_manager_register_qp(QPMetadataManager * qp_metadata_manager, uint32_t qpn, struct cvmrdma_qp * qp)
 {
+    auto locked = std::scoped_lock{qp_metadata_manager->lock};
+
+    assert(qp != nullptr);
+
     auto present = qp_metadata_manager->qp_for_qpn.find(qpn);
     if(present != qp_metadata_manager->qp_for_qpn.end())
     {
@@ -46,6 +50,8 @@ struct cvmrdma_qp * qp_metadata_manager_get_qp(QPMetadataManager * qp_metadata_m
         DEBUG("ERROR: no qp found for QPN 0x%" PRIx32 "!\n", qpn);
         return nullptr;
     }
+
+    assert(it->second != nullptr);
 
     return it->second;
 }

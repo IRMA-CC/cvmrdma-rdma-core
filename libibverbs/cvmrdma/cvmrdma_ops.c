@@ -239,9 +239,9 @@ static struct ibv_qp *cvmrdma_create_qp(struct ibv_pd * ibpd,
 	assert(attr->qp_type == IBV_QPT_RC);
 	attr_ex.qp_type = IBV_QPT_RC;
 
-	/* Keep the user set QP capacity */
+	/* Don't keep the user set QP capacity */
 	attr_ex.cap.max_recv_sge = 30;
-	attr_ex.cap.max_recv_wr = CVMRDMA_RING_ENTRIES;
+	attr_ex.cap.max_recv_wr = 4096;
 	attr_ex.cap.max_send_sge = 30;
 	attr_ex.cap.max_send_wr = 4096;
 	attr_ex.cap.max_inline_data = 0; /* we're not using inline */
@@ -259,7 +259,7 @@ static struct ibv_qp *cvmrdma_create_qp(struct ibv_pd * ibpd,
 	qp->provider_qp = ibqp;
 
 	/* Create the control Completion Queue */
-	struct ibv_cq * control_ibcq = ctxt->prov_ops.create_cq(prov_ctxt, 16384, NULL, 0);
+	struct ibv_cq * control_ibcq = ctxt->prov_ops.create_cq(prov_ctxt, 65536, NULL, 0);
 	if(! control_ibcq)
 	{
 		fprintf(stderr, "failed to create backend CQ for the control CQ\n");
@@ -814,7 +814,8 @@ static int post_send_do_bounce(struct cvmrdma_qp * qp, struct ibv_send_wr *wrs, 
 		size_t total_chunks = 0;
 		for(size_t i = 0 ; i < nsge ; i++) {
 			total_bytes += sgl[i].length;
-			size_t sge_chunks = DIVIDE_ROUND_UP(sgl[i].length + (sgl[i].addr % CVMRDMA_CHUNK_BYTES), CVMRDMA_CHUNK_BYTES);
+			struct cvmrdma_mr * cur_mr = get_bounce_metadata_for_lkey(pd->bounce_metadata, sgl[i].lkey);
+			size_t sge_chunks = DIVIDE_ROUND_UP(sgl[i].length + ((sgl[i].addr- cur_mr->hca_va) % CVMRDMA_CHUNK_BYTES), CVMRDMA_CHUNK_BYTES);
 			total_chunks += sge_chunks;
 		}
 		/* XXX: pass the number of chunks to the CQ_server to know when to emit a send WC for user. Do it 
@@ -831,7 +832,7 @@ static int post_send_do_bounce(struct cvmrdma_qp * qp, struct ibv_send_wr *wrs, 
 			uint64_t offt = (cur_sge->addr - cur_mr->hca_va) + cur_sge_offt;
 
 			/* If this is the last chunk, we'll need to notify that it's a WC generating chunk (if op != WRITE) */
-			size_t chunks_num = DIVIDE_ROUND_UP(cur_sge->length + (offt % CVMRDMA_CHUNK_BYTES), CVMRDMA_CHUNK_BYTES);
+			size_t chunks_num = DIVIDE_ROUND_UP(cur_sge->length + ((cur_sge->addr - cur_mr->hca_va) % CVMRDMA_CHUNK_BYTES), CVMRDMA_CHUNK_BYTES);
 			
 			
 
@@ -839,9 +840,10 @@ static int post_send_do_bounce(struct cvmrdma_qp * qp, struct ibv_send_wr *wrs, 
 
 			DEBUG("chunks_in_wr %lu\n", chunks_in_wr);
 			DEBUG("cur_sge->length %lu\n", cur_sge->length);
-			DEBUG("offt %lx", offt);
-			DEBUG("chunks_num %lu\n", chunks_num);
+			DEBUG("offt %lx\n", offt);
 			DEBUG("last_chunk %d\n", last_chunk);
+			DEBUG("chunks_num %lu\n", chunks_num);
+			DEBUG("total_chunks %lu\n", total_chunks);
 
 
 			/* Prepare the two nonces: for notif and for payload */
@@ -898,7 +900,7 @@ static int post_send_do_bounce(struct cvmrdma_qp * qp, struct ibv_send_wr *wrs, 
 					notif.rkey = rkey;
 					notif.imm = this_imm;
 					memcpy(notif.payload_nonce, nonce_payload, cvmrdma_aead_NPUBBYTES);
-					notif.chunk_offt = offt - (offt % CVMRDMA_CHUNK_BYTES);
+					notif.chunk_offt = offt % CVMRDMA_CHUNK_BYTES;
 					notif.chunk_len = true_payload_bytes;
 					notif.last_chunk = last_chunk;
 				}
@@ -910,7 +912,7 @@ static int post_send_do_bounce(struct cvmrdma_qp * qp, struct ibv_send_wr *wrs, 
 					notif.rkey = 0;
 					notif.imm = this_imm;
 					memcpy(notif.payload_nonce, nonce_payload, cvmrdma_aead_NPUBBYTES);
-					notif.chunk_offt = offt - (offt % CVMRDMA_CHUNK_BYTES);
+					notif.chunk_offt = offt % CVMRDMA_CHUNK_BYTES;
 					notif.chunk_len = true_payload_bytes;
 					notif.last_chunk = last_chunk;
 				}

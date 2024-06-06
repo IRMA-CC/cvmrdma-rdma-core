@@ -280,6 +280,7 @@ static int cq_server_loop_once(struct cvmrdma_context * ctxt)
             if(! bypass_scatter)
             {
                 if (is_write){
+                    DEBUG("writing with notif.chunk_offt 0x%"PRIx64" and notif.chunk_len %zu\n", notif.chunk_offt, notif.chunk_len);
                     memcpy(dest, decrypted + notif.chunk_offt, notif.chunk_len);
                 } else {
                     /* The operation is a SEND: use the next chunk on the current recv request */
