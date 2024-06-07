@@ -280,9 +280,9 @@ static struct ibv_qp *cvmrdma_create_qp(struct ibv_pd * ibpd,
 	control_attr_ex.qp_type = IBV_QPT_RC;
 
 	control_attr_ex.cap.max_recv_sge = 16;
-	control_attr_ex.cap.max_recv_wr = 128;
+	control_attr_ex.cap.max_recv_wr = CVMRDMA_RING_ENTRIES;
 	control_attr_ex.cap.max_send_sge = 16;
-	control_attr_ex.cap.max_send_wr = 128;
+	control_attr_ex.cap.max_send_wr = CVMRDMA_RING_ENTRIES;
 	control_attr_ex.cap.max_inline_data = 0; /* we're not using inline */
 
 	control_attr_ex.pd = pd->provider_pd;

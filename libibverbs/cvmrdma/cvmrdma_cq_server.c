@@ -143,8 +143,8 @@ static int cq_server_loop_once(struct cvmrdma_context * ctxt)
             uint64_t const * shared_key = qp->shared_key;
 
             unsigned char * ringbuf_in = (unsigned char *)qp->ringbuf_va;
-            unsigned char * private = (unsigned char *)qp->bounce_private_mem + CVMRDMA_PRIV_CHUNK_ENC_IN * cvmrdma_priv_bounce_total_bytes(ctxt->aead);
-            unsigned char * decrypted = (unsigned char *)qp->bounce_private_mem + CVMRDMA_PRIV_CHUNK_SG_IN * cvmrdma_priv_bounce_total_bytes(ctxt->aead);
+            unsigned char * private = (unsigned char *)qp->bounce_private_mem + CVMRDMA_PRIV_CHUNK_ENC_IN * cvmrdma_ring_slot_bytes(ctxt->aead);
+            unsigned char * decrypted = (unsigned char *)qp->bounce_private_mem + CVMRDMA_PRIV_CHUNK_SG_IN * cvmrdma_ring_slot_bytes(ctxt->aead);
 
             int this_recv_slot_id = qp->next_recv_slot;
             unsigned char * slot = ringbuf_in + this_recv_slot_id * cvmrdma_ring_slot_bytes(aead);
