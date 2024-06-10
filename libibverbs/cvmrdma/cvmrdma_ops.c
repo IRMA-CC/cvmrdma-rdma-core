@@ -673,10 +673,10 @@ static int cvmrdma_modify_qp(struct ibv_qp *ibqp, struct ibv_qp_attr *attr,
 		control_qp_attrs.sq_psn = control_sq_psn;
 		control_qp_attr_mask |= IBV_QP_SQ_PSN;
 
-		control_qp_attrs.timeout = 14;           /* ??? */
-		control_qp_attrs.retry_cnt = 7;          /* ??? */
-		control_qp_attrs.rnr_retry = 7;          /* ??? */
-		control_qp_attrs.max_dest_rd_atomic = 1; /* ??? */
+		control_qp_attrs.timeout = 21;
+		control_qp_attrs.retry_cnt = 7;
+		control_qp_attrs.rnr_retry = 7;
+		control_qp_attrs.max_dest_rd_atomic = 1;
 
 		control_qp_attr_mask |= IBV_QP_MAX_QP_RD_ATOMIC | IBV_QP_RETRY_CNT | IBV_QP_RNR_RETRY | IBV_QP_TIMEOUT;
 
