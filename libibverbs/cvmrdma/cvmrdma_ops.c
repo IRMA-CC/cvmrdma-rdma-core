@@ -10,6 +10,11 @@
 #include <sys/mman.h>
 #include <sys/ioctl.h>
 
+#include <linux/userfaultfd.h>
+#include <unistd.h>
+#include <fcntl.h>
+#include <sys/syscall.h>
+
 #include <linux/dma-buf.h>
 
 #include <sodium.h>
@@ -29,6 +34,7 @@
 #include "recv_metadata.h"
 #include "wc_queue.h"
 #include "dma_heap.h"
+#include "cvmrdma_cache.h"
 
 #include "debug.h"
 
@@ -133,7 +139,6 @@ static int attach_qp_to_cq_server(struct cvmrdma_context * ctxt, struct cvmrdma_
 /* Allocate a zero-indexed publicly available mr*/
 static struct ibv_mr * alloc_public_mr(struct cvmrdma_context * ctxt, struct cvmrdma_pd *pd, size_t size, int * dmabuf_fd, void ** ringbuf_va)
 {
-	int ret;
 	int dma_buf;
 
 #ifndef DUMMY_SYSTEM_HEAP
@@ -650,7 +655,7 @@ static int cvmrdma_modify_qp(struct ibv_qp *ibqp, struct ibv_qp_attr *attr,
 			fprintf(stderr, "CVMRDMA_SHARED_KEY not set\n");
 			goto err;
 		}
-		if(sodium_hex2bin((char *) qp->shared_key, cvmrdma_aead_KEYBYTES, shared_key_str, strlen(shared_key_str), NULL, NULL, NULL) == -1)
+		if(sodium_hex2bin((unsigned char *) qp->shared_key, cvmrdma_aead_KEYBYTES, shared_key_str, strlen(shared_key_str), NULL, NULL, NULL) == -1)
 		{
 			fprintf(stderr, "Failed to parse shared key\n");
 			goto err;
@@ -839,7 +844,7 @@ static int post_send_do_bounce(struct cvmrdma_qp * qp, struct ibv_send_wr *wrs, 
 			bool last_chunk = chunks_in_wr + 1 == chunks_num;
 
 			DEBUG("chunks_in_wr %lu\n", chunks_in_wr);
-			DEBUG("cur_sge->length %lu\n", cur_sge->length);
+			DEBUG("cur_sge->length %lx\n", cur_sge->length);
 			DEBUG("offt %lx\n", offt);
 			DEBUG("last_chunk %d\n", last_chunk);
 			DEBUG("chunks_num %lu\n", chunks_num);
@@ -970,6 +975,21 @@ static int post_send_do_bounce(struct cvmrdma_qp * qp, struct ibv_send_wr *wrs, 
 			DEBUG("encrypted[0] %x %x %x ...\n", encrypted[0], encrypted[1], encrypted[2]);
 			DEBUG("encrypted[notif_clen + 0] %x %x %x ...\n", encrypted[notif_clen + 0], encrypted[notif_clen + 1], encrypted[notif_clen + 2]);
 			DEBUG("notif_clen %llu\npayload_clen %llu\n", notif_clen, payload_clen);
+
+			// Mark chunk in userMR as write protected
+			atomic_store(&chunk_info->cached, true);
+			int uffd = cur_mr->uffd;
+			struct uffdio_writeprotect uffdio_wp = {
+				.range = {
+					.start = (unsigned long) ptxt,
+					.len = DIVIDE_ROUND_UP(true_payload_bytes, PAGE_SIZE) * PAGE_SIZE,
+				},
+				.mode = UFFDIO_WRITEPROTECT_MODE_WP,
+			};
+			if (ioctl(uffd, UFFDIO_WRITEPROTECT, &uffdio_wp) == -1) {
+				fprintf(stderr, "Failed to write protect the memory region; addr %p, len %lu, err: %d\n", ptxt, DIVIDE_ROUND_UP(true_payload_bytes, PAGE_SIZE) * PAGE_SIZE, errno);
+				exit(1);
+			}
 
 skip_payload_encryption:
 
@@ -1201,6 +1221,51 @@ static struct ibv_mr *cvmrdma_reg_mr(struct ibv_pd *ibpd, void *addr, size_t len
 		fprintf(stderr, "Failed to allocate chunk tracking array\n");
 		exit(1);
 	}
+
+
+	// Register userMR and Spin up userfaultfd thread
+	// See: man 2 userfaultfd
+	long uffd = syscall(__NR_userfaultfd, O_CLOEXEC | O_NONBLOCK);
+    if (uffd == -1) {
+		fprintf(stderr, "Failed to create userfaultfd %d\n", errno);
+		exit(1);
+	}
+
+    struct uffdio_api uffdio_api = {
+        .api = UFFD_API,
+        .features = UFFD_FEATURE_PAGEFAULT_FLAG_WP,
+    };
+    if (ioctl(uffd, UFFDIO_API, &uffdio_api) == -1) {
+		fprintf(stderr, "Failed to ioctl-UFFDIO_API %d\n", errno);
+		exit(1);
+	}
+
+	/* Register the memory range of the mapping we just created for
+       handling by the userfaultfd object. */
+    struct uffdio_register uffdio_register = {
+        .range = {
+            .start = (unsigned long) addr,
+            .len = length,
+        },
+        .mode = UFFDIO_REGISTER_MODE_WP | UFFDIO_REGISTER_MODE_MISSING,
+        //.mode = UFFDIO_REGISTER_MODE_WP,
+    };
+    if (ioctl(uffd, UFFDIO_REGISTER, &uffdio_register) == -1) {
+		fprintf(stderr, "Failed to ioctl-UFFDIO_REGISTER %d\n", errno);
+		exit(1);
+	}
+
+	/* Create a thread that will process the userfaultfd events. */
+	struct fault_handler_thread_args *args = calloc(1, sizeof(struct fault_handler_thread_args));
+	args->mr = mr;
+	args->uffd = uffd;
+    int ret = pthread_create(&mr->cache_invalidation_thread, NULL, &fault_handler_thread, (void*) args);
+    if (ret) {
+        fprintf(stderr, "Failed to create fault handler thread\n");
+		exit(1);
+    }
+
+	mr->uffd = uffd;
 
 	/*
 		The CVMRDMA MR exposes ibv_mr fields to the user containing data (eg the address)

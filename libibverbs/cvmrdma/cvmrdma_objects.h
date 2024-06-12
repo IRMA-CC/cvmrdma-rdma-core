@@ -3,6 +3,7 @@
 #include <pthread.h>
 
 #include <infiniband/driver.h>
+#include <stdatomic.h>
 
 #include "crypto.h"
 #include "recv_metadata.h"
@@ -66,6 +67,9 @@ struct cvmrdma_mr {
 	   The array is indexed by the chunk number.
 	 */
 	struct chunk_tracking_info *chunk_tracking;
+
+	pthread_t cache_invalidation_thread;
+	int uffd;
 
 	uint64_t hca_va;
 };
@@ -182,5 +186,5 @@ struct control_metadata {
 struct chunk_tracking_info {
 	uint64_t nonce[cvmrdma_aead_NPUB_WORDS]; // 24 bytes
 	/* If the chink is not dirty this is true */
-	bool cached; // 1 byte
+	_Atomic bool cached; // 1 byte
 };
