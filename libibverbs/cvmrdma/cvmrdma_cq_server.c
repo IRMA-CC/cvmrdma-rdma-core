@@ -6,6 +6,11 @@
 #include <pthread.h>
 #include <string.h>
 
+#include <linux/userfaultfd.h>
+#include <unistd.h>
+#include <fcntl.h>
+#include <sys/syscall.h>
+
 #include <sodium.h>
 
 #include <infiniband/verbs.h>
@@ -154,11 +159,13 @@ static int cq_server_loop_once(struct cvmrdma_context * ctxt)
 
 
             /**** COPY *****/
-            /* Copy the ring slot into private memory to prevent TOCTOU */
+            /* Copy the header into private memory to prevent TOCTOU 
+               Based on the header, we decide where to copy the encrypted payload
+            */
 
             TIMING("cds_t0");
 
-            memcpy(private, slot, cvmrdma_ring_slot_bytes(aead));
+            memcpy(private, slot, cvmrdma_header_bytes(aead));
 
             /**** DECRYPT *****/
             /* Decrypt the notification, then the payload */
@@ -166,7 +173,7 @@ static int cq_server_loop_once(struct cvmrdma_context * ctxt)
 			/* Get notif nonce */
 			uint64_t * qp_nonce = qp->rx_nonce;
 
-			uint64_t nonce_metadata[cvmrdma_aead_NPUB_WORDS], nonce_payload[cvmrdma_aead_NPUB_WORDS];
+			uint64_t nonce_metadata[cvmrdma_aead_NPUB_WORDS];
 			memcpy(nonce_metadata, qp_nonce, cvmrdma_aead_NPUBBYTES);
 			
 			/* and increment nonce */
@@ -175,7 +182,7 @@ static int cq_server_loop_once(struct cvmrdma_context * ctxt)
             struct cq_server_notification notif = {0};
 
             unsigned char * notif_start = private;
-            unsigned long long notif_clen = header_bytes; /* Q: if I put "wc_length" here, does it work ?*/
+            unsigned long long notif_clen = header_bytes;
             if(header_bytes > wc_length)
             {
                 fprintf(stderr, "Failed to decrypt: chunk too short\n");
@@ -201,19 +208,11 @@ static int cq_server_loop_once(struct cvmrdma_context * ctxt)
             enum ibv_wr_opcode wr_op = notif.op;
             bool is_write = (wr_op == IBV_WR_RDMA_WRITE) || (wr_op == IBV_WR_RDMA_WRITE_WITH_IMM);
 
-
-            unsigned char * payload_start = private + header_bytes;
-            unsigned long long payload_clen = wc_length - header_bytes;
-
-            memcpy(nonce_payload, notif.payload_nonce, cvmrdma_aead_NPUBBYTES);
-
-            DEBUG("nonce %lx %lx\n", nonce_payload[0], nonce_payload[1]);
-            DEBUG("private %x %x %x ...\n", private[0], private[1], private[2]);
-            DEBUG("clen %llu\n", payload_clen);
-
             // Decrypt directly to destination !
             bool bypass_scatter = false;
             void * dest = NULL;
+            uint64_t offt = 0;
+            struct cvmrdma_mr * cur_mr = NULL;
             if(is_write)
             {
                 /* The operation is a WRITE: use the remote_addr and rkey provided by the requester. We
@@ -221,10 +220,10 @@ static int cq_server_loop_once(struct cvmrdma_context * ctxt)
                 uint32_t rkey = notif.rkey;
                 uint64_t hca_addr = notif.hca_addr;
 
-                struct cvmrdma_mr * mr = get_bounce_metadata_for_rkey(pd->bounce_metadata, rkey);
+                cur_mr = get_bounce_metadata_for_rkey(pd->bounce_metadata, rkey);
 
-                uint64_t offt = hca_addr - mr->hca_va;
-                dest = (unsigned char *)mr->user_mr.ibv_mr.addr + offt;
+                offt = hca_addr - cur_mr->hca_va;
+                dest = (unsigned char *)cur_mr->user_mr.ibv_mr.addr + offt;
 
                 if(notif.chunk_len == CVMRDMA_CHUNK_BYTES){
                     decrypted = dest;
@@ -245,14 +244,52 @@ static int cq_server_loop_once(struct cvmrdma_context * ctxt)
                     && qp->cur_offt_in_sge + notif.chunk_len <= cur_sge->length)
                 {
                     /* can write directly to dest! */
-                    struct cvmrdma_mr * cur_mr = get_bounce_metadata_for_lkey(pd->bounce_metadata, cur_sge->lkey);
                     unsigned char * mr_addr = cur_mr->user_mr.ibv_mr.addr;
-                    uint64_t offt = (cur_sge->addr - cur_mr->hca_va) + qp->cur_offt_in_sge;
+                    offt = (cur_sge->addr - cur_mr->hca_va) + qp->cur_offt_in_sge;
 
                     decrypted = mr_addr + offt;
                     bypass_scatter = true;
                 }
             }
+
+            unsigned long long payload_clen = wc_length - header_bytes;
+
+            DEBUG("notif.payload_nonce %lx %lx\n", notif.payload_nonce[0], notif.payload_nonce[1]);
+            DEBUG("clen %llu\n", payload_clen);
+
+            size_t chunk_idx = offt / CVMRDMA_CHUNK_BYTES;
+            char * payload_start = NULL;
+
+            if (! bypass_scatter)
+            {
+                /* Copy the payload into private memory */
+                payload_start = private + header_bytes;
+                memcpy(payload_start, slot + header_bytes, payload_clen);
+                DEBUG("private %x %x %x ...\n", private[0], private[1], private[2]);
+            } else {
+                /* Copy the payload into the private chunk cache */
+                assert(offt % CVMRDMA_CHUNK_BYTES == 0);
+                DEBUG("[CQ] chunk_idx %zu to chunk cache\n", chunk_idx);
+                payload_start = cur_mr->provider_va + chunk_idx * cvmrdma_ring_slot_bytes(ctxt->aead) +  cvmrdma_header_bytes(ctxt->aead);
+
+                memcpy(payload_start, slot + header_bytes, cvmrdma_ring_slot_bytes(ctxt->aead) - cvmrdma_header_bytes(ctxt->aead));
+
+                memcpy(cur_mr->chunk_tracking[chunk_idx].nonce, notif.payload_nonce, cvmrdma_aead_NPUBBYTES);
+
+                struct uffdio_writeprotect uffdio_wp = {
+                    .range = {
+                        .start = decrypted,
+                        .len = CVMRDMA_CHUNK_BYTES,
+                    },
+                    .mode = 0,
+                };
+                if (ioctl(cur_mr->uffd, UFFDIO_WRITEPROTECT, &uffdio_wp) == -1) {
+                    fprintf(stderr, "[CACHE] ioctl-UFFDIO_WRITEPROTECT: %d\n", errno);
+                    exit(1);
+                }
+            }
+
+
 
             unsigned long long payload_mlen = CVMRDMA_CHUNK_BYTES;
             err = cvmrdma_decrypt(
@@ -260,7 +297,7 @@ static int cq_server_loop_once(struct cvmrdma_context * ctxt)
                 NULL,
                 payload_start, payload_clen,
                 NULL, 0,
-                (unsigned char const *)nonce_payload,
+                (unsigned char const *)notif.payload_nonce,
                 (unsigned char const *)shared_key,
                 aead
             );
@@ -293,7 +330,6 @@ static int cq_server_loop_once(struct cvmrdma_context * ctxt)
                     while((bytes_copied < notif.chunk_len) && (qp->cur_sge_idx < rcv_nsge))
                     {
                         struct ibv_sge * cur_sge = &rcv_sgl[qp->cur_sge_idx];
-                        struct cvmrdma_mr * cur_mr = get_bounce_metadata_for_lkey(pd->bounce_metadata, cur_sge->lkey);
                         unsigned char * mr_addr = cur_mr->user_mr.ibv_mr.addr;
 
 
@@ -341,6 +377,19 @@ static int cq_server_loop_once(struct cvmrdma_context * ctxt)
                 {
                     qp->cur_offt_in_sge = 0;
                     qp->cur_sge_idx++;
+                }
+
+                atomic_store(&cur_mr->chunk_tracking[chunk_idx].cached, true);
+                struct uffdio_writeprotect uffdio_wp = {
+                    .range = {
+                        .start = (unsigned long) decrypted,
+                        .len = CVMRDMA_CHUNK_BYTES,
+                    },
+                    .mode = UFFDIO_WRITEPROTECT_MODE_WP,
+                };
+                if (ioctl(cur_mr->uffd, UFFDIO_WRITEPROTECT, &uffdio_wp) == -1) {
+                    fprintf(stderr, "[CQ] ioctl-UFFDIO_WRITEPROTECT: %d\n", errno);
+                    exit(1);
                 }
             }
 
