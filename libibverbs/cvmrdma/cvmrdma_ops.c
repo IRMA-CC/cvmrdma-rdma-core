@@ -797,8 +797,6 @@ static int post_send_do_bounce(struct cvmrdma_qp * qp, struct ibv_send_wr *wrs, 
 		*/
 		uint64_t const * tx_key = qp->tx_key;
 		uint64_t const * shared_key = qp->shared_key;
-		unsigned char * encrypted = (unsigned char *)qp->bounce_private_mem + CVMRDMA_PRIV_CHUNK_ENC_OUT * cvmrdma_ring_slot_bytes(ctxt->aead);
-
 
 		struct ibv_sge * sgl = this_wr->sg_list;
 		size_t nsge = this_wr->num_sge;
@@ -889,7 +887,8 @@ static int post_send_do_bounce(struct cvmrdma_qp * qp, struct ibv_send_wr *wrs, 
 				randombytes_buf(chunk_info->nonce, cvmrdma_aead_NPUBBYTES);
 				DEBUG("nonce %lx %lx\n", chunk_info->nonce[0], chunk_info->nonce[1]);
 			}
-			memcpy(nonce_payload, chunk_info->nonce, cvmrdma_aead_NPUBBYTES);
+
+			char * slot = cur_mr->provider_va + (chunk_idx * cvmrdma_ring_slot_bytes(ctxt->aead));
 
 			/***** NOTIFY ******/
 			TIMING("chunk_notify");
@@ -904,7 +903,7 @@ static int post_send_do_bounce(struct cvmrdma_qp * qp, struct ibv_send_wr *wrs, 
 					notif.op = this_op;
 					notif.rkey = rkey;
 					notif.imm = this_imm;
-					memcpy(notif.payload_nonce, nonce_payload, cvmrdma_aead_NPUBBYTES);
+					memcpy(notif.payload_nonce, chunk_info->nonce, cvmrdma_aead_NPUBBYTES);
 					notif.chunk_offt = offt % CVMRDMA_CHUNK_BYTES;
 					notif.chunk_len = true_payload_bytes;
 					notif.last_chunk = last_chunk;
@@ -916,7 +915,7 @@ static int post_send_do_bounce(struct cvmrdma_qp * qp, struct ibv_send_wr *wrs, 
 					notif.op = this_op;
 					notif.rkey = 0;
 					notif.imm = this_imm;
-					memcpy(notif.payload_nonce, nonce_payload, cvmrdma_aead_NPUBBYTES);
+					memcpy(notif.payload_nonce, chunk_info->nonce, cvmrdma_aead_NPUBBYTES);
 					notif.chunk_offt = offt % CVMRDMA_CHUNK_BYTES;
 					notif.chunk_len = true_payload_bytes;
 					notif.last_chunk = last_chunk;
@@ -924,7 +923,7 @@ static int post_send_do_bounce(struct cvmrdma_qp * qp, struct ibv_send_wr *wrs, 
 
 				notif_clen = header_bytes;
 				err = cvmrdma_encrypt(
-					encrypted, &notif_clen,
+					slot, &notif_clen,
 					(unsigned char const *)&notif, sizeof(notif),
 					NULL, 0,
 					0,
@@ -943,22 +942,21 @@ static int post_send_do_bounce(struct cvmrdma_qp * qp, struct ibv_send_wr *wrs, 
 
 			TIMING("gec_t0");
 			/**** ENCRYPT *****/
-			uint64_t bytes_to_copy_from_encrypted = notif_clen;
 			if(chunk_info->cached){
 				goto skip_payload_encryption;
 			}
 
 			DEBUG("ptxt %x %x %x\n", ptxt[0], ptxt[1], ptxt[2]);
-			DEBUG("nonce %lx %lx\n", nonce_payload[0], nonce_payload[1]);
+			DEBUG("nonce %lx %lx\n", chunk_info->nonce[0], chunk_info->nonce[1]);
 
 			unsigned long long payload_clen = CVMRDMA_CHUNK_BYTES;
 			err = cvmrdma_encrypt(
-				encrypted + notif_clen, /* start after the notif */
+				slot + notif_clen, /* start after the notif */
 				&payload_clen,
 				ptxt, CVMRDMA_CHUNK_BYTES,
 				NULL, 0,
 				NULL,
-				(unsigned char *)nonce_payload,
+				(unsigned char *)chunk_info->nonce,
 				(unsigned char const *)shared_key,
 				aead
 			);
@@ -968,12 +966,8 @@ static int post_send_do_bounce(struct cvmrdma_qp * qp, struct ibv_send_wr *wrs, 
 				exit(1);
 			}
 
-			bytes_to_copy_from_encrypted += payload_clen;
-
-			assert(bytes_to_copy_from_encrypted == cvmrdma_ring_slot_bytes(ctxt->aead));
-
-			DEBUG("encrypted[0] %x %x %x ...\n", encrypted[0], encrypted[1], encrypted[2]);
-			DEBUG("encrypted[notif_clen + 0] %x %x %x ...\n", encrypted[notif_clen + 0], encrypted[notif_clen + 1], encrypted[notif_clen + 2]);
+			DEBUG("slot[0] %x %x %x ...\n", slot[0], slot[1], slot[2]);
+			DEBUG("slot[notif_clen + 0] %x %x %x ...\n", slot[notif_clen + 0], slot[notif_clen + 1], slot[notif_clen + 2]);
 			DEBUG("notif_clen %llu\npayload_clen %llu\n", notif_clen, payload_clen);
 
 			// Mark chunk in userMR as write protected
@@ -992,14 +986,6 @@ static int post_send_do_bounce(struct cvmrdma_qp * qp, struct ibv_send_wr *wrs, 
 			}
 
 skip_payload_encryption:
-
-			/***** COPY ******/
-			/* Copy private bounce buffer from private memory into the shared shadow region */
-			char * slot = cur_mr->provider_va + (chunk_idx * cvmrdma_ring_slot_bytes(ctxt->aead));
-			memcpy(slot, encrypted, bytes_to_copy_from_encrypted);
-
-			DEBUG("slot %x %x %x ...\n", slot[0], slot[1], slot[2]);
-			DEBUG("bytes_to_copy_from_encrypted %llu\n", bytes_to_copy_from_encrypted);
 
 			/* Get a slot. If all the slots are full, wait for a slot to be acked */
 			int slot_id = 0;

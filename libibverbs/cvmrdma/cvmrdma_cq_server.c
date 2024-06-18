@@ -158,17 +158,13 @@ static int cq_server_loop_once(struct cvmrdma_context * ctxt)
             qp->next_recv_slot = (this_recv_slot_id + 1) % CVMRDMA_RING_ENTRIES;
 
 
-            /**** COPY *****/
-            /* Copy the header into private memory to prevent TOCTOU 
-               Based on the header, we decide where to copy the encrypted payload
-            */
-
             TIMING("cds_t0");
 
-            memcpy(private, slot, cvmrdma_header_bytes(aead));
 
             /**** DECRYPT *****/
-            /* Decrypt the notification, then the payload */
+            /* Decrypt the notification, then the payload 
+               Based on the header, we decide where to copy the encrypted payload
+            */
 
 			/* Get notif nonce */
 			uint64_t * qp_nonce = qp->rx_nonce;
@@ -181,7 +177,7 @@ static int cq_server_loop_once(struct cvmrdma_context * ctxt)
 
             struct cq_server_notification notif = {0};
 
-            unsigned char * notif_start = private;
+            unsigned char * notif_start = slot;
             unsigned long long notif_clen = header_bytes;
             if(header_bytes > wc_length)
             {
@@ -288,8 +284,6 @@ static int cq_server_loop_once(struct cvmrdma_context * ctxt)
                     exit(1);
                 }
             }
-
-
 
             unsigned long long payload_mlen = CVMRDMA_CHUNK_BYTES;
             err = cvmrdma_decrypt(
