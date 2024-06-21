@@ -313,13 +313,22 @@ static struct ibv_qp *cvmrdma_create_qp(struct ibv_pd * ibpd,
 	qp->user_qp.qp.send_cq = attr->send_cq;
 
 
-	QpRecvMetadata * recv_metadata = alloc_qp_recv_metadata();
-	if(! recv_metadata)
+	QpRecvMetadata * recv_metadata = NULL;
+	if (attr->srq)
 	{
-		fprintf(stderr, "Failed to allocated recv metadata storage.\n");
-		goto free_qp;
+		struct cvmrdma_srq * csrq = (struct cvmrdma_srq *)attr->srq;
+		assert(csrq->recv_metadata);
+		recv_metadata = csrq->recv_metadata;
+	} else {
+		recv_metadata = alloc_qp_recv_metadata();
+		if(! recv_metadata)
+		{
+			fprintf(stderr, "Failed to allocated recv metadata storage.\n");
+			goto free_qp;
+		}
+		qp->recv_metadata = recv_metadata;
 	}
-	qp->recv_metadata = recv_metadata;
+	
 	qp->cur_sge_idx = 0;
 	qp->cur_offt_in_sge = 0;
 	qp->wr_bytes_rcved = 0;
@@ -1321,6 +1330,33 @@ int cvmrdma_destroy_qp(struct ibv_qp *ibqp)
 	return 0;
 }
 
+static struct ibv_srq *cvmrdma_create_srq(struct ibv_pd *ibpd, struct ibv_srq_init_attr *attr)
+{
+	struct cvmrdma_pd * pd = (struct cvmrdma_pd *)ibpd;
+	struct ibv_context * ibctxt = pd->user_pd.context;
+	struct cvmrdma_context * ctxt = cvmrdma_get_ctx(ibctxt);
+
+	QpRecvMetadata * recv_metadata = alloc_qp_recv_metadata();
+	if(! recv_metadata)
+	{
+		fprintf(stderr, "Failed to allocated recv metadata storage for srq.\n");
+		exit(1);
+	}
+
+	struct cvmrdma_srq * srq = calloc(1, sizeof(struct cvmrdma_srq));
+	srq->user_srq.srq = (struct ibv_srq) {
+		.context = ibctxt,
+		.pd = ibpd,
+		.srq_context = attr->srq_context,
+		.handle = 0,
+	};
+	srq->recv_metadata = recv_metadata;
+
+	DEBUG("Created SRQ\n");
+
+	return &srq->user_srq.srq;
+}
+
 struct verbs_context_ops cvmrdma_ops = {
     .alloc_pd = cvmrdma_alloc_pd,
     .create_cq = cvmrdma_create_cq,
@@ -1338,7 +1374,8 @@ struct verbs_context_ops cvmrdma_ops = {
 	.query_port = cvmrdma_query_port,
     // .reg_dmabuf_mr = cvmrdma_reg_dmabuf_mr,
 	// .req_notify_cq = cvmrdma_req_notify_cq
-    .reg_mr = cvmrdma_reg_mr
+    .reg_mr = cvmrdma_reg_mr,
+	.create_srq = cvmrdma_create_srq,
 };
 
 static int find_in_array(char const ** array, size_t entries, char const * str)

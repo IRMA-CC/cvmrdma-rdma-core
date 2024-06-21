@@ -175,6 +175,12 @@ struct cvmrdma_qp {
 	bool user_sq_sig_all;
 };
 
+struct cvmrdma_srq {
+	struct verbs_srq user_srq;
+
+	QpRecvMetadata *recv_metadata;
+};
+
 struct control_metadata {
 	uint64_t ack_revc_lines;
 };
