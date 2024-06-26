@@ -465,6 +465,10 @@ err:
 
 }
 
+
+
+ClientSession *local_network_client_connection = NULL;
+
 static int cvmrdma_modify_qp(struct ibv_qp *ibqp, struct ibv_qp_attr *attr,
 		     int attr_mask)
 {
@@ -496,6 +500,7 @@ static int cvmrdma_modify_qp(struct ibv_qp *ibqp, struct ibv_qp_attr *attr,
 
 		assert(attr_mask & IBV_QP_PORT);
 		uint8_t myport = attr->port_num;
+		DEBUG("control QP to INIT on port %d\n", myport);
 
 		int qp_attr_mask = IBV_QP_STATE | IBV_QP_PKEY_INDEX | IBV_QP_PORT;
 		struct ibv_qp_attr control_qp_attrs = {
@@ -521,11 +526,32 @@ static int cvmrdma_modify_qp(struct ibv_qp *ibqp, struct ibv_qp_attr *attr,
 	if((attr_mask & IBV_QP_STATE) && (attr->qp_state == IBV_QPS_RTR))
 	{
 
+		struct ibv_port_attr port_attr = {0};
+		ret = ctxt->prov_ops.query_port(qp->user_qp.qp.context, /* port num */ 1, &port_attr);
+		DEBUG("[MODIFY_QP] lid %d\n", port_attr.lid);
+		DEBUG("[MODIFY_QP] attr->ah_attr.dlid %d\n", attr->ah_attr.dlid);
+		assert(ret == 0);
+		DEBUG("[MODIFY_QP] attr->dest_qp_num 0x%" PRIx32 "\n", attr->dest_qp_num);
+
 		/* Start by connecting to the server if not already connected */
-		if(! ctxt->network_client_connection)
-		{
+		if(! ctxt->network_client_connection && (port_attr.lid != attr->ah_attr.dlid)) {
+			DEBUG("[MODIFY_QP] Connecting to the remote server on address %s\n", ctxt->remote_addr);
 			ctxt->network_client_connection = new_client_rpc_session(ctxt->network_evloop, ctxt->remote_addr);
 			ctxt->network_client_cap = get_cvmrdma_client(ctxt->network_evloop, ctxt->network_client_connection);
+		} else if (! ctxt->network_client_connection && (port_attr.lid == attr->ah_attr.dlid)) {
+			DEBUG("[MODIFY_QP] Connecting to the local server on address %s\n", ctxt->local_addr);
+			if(local_network_client_connection != NULL) {
+				DEBUG("[MODIFY_QP] Reuse local connection\n");
+				ctxt->network_client_connection = local_network_client_connection;
+			} else {
+				DEBUG("[MODIFY_QP] Create new local connection\n");
+				ctxt->network_client_connection = new_client_rpc_session(ctxt->network_evloop, ctxt->local_addr);
+				local_network_client_connection = ctxt->network_client_connection;
+			}
+			DEBUG("[MODIFY_QP] Got client connection\n");
+			ctxt->network_client_cap = get_cvmrdma_client(ctxt->network_evloop, ctxt->network_client_connection);
+		} else {
+			DEBUG("[MODIFY_QP] Already connected to the server\n");
 		}
 
 
@@ -544,9 +570,11 @@ static int cvmrdma_modify_qp(struct ibv_qp *ibqp, struct ibv_qp_attr *attr,
 					ctxt->network_evloop, ctxt->network_client_cap, dest_qpn 
 				);
 
+				DEBUG("[MODIFY_QP] pre set remote params\n");
+
 				/* Blocking: set the tx_key and the qp's ring rkey. Block because recv cannot proceed until
 				   remote has our rkey */
-				   set_remote_params(ctxt->network_evloop, qp->remote_qnc, qp->tx_key, qp->ringbuf_mr->rkey, qp->control_buf_mr->rkey);
+				set_remote_params(ctxt->network_evloop, qp->remote_qnc, qp->tx_key, qp->ringbuf_mr->rkey, qp->control_buf_mr->rkey);
 				break;
 			}
 			default: {
@@ -571,13 +599,19 @@ static int cvmrdma_modify_qp(struct ibv_qp *ibqp, struct ibv_qp_attr *attr,
 
 		/* Before we can receive anything, we need to wait for the remote to send us its rx key.
 			Note that it also sets the ring_rkey, needed later for send */
-		DEBUG("INIT->RECV: wait for rx key...\n");
-		pthread_mutex_lock(&qp->remote_params_lock);
-		while(! qp->remote_params_set)
+		const bool skip_wait_for_remote_params = true;
+		if (!skip_wait_for_remote_params)
 		{
-			pthread_cond_wait(&qp->remote_params_set_cv, &qp->remote_params_lock);
+			DEBUG("MODIFY->RTR: wait for rx key...\n");
+			pthread_mutex_lock(&qp->remote_params_lock);
+			while(! qp->remote_params_set)
+			{
+				pthread_cond_wait(&qp->remote_params_set_cv, &qp->remote_params_lock);
+			}
+			pthread_mutex_unlock(&qp->remote_params_lock);
+		} else {
+			DEBUG("MODIFY->RTR: skip wait for rx key\n");
 		}
-		pthread_mutex_unlock(&qp->remote_params_lock);
 
 
 		/*
@@ -1246,7 +1280,7 @@ static struct ibv_mr *cvmrdma_reg_mr(struct ibv_pd *ibpd, void *addr, size_t len
         //.mode = UFFDIO_REGISTER_MODE_WP,
     };
     if (ioctl(uffd, UFFDIO_REGISTER, &uffdio_register) == -1) {
-		fprintf(stderr, "Failed to ioctl-UFFDIO_REGISTER %d\n", errno);
+		fprintf(stderr, "Failed to ioctl-UFFDIO_REGISTER %d with addr %p and len %lu\n", errno, addr, length);
 		exit(1);
 	}
 
@@ -1357,6 +1391,46 @@ static struct ibv_srq *cvmrdma_create_srq(struct ibv_pd *ibpd, struct ibv_srq_in
 	return &srq->user_srq.srq;
 }
 
+static int cvmrdma_req_notify_cq(struct ibv_cq *ibcq, int solicited_only)
+{
+	return 0;
+}
+
+static void cvmrdma_cq_event(struct ibv_cq *ibcq)
+{
+	/* Nothing to do */
+	return;
+}
+
+static int cvmrdma_query_qp(struct ibv_qp *ibqp, struct ibv_qp_attr *attr,
+		int attr_mask, struct ibv_qp_init_attr *init_attr)
+{
+	// Note that we might want to fake certain capabilieties
+	// Since e.g. imm is not used directly but rather emulated
+	struct cvmrdma_qp * qp = (struct cvmrdma_qp *)ibqp;
+	struct cvmrdma_context * ctxt = cvmrdma_get_ctx(qp->user_qp.qp.context);
+	int ret = ctxt->prov_ops.query_qp(qp->provider_qp, attr, attr_mask, init_attr);
+	assert(ret == 0);
+	return ret;
+}
+
+static int cvmrdma_post_srq_recv(struct ibv_srq *srq, struct ibv_recv_wr *recv_wr,
+			     struct ibv_recv_wr **bad_recv_wr)
+{
+	/*
+	  	No SEND happens directly with CVMRDMA: they are emulated over WRITE_WITH_IMMs.
+		Record the location of the post_recv to know where to copy the incoming payload later.
+	*/
+	struct cvmrdma_srq * csrq = (struct cvmrdma_srq *)srq;
+
+	for(struct ibv_recv_wr * this_wr = recv_wr ; this_wr != NULL ; this_wr = this_wr->next)
+	{
+		qp_recv_metadata_push(csrq->recv_metadata, this_wr->wr_id, this_wr->sg_list, this_wr->num_sge);
+	}
+
+	return 0;
+}
+
 struct verbs_context_ops cvmrdma_ops = {
     .alloc_pd = cvmrdma_alloc_pd,
     .create_cq = cvmrdma_create_cq,
@@ -1373,9 +1447,12 @@ struct verbs_context_ops cvmrdma_ops = {
 	.query_device_ex = cvmrdma_query_device_ex,
 	.query_port = cvmrdma_query_port,
     // .reg_dmabuf_mr = cvmrdma_reg_dmabuf_mr,
-	// .req_notify_cq = cvmrdma_req_notify_cq
+	.req_notify_cq = cvmrdma_req_notify_cq,
     .reg_mr = cvmrdma_reg_mr,
 	.create_srq = cvmrdma_create_srq,
+	.cq_event = cvmrdma_cq_event,
+	.query_qp = cvmrdma_query_qp,
+	.post_srq_recv = cvmrdma_post_srq_recv,
 };
 
 static int find_in_array(char const ** array, size_t entries, char const * str)
@@ -1391,6 +1468,8 @@ static int find_in_array(char const ** array, size_t entries, char const * str)
 }
 
 _Atomic bool tcp_server_running = false;
+CapnpEvloopThread * evloop_server = NULL;
+CVMRDMAServer * tcp_server = NULL;
 
 static struct verbs_context *cvmrdma_alloc_context(struct ibv_device *ibdev,
 						  int cmd_fd,
@@ -1474,9 +1553,28 @@ static struct verbs_context *cvmrdma_alloc_context(struct ibv_device *ibdev,
 		DEBUG("Start IP based server on %s\n", local_bind_addr);
 		/* Start a new thread with a capnp event loop running the RPC server */
 		cvmrdma_ctx->network_evloop = create_capnp_event_loop(local_bind_addr, &cvmrdma_ctx->network_server);
+		
+		
+		// wait for server to be up
+		DEBUG("Waiting for server to be up\n");
+		while(!cvmrdma_ctx->network_server)
+		{
+			usleep(1000);
+		}
+		evloop_server = cvmrdma_ctx->network_evloop;
+		tcp_server = cvmrdma_ctx->network_server;
+		DEBUG("Server started on %s\n", local_bind_addr);
+		assert(evloop_server != NULL);
+		assert(tcp_server != NULL);
 	} else {
 		DEBUG("Server already running on %s\n", local_bind_addr);
+		assert(evloop_server != NULL);
+		assert(tcp_server != NULL);
+		cvmrdma_ctx->network_evloop = evloop_server;
+		cvmrdma_ctx->network_server = tcp_server;
 	}
+	cvmrdma_ctx->local_addr = calloc(1, 20);
+	sprintf(cvmrdma_ctx->local_addr, "127.0.0.1:%s", local_bind_addr + 2);	
 	
 
 	/* Open a session to the remote using the same event loop */

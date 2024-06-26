@@ -35,6 +35,7 @@ struct cvmrdma_context {
 	ClientSession *network_client_connection;
 	CVMRDMAClient *network_client_cap;
 
+	char const *local_addr;
 	char const *remote_addr;
 
 	/* dma heap to allocate the public buffers on */

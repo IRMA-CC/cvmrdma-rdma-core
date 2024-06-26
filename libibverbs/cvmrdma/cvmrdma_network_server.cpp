@@ -67,7 +67,7 @@ m_remote_params_set_cv_ptr{remote_params_set_cv_ptr}
 
 kj::Promise<void> QpNotificationChannel::notifyChunkRecv(NotifyChunkRecvContext context)
 {
-    TIMING("chunk_acked");
+    TIMING("[NS] chunk_acked");
     pthread_mutex_lock(m_send_lines_lock_ptr);
     (*m_send_lines_full_ptr) = (*m_send_lines_full_ptr) - 1;
     pthread_mutex_unlock(m_send_lines_lock_ptr);
@@ -92,6 +92,10 @@ kj::Promise<void> QpNotificationChannel::setRemoteParams(SetRemoteParamsContext 
     };
     uint32_t remote_ring_rkey = p.getLocalRingRkey();
     uint32_t remote_control_rkey = p.getLocalControlRkey();
+
+    DEBUG("[NS] setRemoteParams: rx_key: 0x%" PRIx64 " 0x%" PRIx64 " 0x%" PRIx64 " 0x%" PRIx64 ", ring_rkey: 0x%" PRIx32 ", control_rkey: 0x%" PRIx32 "\n",
+        rx_key[0], rx_key[1], rx_key[2], rx_key[3], remote_ring_rkey, remote_control_rkey);
+
     this->set_qp_remote_params(rx_key, remote_ring_rkey, remote_control_rkey);
 
     return kj::READY_NOW;
@@ -105,7 +109,7 @@ kj::Promise<void> CVMRDMAServer::registerQpWithRemoteQp(RegisterQpWithRemoteQpCo
 
     /* "remote" for the client is local on the server */
     uint32_t local_qpn = p.getRemoteQpn();
-    DEBUG("server:getQpChannelForQpn 0x%" PRIx32 "\n", local_qpn);
+    DEBUG("[NS] server:getQpChannelForQpn 0x%" PRIx32 "\n", local_qpn);
 
     /* get a QP notification channel client. Create a new copy s.t. the server does
         not get destroyed on disconnects */
@@ -132,7 +136,7 @@ void CVMRDMAServer::qp_notification_channel_create(
 {
     auto qnc_server = kj::heap<QpNotificationChannel>(local_qpn, send_lines_full_ptr, send_lines_lock_ptr, send_lines_avail_ptr,
         rx_key_ptr, remote_ring_rkey_ptr, remote_control_rkey_ptr, remote_params_set_ptr, remote_params_lock_ptr, remote_params_set_cv_ptr);
-    DEBUG("Register fresh notification channel for qpn 0x%" PRIx32 "\n", local_qpn);
+    DEBUG("[NS] Register fresh notification channel for qpn 0x%" PRIx32 "\n", local_qpn);
 
     auto qnc_client = qnc_capset.add(std::move(qnc_server));
 
@@ -168,6 +172,7 @@ void cvmrdma_server_register_qp(CVMRDMAServer * cs,
     pthread_cond_t * remote_params_set_cv_ptr
 )
 {
+    assert(cs != nullptr);
     cs->qp_notification_channel_create(local_qpn, send_lines_full_ptr, send_lines_lock_ptr, send_lines_avail_ptr,
         rx_key_ptr, remote_ring_rkey_ptr, remote_control_rkey_ptr, remote_params_set_ptr, remote_params_lock_ptr, remote_params_set_cv_ptr);
 }

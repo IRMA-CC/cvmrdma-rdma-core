@@ -59,9 +59,7 @@ void capnp_server_loop(std::stop_token stoken,
     DEBUG("WARN: capnp server event loop exits!\n");
 }
 
-/* The capnp thread starts the CVMRDMA server and returns its executor
-   so that the main thread can call functions on this thread. In particular;
-   this allows the main thread to create new client sessions on this thread. */
+
 void capnp_client_loop(std::stop_token stoken,
     char const * remote_addr,
     kj::Executor const ** client_evloop_executor,
@@ -70,8 +68,10 @@ void capnp_client_loop(std::stop_token stoken,
     ClientSession ** client_session
     )
 {
-
+    assert(strlen(remote_addr) > 0);
+    DEBUG("[NE] Starting capnp client on %s\n", remote_addr);
     auto client = capnp::EzRpcClient{remote_addr}; 
+    DEBUG("[NE] Started capnp client on %s\n", remote_addr);
 
     /* get executor AFTER client */
     auto & this_executor = kj::getCurrentThreadExecutor();
@@ -90,6 +90,8 @@ void capnp_client_loop(std::stop_token stoken,
         }
     );
 
+    DEBUG("[NE] Mid capnp client event loop\n");
+
     auto tk_handler = TrivialHandler{};
     auto tk = kj::TaskSet{tk_handler};
 
@@ -101,6 +103,8 @@ void capnp_client_loop(std::stop_token stoken,
         *client_session = &client;
     }
     executor_cv->notify_one();
+
+    DEBUG("[NE] Waiting for stop\n");
 
     stop_paf.promise.wait(client.getWaitScope());
     DEBUG("WARN: capnp client event loop exits!\n");
@@ -120,8 +124,10 @@ public:
     ClientSession * start_client(char const * remote_addr)
     {
         ClientSession * session = nullptr;
+        DEBUG("[NE] Starting client with remote addr %s\n", remote_addr);
         m_client_thread = std::jthread{capnp_client_loop, remote_addr, &m_executor, &m_taskset, &m_executor_set_cv, &m_executor_lock, &session};
 
+        DEBUG("[NE] Waiting for executor to be set\n");
         /* Wait until thread sets executor */
         {
             auto locked = std::unique_lock{m_executor_lock};
@@ -130,6 +136,8 @@ public:
                 m_executor_set_cv.wait(locked);
             }
         }
+
+        DEBUG("[NE] Executor set\n");
 
         return session;
     }

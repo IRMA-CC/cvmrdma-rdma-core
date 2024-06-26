@@ -47,7 +47,7 @@ public:
 
     void set_qp_remote_params(uint64_t const * rx_key, uint32_t ring_rkey, uint32_t control_rkey)
     {
-        DEBUG("setting rx_key and ring rkey %" PRIx32 " and control rkey %" PRIx32 " on QNC for local QPN %" PRIx32 "\n", ring_rkey, control_rkey, m_qpn);
+        DEBUG("[NS] setting rx_key and ring rkey %" PRIx32 " and control rkey %" PRIx32 " on QNC for local QPN 0x%" PRIx32 "\n", ring_rkey, control_rkey, m_qpn);
 
         pthread_mutex_lock(m_remote_params_lock_ptr);
         memcpy(m_rx_key_ptr, rx_key, cvmrdma_aead_KEYBYTES);

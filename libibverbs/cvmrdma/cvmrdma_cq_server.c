@@ -144,6 +144,9 @@ static int cq_server_loop_once(struct cvmrdma_context * ctxt)
 
             DEBUG("before chunk: rcved 0x%zx bytes of WR\n", qp->wr_bytes_rcved);
 
+            assert(qp->remote_params_set);
+            assert(qp->rx_key[0] || qp->rx_key[1] || qp->rx_key[2] || qp->rx_key[3]);
+            assert(qp->rx_nonce[0] || qp->rx_nonce[1] || qp->rx_nonce[2] || qp->rx_nonce[3]);
             uint64_t const * rx_key = qp->rx_key;
             uint64_t const * shared_key = qp->shared_key;
 
@@ -217,6 +220,7 @@ static int cq_server_loop_once(struct cvmrdma_context * ctxt)
                 uint64_t hca_addr = notif.hca_addr;
 
                 cur_mr = get_bounce_metadata_for_rkey(pd->bounce_metadata, rkey);
+                assert(cur_mr);
 
                 offt = hca_addr - cur_mr->hca_va;
                 dest = (unsigned char *)cur_mr->user_mr.ibv_mr.addr + offt;
@@ -235,6 +239,8 @@ static int cq_server_loop_once(struct cvmrdma_context * ctxt)
                 struct ibv_sge * rcv_sgl = recv_info->sgl;
                 struct ibv_sge * cur_sge = &rcv_sgl[qp->cur_sge_idx];
 
+                cur_mr = get_bounce_metadata_for_lkey(pd->bounce_metadata, cur_sge->lkey);
+                assert(cur_mr);
 
                 if(notif.chunk_len == CVMRDMA_CHUNK_BYTES 
                     && qp->cur_offt_in_sge + notif.chunk_len <= cur_sge->length)
@@ -250,8 +256,9 @@ static int cq_server_loop_once(struct cvmrdma_context * ctxt)
 
             unsigned long long payload_clen = wc_length - header_bytes;
 
-            DEBUG("notif.payload_nonce %lx %lx\n", notif.payload_nonce[0], notif.payload_nonce[1]);
-            DEBUG("clen %llu\n", payload_clen);
+            DEBUG("[CQ] notif.payload_nonce %lx %lx\n", notif.payload_nonce[0], notif.payload_nonce[1]);
+            DEBUG("[CQ] notif.chunk_offt 0x%"PRIx64" and notif.chunk_len %zu\n", notif.chunk_offt, notif.chunk_len);
+            DEBUG("[CQ] clen %llu\n", payload_clen);
 
             size_t chunk_idx = offt / CVMRDMA_CHUNK_BYTES;
             char * payload_start = NULL;
@@ -301,7 +308,7 @@ static int cq_server_loop_once(struct cvmrdma_context * ctxt)
                 exit(1);
             }
 
-            DEBUG("decrypted %x %x %x\n", decrypted[0], decrypted[1], decrypted[2]);
+            DEBUG("[CQ] decrypted %x %x %x\n", decrypted[0], decrypted[1], decrypted[2]);
 
             /*** SCATTER ****/
             /* Scatter the plaintext to user memory. If the op is a WRITE, the remote has set the destination address,
@@ -311,7 +318,7 @@ static int cq_server_loop_once(struct cvmrdma_context * ctxt)
             if(! bypass_scatter)
             {
                 if (is_write){
-                    DEBUG("writing with notif.chunk_offt 0x%"PRIx64" and notif.chunk_len %zu\n", notif.chunk_offt, notif.chunk_len);
+                    DEBUG("[CQ] WRITE: writing with notif.chunk_offt 0x%"PRIx64" and notif.chunk_len %zu\n", notif.chunk_offt, notif.chunk_len);
                     memcpy(dest, decrypted + notif.chunk_offt, notif.chunk_len);
                 } else {
                     /* The operation is a SEND: use the next chunk on the current recv request */
@@ -323,23 +330,28 @@ static int cq_server_loop_once(struct cvmrdma_context * ctxt)
 
                     while((bytes_copied < notif.chunk_len) && (qp->cur_sge_idx < rcv_nsge))
                     {
+                        DEBUG("[CQ] SEND: copying %zu bytes\n", notif.chunk_len - bytes_copied);
                         struct ibv_sge * cur_sge = &rcv_sgl[qp->cur_sge_idx];
+                        assert(cur_mr);
                         unsigned char * mr_addr = cur_mr->user_mr.ibv_mr.addr;
 
 
                         size_t remaining = notif.chunk_len - bytes_copied;
+                        assert(cur_sge);
                         size_t available = cur_sge->length - qp->cur_offt_in_sge;
 
                         uint64_t offt = (cur_sge->addr - cur_mr->hca_va) + qp->cur_offt_in_sge;
 
                         if(remaining < available)
                         {
+                            DEBUG("[CQ] SEND: copying %zu bytes from notif.chunk_offt %zu to offt %zu\n", remaining, notif.chunk_offt + bytes_copied, offt);
                             memcpy(mr_addr + offt, decrypted + notif.chunk_offt + bytes_copied, remaining);
                             bytes_copied += remaining;
                             qp->cur_offt_in_sge += remaining;
                         }
                         else
                         {
+                            DEBUG("[CQ] SEND: copying %zu bytes from notif.chunk_offt %zu to offt %zu\n", available, notif.chunk_offt + bytes_copied, offt);
                             memcpy(mr_addr + offt, decrypted + notif.chunk_offt + bytes_copied, available);
                             bytes_copied += available;
                             
