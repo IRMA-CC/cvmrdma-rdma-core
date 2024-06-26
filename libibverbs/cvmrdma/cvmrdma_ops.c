@@ -1390,6 +1390,8 @@ static int find_in_array(char const ** array, size_t entries, char const * str)
 	return -1;
 }
 
+_Atomic bool tcp_server_running = false;
+
 static struct verbs_context *cvmrdma_alloc_context(struct ibv_device *ibdev,
 						  int cmd_fd,
 						  void *private_data)
@@ -1465,10 +1467,16 @@ static struct verbs_context *cvmrdma_alloc_context(struct ibv_device *ibdev,
 	verbs_set_ops(prov_verbs_context, &cvmrdma_ops);
 
 
-
-	DEBUG("Start IP based server on %s\n", local_bind_addr);
-	/* Start a new thread with a capnp event loop running the RPC server */
-	cvmrdma_ctx->network_evloop = create_capnp_event_loop(local_bind_addr, &cvmrdma_ctx->network_server);
+	bool expected = false;
+	bool first = atomic_compare_exchange_strong(&tcp_server_running, &expected, true);
+	if(first)
+	{
+		DEBUG("Start IP based server on %s\n", local_bind_addr);
+		/* Start a new thread with a capnp event loop running the RPC server */
+		cvmrdma_ctx->network_evloop = create_capnp_event_loop(local_bind_addr, &cvmrdma_ctx->network_server);
+	} else {
+		DEBUG("Server already running on %s\n", local_bind_addr);
+	}
 	
 
 	/* Open a session to the remote using the same event loop */
