@@ -32,8 +32,15 @@ struct cvmrdma_context {
     */
 	CapnpEvloopThread *network_evloop;
 	CVMRDMAServer *network_server;
-	ClientSession *network_client_connection;
-	CVMRDMAClient *network_client_cap;
+
+	ClientSession *local_network_client_connection;
+	CVMRDMAClient *local_network_client_cap;
+	ClientSession *remote_network_client_connection;
+	CVMRDMAClient *remote_network_client_cap;
+
+	struct ibv_comp_channel *provider_comp_channel;
+	pthread_t provider_comp_channel_thread;
+
 
 	char const *local_addr;
 	char const *remote_addr;
@@ -82,6 +89,13 @@ struct cvmrdma_cq {
        this CQ only gets notification through the WCQueue */
 
 	WCQueue *wc_queue;
+
+	/* Mock for https://www.rdmamojo.com/2012/10/19/ibv_create_comp_channel/ via 
+	   https://man7.org/linux/man-pages/man2/eventfd.2.html
+	   Created in ibv_create_comp_channel()
+	*/
+	int comp_channel_event_fd;
+	_Atomic bool comp_channel_event_fd_filled;
 };
 
 struct cvmrdma_qp {

@@ -93,6 +93,11 @@ static struct ibv_cq *cvmrdma_create_cq(struct ibv_context *ibcontext, int cqe,
 
 	cq->wc_queue = alloc_wc_queue();
 
+	if(channel) {
+		assert(channel->fd >= 0);
+		cq->comp_channel_event_fd = channel->fd;
+	}
+
 	return &cq->user_cq.cq;
 }
 
@@ -264,7 +269,7 @@ static struct ibv_qp *cvmrdma_create_qp(struct ibv_pd * ibpd,
 	qp->provider_qp = ibqp;
 
 	/* Create the control Completion Queue */
-	struct ibv_cq * control_ibcq = ctxt->prov_ops.create_cq(prov_ctxt, 65536, NULL, 0);
+	struct ibv_cq * control_ibcq = ctxt->prov_ops.create_cq(prov_ctxt, 65536, ctxt->provider_comp_channel, 0);
 	if(! control_ibcq)
 	{
 		fprintf(stderr, "failed to create backend CQ for the control CQ\n");
@@ -273,6 +278,8 @@ static struct ibv_qp *cvmrdma_create_qp(struct ibv_pd * ibpd,
 	/* see ibv_create_cq */
 	verbs_init_cq(control_ibcq, prov_ctxt, NULL, NULL);
 	qp->control_cq = control_ibcq;
+
+	
 
 
 	/* Create the control Queue Pair */
@@ -326,8 +333,8 @@ static struct ibv_qp *cvmrdma_create_qp(struct ibv_pd * ibpd,
 			fprintf(stderr, "Failed to allocated recv metadata storage.\n");
 			goto free_qp;
 		}
-		qp->recv_metadata = recv_metadata;
 	}
+	qp->recv_metadata = recv_metadata;
 	
 	qp->cur_sge_idx = 0;
 	qp->cur_offt_in_sge = 0;
@@ -468,6 +475,7 @@ err:
 
 
 ClientSession *local_network_client_connection = NULL;
+ClientSession *remote_network_client_connection = NULL;
 
 static int cvmrdma_modify_qp(struct ibv_qp *ibqp, struct ibv_qp_attr *attr,
 		     int attr_mask)
@@ -530,26 +538,27 @@ static int cvmrdma_modify_qp(struct ibv_qp *ibqp, struct ibv_qp_attr *attr,
 		ret = ctxt->prov_ops.query_port(qp->user_qp.qp.context, /* port num */ 1, &port_attr);
 		DEBUG("[MODIFY_QP] lid %d\n", port_attr.lid);
 		DEBUG("[MODIFY_QP] attr->ah_attr.dlid %d\n", attr->ah_attr.dlid);
+		bool is_local = (port_attr.lid == attr->ah_attr.dlid);
 		assert(ret == 0);
 		DEBUG("[MODIFY_QP] attr->dest_qp_num 0x%" PRIx32 "\n", attr->dest_qp_num);
 
 		/* Start by connecting to the server if not already connected */
-		if(! ctxt->network_client_connection && (port_attr.lid != attr->ah_attr.dlid)) {
+		if(! ctxt->remote_network_client_connection && !is_local) {
 			DEBUG("[MODIFY_QP] Connecting to the remote server on address %s\n", ctxt->remote_addr);
-			ctxt->network_client_connection = new_client_rpc_session(ctxt->network_evloop, ctxt->remote_addr);
-			ctxt->network_client_cap = get_cvmrdma_client(ctxt->network_evloop, ctxt->network_client_connection);
-		} else if (! ctxt->network_client_connection && (port_attr.lid == attr->ah_attr.dlid)) {
+			ctxt->remote_network_client_connection = new_client_rpc_session(ctxt->network_evloop, ctxt->remote_addr);
+			ctxt->remote_network_client_cap = get_cvmrdma_client(ctxt->network_evloop, ctxt->remote_network_client_connection);
+		} else if (! ctxt->local_network_client_connection && is_local) {
 			DEBUG("[MODIFY_QP] Connecting to the local server on address %s\n", ctxt->local_addr);
 			if(local_network_client_connection != NULL) {
 				DEBUG("[MODIFY_QP] Reuse local connection\n");
-				ctxt->network_client_connection = local_network_client_connection;
+				ctxt->local_network_client_connection = local_network_client_connection;
 			} else {
 				DEBUG("[MODIFY_QP] Create new local connection\n");
-				ctxt->network_client_connection = new_client_rpc_session(ctxt->network_evloop, ctxt->local_addr);
-				local_network_client_connection = ctxt->network_client_connection;
+				ctxt->local_network_client_connection = new_client_rpc_session(ctxt->network_evloop, ctxt->local_addr);
+				local_network_client_connection = ctxt->local_network_client_connection;
 			}
 			DEBUG("[MODIFY_QP] Got client connection\n");
-			ctxt->network_client_cap = get_cvmrdma_client(ctxt->network_evloop, ctxt->network_client_connection);
+			ctxt->local_network_client_cap = get_cvmrdma_client(ctxt->network_evloop, ctxt->local_network_client_connection);
 		} else {
 			DEBUG("[MODIFY_QP] Already connected to the server\n");
 		}
@@ -566,9 +575,15 @@ static int cvmrdma_modify_qp(struct ibv_qp *ibqp, struct ibv_qp_attr *attr,
 
 				/* Get the qp notifier capability from the remote over the network and share the Tx key with the remote.
 				    */
-				qp->remote_qnc = get_qp_notification_client(
-					ctxt->network_evloop, ctxt->network_client_cap, dest_qpn 
-				);
+				if(is_local) {
+					qp->remote_qnc = get_qp_notification_client(
+						ctxt->network_evloop, ctxt->local_network_client_cap, dest_qpn 
+					);
+				} else {
+					qp->remote_qnc = get_qp_notification_client(
+						ctxt->network_evloop, ctxt->remote_network_client_cap, dest_qpn 
+					);
+				}
 
 				DEBUG("[MODIFY_QP] pre set remote params\n");
 
@@ -599,7 +614,7 @@ static int cvmrdma_modify_qp(struct ibv_qp *ibqp, struct ibv_qp_attr *attr,
 
 		/* Before we can receive anything, we need to wait for the remote to send us its rx key.
 			Note that it also sets the ring_rkey, needed later for send */
-		const bool skip_wait_for_remote_params = true;
+		const bool skip_wait_for_remote_params = true; //(port_attr.lid == attr->ah_attr.dlid);
 		if (!skip_wait_for_remote_params)
 		{
 			DEBUG("MODIFY->RTR: wait for rx key...\n");
@@ -864,11 +879,13 @@ static int post_send_do_bounce(struct cvmrdma_qp * qp, struct ibv_send_wr *wrs, 
 			size_t sge_chunks = DIVIDE_ROUND_UP(sgl[i].length + ((sgl[i].addr- cur_mr->hca_va) % CVMRDMA_CHUNK_BYTES), CVMRDMA_CHUNK_BYTES);
 			total_chunks += sge_chunks;
 		}
+
+		bool send_signaled = this_wr->send_flags & IBV_SEND_SIGNALED;
 		/* XXX: pass the number of chunks to the CQ_server to know when to emit a send WC for user. Do it 
 		   BEFORE we start sending, so that CQ server has this informatin when WCs start to arrive
 		   This means that each chunk has to send EXACTLY payload_bytes, even if the tag ends up
 		   being shorter (bc of the AEAD choice) */
-		qp_send_metadata_push(qp->send_metadata, this_wr->wr_id, total_bytes, total_chunks, write_for_read);
+		qp_send_metadata_push(qp->send_metadata, this_wr->wr_id, total_bytes, total_chunks, write_for_read, send_signaled);
 
 		while(cur_sge_idx < nsge)
 		{
@@ -885,11 +902,18 @@ static int post_send_do_bounce(struct cvmrdma_qp * qp, struct ibv_send_wr *wrs, 
 			bool last_chunk = chunks_in_wr + 1 == chunks_num;
 
 			DEBUG("chunks_in_wr %lu\n", chunks_in_wr);
-			DEBUG("cur_sge->length %lx\n", cur_sge->length);
-			DEBUG("offt %lx\n", offt);
+			DEBUG("cur_sge->length 0x%lx\n", cur_sge->length);
+			DEBUG("offt 0x%lx\n", offt);
 			DEBUG("last_chunk %d\n", last_chunk);
 			DEBUG("chunks_num %lu\n", chunks_num);
 			DEBUG("total_chunks %lu\n", total_chunks);
+			DEBUG("want to send data: %x %x %x %x %x %x %x %x %x %x %x %x %x %x %x %x %x %x\n", 
+				((unsigned char *)cur_sge->addr)[0], ((unsigned char *)cur_sge->addr)[1], ((unsigned char *)cur_sge->addr)[2], ((unsigned char *)cur_sge->addr)[3],
+				((unsigned char *)cur_sge->addr)[4], ((unsigned char *)cur_sge->addr)[5], ((unsigned char *)cur_sge->addr)[6], ((unsigned char *)cur_sge->addr)[7],
+				((unsigned char *)cur_sge->addr)[8], ((unsigned char *)cur_sge->addr)[9], ((unsigned char *)cur_sge->addr)[10], ((unsigned char *)cur_sge->addr)[11],
+				((unsigned char *)cur_sge->addr)[12], ((unsigned char *)cur_sge->addr)[13], ((unsigned char *)cur_sge->addr)[14], ((unsigned char *)cur_sge->addr)[15],
+				((unsigned char *)cur_sge->addr)[16], ((unsigned char *)cur_sge->addr)[17]
+			);
 
 
 			/* Prepare the two nonces: for notif and for payload */
@@ -986,7 +1010,23 @@ static int post_send_do_bounce(struct cvmrdma_qp * qp, struct ibv_send_wr *wrs, 
 			TIMING("gec_t0");
 			/**** ENCRYPT *****/
 			if(chunk_info->cached){
+				DEBUG("Chunk %lu is cached\n", chunk_idx);
 				goto skip_payload_encryption;
+			}
+
+			// Mark chunk in userMR as write protected
+			atomic_store(&chunk_info->cached, true);
+			int uffd = cur_mr->uffd;
+			struct uffdio_writeprotect uffdio_wp = {
+				.range = {
+					.start = (unsigned long) ptxt,
+					.len = CVMRDMA_CHUNK_BYTES,
+				},
+				.mode = UFFDIO_WRITEPROTECT_MODE_WP,
+			};
+			if (ioctl(uffd, UFFDIO_WRITEPROTECT, &uffdio_wp) == -1) {
+				fprintf(stderr, "Failed to write protect the memory region; addr %p, len %lu, err: %d\n", ptxt, DIVIDE_ROUND_UP(true_payload_bytes, PAGE_SIZE) * PAGE_SIZE, errno);
+				exit(1);
 			}
 
 			DEBUG("ptxt %x %x %x\n", ptxt[0], ptxt[1], ptxt[2]);
@@ -1012,21 +1052,6 @@ static int post_send_do_bounce(struct cvmrdma_qp * qp, struct ibv_send_wr *wrs, 
 			DEBUG("slot[0] %x %x %x ...\n", slot[0], slot[1], slot[2]);
 			DEBUG("slot[notif_clen + 0] %x %x %x ...\n", slot[notif_clen + 0], slot[notif_clen + 1], slot[notif_clen + 2]);
 			DEBUG("notif_clen %llu\npayload_clen %llu\n", notif_clen, payload_clen);
-
-			// Mark chunk in userMR as write protected
-			atomic_store(&chunk_info->cached, true);
-			int uffd = cur_mr->uffd;
-			struct uffdio_writeprotect uffdio_wp = {
-				.range = {
-					.start = (unsigned long) ptxt,
-					.len = DIVIDE_ROUND_UP(true_payload_bytes, PAGE_SIZE) * PAGE_SIZE,
-				},
-				.mode = UFFDIO_WRITEPROTECT_MODE_WP,
-			};
-			if (ioctl(uffd, UFFDIO_WRITEPROTECT, &uffdio_wp) == -1) {
-				fprintf(stderr, "Failed to write protect the memory region; addr %p, len %lu, err: %d\n", ptxt, DIVIDE_ROUND_UP(true_payload_bytes, PAGE_SIZE) * PAGE_SIZE, errno);
-				exit(1);
-			}
 
 skip_payload_encryption:
 
@@ -1063,6 +1088,15 @@ skip_payload_encryption:
 			*/
 			uint32_t local_provider_lkey = cur_mr->provider_mr->lkey;
 			uint32_t remote_ring_rkey = qp->remote_ring_rkey;
+
+			uint64_t helper_offt = (offt%CVMRDMA_CHUNK_BYTES)+header_bytes;
+			DEBUG("writing encrypted %x %x %x %x %x %x %x %x %x %x %x %x %x %x %x %x %x %x\n", 
+				slot[0+helper_offt], slot[1+helper_offt], slot[2+helper_offt], slot[3+helper_offt],
+				slot[4+helper_offt], slot[5+helper_offt], slot[6+helper_offt], slot[7+helper_offt],
+				slot[8+helper_offt], slot[9+helper_offt], slot[10+helper_offt], slot[11+helper_offt],
+				slot[12+helper_offt], slot[13+helper_offt], slot[14+helper_offt], slot[15+helper_offt],
+				slot[16+helper_offt], slot[17+helper_offt]
+			);
 
 
 			ibv_wr_start(prov_qpx);
@@ -1398,7 +1432,10 @@ static int cvmrdma_req_notify_cq(struct ibv_cq *ibcq, int solicited_only)
 
 static void cvmrdma_cq_event(struct ibv_cq *ibcq)
 {
-	/* Nothing to do */
+	struct cvmrdma_cq * cq = (struct cvmrdma_cq *)ibcq;
+	struct cvmrdma_context * ctxt = cvmrdma_get_ctx(cq->user_cq.cq.context);
+	bool expected = 1;
+	atomic_compare_exchange_strong(&cq->comp_channel_event_fd_filled, &expected, 0);
 	return;
 }
 
@@ -1581,8 +1618,10 @@ static struct verbs_context *cvmrdma_alloc_context(struct ibv_device *ibdev,
 	DEBUG("Remote's IP is %s\n", remote_addr);
 	/* Only connect to the remote's RPC server when we know that the server is up */
 	cvmrdma_ctx->remote_addr = remote_addr;
-	cvmrdma_ctx->network_client_connection = NULL;
-	cvmrdma_ctx->network_client_cap = NULL;
+	cvmrdma_ctx->local_network_client_connection = NULL;
+	cvmrdma_ctx->local_network_client_cap = NULL;
+	cvmrdma_ctx->remote_network_client_connection = NULL;
+	cvmrdma_ctx->remote_network_client_cap = NULL;
 
 	/* Get the root capability to the remote's RPC's API */
 	
@@ -1595,6 +1634,15 @@ static struct verbs_context *cvmrdma_alloc_context(struct ibv_device *ibdev,
 	}
 	/* see ibv_create_cq */
 	verbs_init_cq(ibcq, prov_ctx, NULL, NULL);
+
+	if(cvmrdma_ctx->provider_comp_channel) {
+		ret = cvmrdma_ctx->prov_ops.req_notify_cq(ibcq, 0);
+		if(ret)
+		{
+			fprintf(stderr, "Failed to request CQ notifications %d\n", ret);
+			goto err;
+		}
+	}
 
 
 	/* Initialize the CQ polling metadata */

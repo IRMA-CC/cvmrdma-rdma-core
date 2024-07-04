@@ -5,6 +5,7 @@
 #include <stdbool.h>
 #include <pthread.h>
 #include <string.h>
+#include <poll.h>
 
 #include <linux/userfaultfd.h>
 #include <unistd.h>
@@ -104,12 +105,14 @@ static int cq_server_loop_once(struct cvmrdma_context * ctxt)
                     .wr_id = wrid
                 };
 
-                /* Notify user CQ of a SEND
-                    XXX: here we notify always, whereas user can request SEND_SIGNALLED or not.
+                /* Notify user CQ of a SEND if IBV_SEND_SIGNALED was set and qp was created with
+                   sq_sig_all=0
                 */
-
-                struct cvmrdma_cq * scq = (struct cvmrdma_cq *)qp->user_qp.qp.send_cq;
-                wcq_push(scq->wc_queue, &send_wc);
+                if(send_info->send_signaled || qp->user_sq_sig_all) {
+                    DEBUG("[CQ] Sending WC to user send_signaled %d user_sq_sig_all %d\n", send_info->send_signaled, qp->user_sq_sig_all);
+                    struct cvmrdma_cq * scq = (struct cvmrdma_cq *)qp->user_qp.qp.send_cq;
+                    wcq_push(scq->wc_queue, &send_wc);
+                }
             }
 
         }
@@ -268,9 +271,15 @@ static int cq_server_loop_once(struct cvmrdma_context * ctxt)
                 /* Copy the payload into private memory */
                 payload_start = private + header_bytes;
                 memcpy(payload_start, slot + header_bytes, payload_clen);
-                DEBUG("private %x %x %x ...\n", private[0], private[1], private[2]);
+                DEBUG("[CQ] private + offt %x %x %x %x %x %x %x %x %x %x %x %x %x %x %x %x %x %x\n", 
+                    payload_start[0+notif.chunk_offt], payload_start[1+notif.chunk_offt], payload_start[2+notif.chunk_offt], payload_start[3+notif.chunk_offt],
+                    payload_start[4+notif.chunk_offt], payload_start[5+notif.chunk_offt], payload_start[6+notif.chunk_offt], payload_start[7+notif.chunk_offt],
+                    payload_start[8+notif.chunk_offt], payload_start[9+notif.chunk_offt], payload_start[10+notif.chunk_offt], payload_start[11+notif.chunk_offt],
+                    payload_start[12+notif.chunk_offt], payload_start[13+notif.chunk_offt], payload_start[14+notif.chunk_offt], payload_start[15+notif.chunk_offt],
+                    payload_start[16+notif.chunk_offt], payload_start[17+notif.chunk_offt]);
             } else {
                 /* Copy the payload into the private chunk cache */
+                // TODO: this is wrong
                 assert(offt % CVMRDMA_CHUNK_BYTES == 0);
                 DEBUG("[CQ] chunk_idx %zu to chunk cache\n", chunk_idx);
                 payload_start = cur_mr->provider_va + chunk_idx * cvmrdma_ring_slot_bytes(ctxt->aead) +  cvmrdma_header_bytes(ctxt->aead);
@@ -308,7 +317,13 @@ static int cq_server_loop_once(struct cvmrdma_context * ctxt)
                 exit(1);
             }
 
-            DEBUG("[CQ] decrypted %x %x %x\n", decrypted[0], decrypted[1], decrypted[2]);
+            DEBUG("[CQ] decrypted %x %x %x %x %x %x %x %x %x %x %x %x %x %x %x %x %x %x\n", decrypted[0+notif.chunk_offt],
+             decrypted[1+notif.chunk_offt], decrypted[2+notif.chunk_offt], decrypted[3+notif.chunk_offt], 
+             decrypted[4+notif.chunk_offt], decrypted[5+notif.chunk_offt], decrypted[6+notif.chunk_offt],
+              decrypted[7+notif.chunk_offt], decrypted[8+notif.chunk_offt], decrypted[9+notif.chunk_offt],
+               decrypted[10+notif.chunk_offt], decrypted[11+notif.chunk_offt], decrypted[12+notif.chunk_offt],
+                decrypted[13+notif.chunk_offt], decrypted[14+notif.chunk_offt], decrypted[15+notif.chunk_offt],
+                 decrypted[16+notif.chunk_offt], decrypted[17+notif.chunk_offt]);
 
             /*** SCATTER ****/
             /* Scatter the plaintext to user memory. If the op is a WRITE, the remote has set the destination address,
@@ -330,7 +345,6 @@ static int cq_server_loop_once(struct cvmrdma_context * ctxt)
 
                     while((bytes_copied < notif.chunk_len) && (qp->cur_sge_idx < rcv_nsge))
                     {
-                        DEBUG("[CQ] SEND: copying %zu bytes\n", notif.chunk_len - bytes_copied);
                         struct ibv_sge * cur_sge = &rcv_sgl[qp->cur_sge_idx];
                         assert(cur_mr);
                         unsigned char * mr_addr = cur_mr->user_mr.ibv_mr.addr;
@@ -444,6 +458,8 @@ static int cq_server_loop_once(struct cvmrdma_context * ctxt)
                             break;
                         }
                     }
+                    assert(wc_op != 0);
+                    assert(qp->wr_bytes_rcved > 0);
 
                     struct ibv_wc recv_wc = {
                         .byte_len = qp->wr_bytes_rcved,
@@ -457,6 +473,15 @@ static int cq_server_loop_once(struct cvmrdma_context * ctxt)
 
                     /* Notify user CQ of a RECV */
                     wcq_push(rcq->wc_queue, &recv_wc);
+                    // Pointer to cq struct, see verbs.c:603
+                    uint64_t event = (uintptr_t) rcq;
+                    
+                    bool expected = 0;
+                    if (atomic_compare_exchange_strong(&rcq->comp_channel_event_fd_filled, &expected, 1))
+                    {
+                        DEBUG("[CQ] Writing %p to event fd %d\n", rcq, rcq->comp_channel_event_fd);
+                        write(rcq->comp_channel_event_fd, &event, sizeof(event));
+                    }
 
                     /* And reset the byte counter */
                     qp->wr_bytes_rcved = 0;
@@ -511,6 +536,63 @@ int cvmrdma_cq_server_run_once_if_idle(struct cvmrdma_context * ctxt)
 		atomic_store(&server->is_running, false);
 	}
     return 0;
+}
+
+// This is used if the actual application uses the completion channel
+
+void* cvmrdma_cq_wait_completion_event(void* ctxt) {
+    struct cvmrdma_context * context = (struct cvmrdma_context *) ctxt;
+    struct ibv_cq *ev_cq;
+    void *ev_ctx;
+    int ret;
+        
+    struct pollfd my_pollfd;
+    my_pollfd.fd      = context->provider_comp_channel->fd;
+    my_pollfd.events  = POLLIN;
+    my_pollfd.revents = 0;
+    int ms_timeout = 10;
+
+    DEBUG("[CQ] Waiting for CQ event\n");
+
+    for(;;) {
+        if(false) {
+            do {
+                ret = poll(&my_pollfd, 1, ms_timeout);
+            } while (ret == 0);
+            if (ret < 0) {
+                fprintf(stderr, "poll failed\n");
+                return -1;
+            }
+
+            DEBUG("[CQ] Polled CQ event\n");
+
+            ret = ibv_get_cq_event(context->provider_comp_channel, &ev_cq, &ev_ctx);
+            if (ret) {
+                fprintf(stderr, "Failed to get CQ event\n");
+                exit(1);
+            }
+            DEBUG("[CQ] Got CQ event\n");
+
+            /* Ack the event */
+            ibv_ack_cq_events(ev_cq, 1);
+
+            /* Request notification upon the next completion event */
+            ret = context->prov_ops.req_notify_cq(ev_cq, 0);
+            if (ret) {
+                fprintf(stderr, "Couldn't request CQ notification\n");
+                exit(1);
+            }
+        }
+
+        sleep(5);
+
+        ret = cvmrdma_cq_server_run_once_if_idle(context);
+        if(ret)
+        {
+            fprintf(stderr, "CQ server error: poll CQ failed %d\n", ret);
+            exit(1);
+        }
+    }
 }
 
 

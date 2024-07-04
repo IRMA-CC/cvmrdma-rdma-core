@@ -52,6 +52,8 @@ int cvmrdma_cq_server_run_once_if_idle(struct cvmrdma_context * ctxt);
 
 int cq_server_register_qp(CQServer * server, struct cvmrdma_qp * qp);
 
+void* cvmrdma_cq_wait_completion_event(void* ctxt);
+
 #ifdef __cplusplus
 }
 #endif

@@ -272,6 +272,11 @@ QPNotificationClient * get_qp_notification_client(CapnpEvloopThread * evloop, CV
 
 void set_remote_params(CapnpEvloopThread * evloop, QPNotificationClient *qnc, uint64_t const * tx_key, uint32_t local_ring_rkey, uint32_t local_control_rkey)
 {
+    assert(evloop);
+    assert(qnc);
+    assert(tx_key);
+    assert(local_ring_rkey != 0);
+    assert(local_control_rkey != 0);
     evloop->get_executor().executeSync(
         [=]() { return set_remote_params_rpc(qnc, tx_key, local_ring_rkey, local_control_rkey); }
     );
