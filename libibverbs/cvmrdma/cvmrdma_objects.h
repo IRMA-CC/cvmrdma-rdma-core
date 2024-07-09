@@ -14,6 +14,18 @@
 #include "cvmrdma_cq_server.h"
 #include "qp_metadata_manager.h"
 
+
+struct cvmrdma_pd {
+	struct ibv_pd user_pd;
+
+	struct ibv_pd *provider_pd;
+
+	/* XXX: we would put this in verbs_pd ... but it doesn't exist */
+	PdBounceMetadata *bounce_metadata;
+	uint32_t mr_id_ctr;
+};
+
+
 /* the library code modifies the user visible verbs_context quite a bit, it's difficult
    to wrap it! instead, include cvmrdma_context _in_ verbs_context (in verbs.h) */
 struct cvmrdma_context {
@@ -33,9 +45,9 @@ struct cvmrdma_context {
 	CapnpEvloopThread *network_evloop;
 	CVMRDMAServer *network_server;
 
-	ClientSession *local_network_client_connection;
+	RPCClientSession *local_network_client_connection;
 	CVMRDMAClient *local_network_client_cap;
-	ClientSession *remote_network_client_connection;
+	RPCClientSession *remote_network_client_connection;
 	CVMRDMAClient *remote_network_client_cap;
 
 	struct ibv_comp_channel *provider_comp_channel;
@@ -50,16 +62,9 @@ struct cvmrdma_context {
 
 	/* AEAD method to use in sodium */
 	enum sodium_crypto_aead aead;
-};
 
-struct cvmrdma_pd {
-	struct ibv_pd user_pd;
-
-	struct ibv_pd *provider_pd;
-
-	/* XXX: we would put this in verbs_pd ... but it doesn't exist */
-	PdBounceMetadata *bounce_metadata;
-	uint32_t mr_id_ctr;
+	/* All created PDs with this context*/
+	struct cvmrdma_pd *pd_list[10];
 };
 
 struct cvmrdma_mr {
@@ -188,6 +193,10 @@ struct cvmrdma_qp {
 
 	/* Whether the user requests a SEND_WC by default */
 	bool user_sq_sig_all;
+
+	/* Information for debugging purposes */
+	u_int64_t lid;
+	uint64_t dlid;
 };
 
 struct cvmrdma_srq {

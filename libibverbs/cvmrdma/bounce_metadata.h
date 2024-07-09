@@ -26,6 +26,8 @@ void register_bounce_mr(PdBounceMetadata * metadata, uint32_t mr_id, struct cvmr
 struct cvmrdma_mr * get_bounce_metadata_for_rkey(PdBounceMetadata * metadata, uint32_t rkey);
 struct cvmrdma_mr * get_bounce_metadata_for_lkey(PdBounceMetadata * metadata, uint32_t lkey);
 
+void print_bounce_metadata(PdBounceMetadata * metadata);
+
 #ifdef __cplusplus
 }
 #endif

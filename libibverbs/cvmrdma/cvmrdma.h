@@ -13,11 +13,10 @@ struct cq_server_notification
     enum ibv_wr_opcode op; // 12
     uint32_t rkey; // 16
     uint32_t imm; // 20
-	uint64_t payload_nonce[cvmrdma_aead_NPUBBYTES]; // 44
+	uint64_t payload_nonce[cvmrdma_aead_NPUB_WORDS]; // 44
 	uint64_t chunk_offt; // 52
 	uint64_t chunk_len; // 60
     bool last_chunk; // 61
-	uint8_t padding[3]; // 64
 };
 
 #define CVMRDMA_SHARED_KEY_ENV "CVMRDMA_SHARED_KEY"

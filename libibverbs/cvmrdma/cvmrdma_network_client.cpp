@@ -6,36 +6,6 @@
 
 #include "debug.h"
 
-
-static CVMRDMA::IBVOp ibv_to_capnp_opcode(enum ibv_wr_opcode op)
-{
-    switch (op)
-    {
-    case IBV_WR_SEND: {
-        return CVMRDMA::IBVOp::SEND;
-    }
-    case IBV_WR_SEND_WITH_IMM: {
-        return CVMRDMA::IBVOp::SEND_WITH_IMM;
-    }
-
-    case IBV_WR_RDMA_WRITE: {
-        return CVMRDMA::IBVOp::WRITE;
-    }
-    case IBV_WR_RDMA_WRITE_WITH_IMM: {
-        return CVMRDMA::IBVOp::WRITE_WITH_IMM;
-    }
-    }
-}
-
-
-
-kj::Promise<void> remote_qp_notify_chunk_recv_rpc(QPNotificationClient * qnc)
-{
-    auto req = qnc->notifyChunkRecvRequest();
-
-    return req.send().ignoreResult();
-}
-
 kj::Promise<void> set_remote_params_rpc(QPNotificationClient * qnc, uint64_t const * tx_key, uint32_t local_ring_rkey, uint32_t local_control_rkey)
 {
     auto req = qnc->setRemoteParamsRequest();
@@ -47,6 +17,8 @@ kj::Promise<void> set_remote_params_rpc(QPNotificationClient * qnc, uint64_t con
 
     req.setLocalRingRkey(local_ring_rkey);
     req.setLocalControlRkey(local_control_rkey);
+
+    DEBUG("[NC] Setting remote params for remote: ring rkey 0x%" PRIx32 ", control rkey 0x%" PRIx32 "\n", local_ring_rkey, local_control_rkey);
 
     return req.send().ignoreResult();
 }

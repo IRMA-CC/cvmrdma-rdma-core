@@ -65,7 +65,7 @@ void capnp_client_loop(std::stop_token stoken,
     kj::Executor const ** client_evloop_executor,
     kj::TaskSet ** taskset,
     std::condition_variable * executor_cv, std::mutex * executor_lock,
-    ClientSession ** client_session
+    RPCClientSession ** client_session
     )
 {
     assert(strlen(remote_addr) > 0);
@@ -121,25 +121,34 @@ public:
         m_server_thread = std::jthread{capnp_server_loop, local_bind_addr, server};
     }
 
-    ClientSession * start_client(char const * remote_addr)
+    RPCClientSession * start_client(char const * remote_addr)
     {
-        ClientSession * session = nullptr;
+        std::string remote_addr_str{remote_addr};
+        if(m_sessions.exists(remote_addr_str))
+        {
+            DEBUG("[NE] Returning existing session for remote addr %s\n", remote_addr);
+            return m_sessions.at(remote_addr_str)->m_session;
+        }
+
+
+        ClientSession * session = (ClientSession *) calloc(1, sizeof(ClientSession));
         DEBUG("[NE] Starting client with remote addr %s\n", remote_addr);
-        m_client_thread = std::jthread{capnp_client_loop, remote_addr, &m_executor, &m_taskset, &m_executor_set_cv, &m_executor_lock, &session};
+        session->m_client_thread = std::jthread{capnp_client_loop, remote_addr, &session->m_executor, &session->m_taskset, &session->m_executor_set_cv, &session->m_executor_lock, &session->m_session};
 
         DEBUG("[NE] Waiting for executor to be set\n");
         /* Wait until thread sets executor */
         {
-            auto locked = std::unique_lock{m_executor_lock};
-            while(! m_executor)
+            auto locked = std::unique_lock{session->m_executor_lock};
+            while(! session->m_executor)
             {
-                m_executor_set_cv.wait(locked);
+                session->m_executor_set_cv.wait(locked);
             }
         }
 
-        DEBUG("[NE] Executor set\n");
+        m_sessions.insert_or_assign(remote_addr_str, session);
+        DEBUG("[NE] Inserted session for remote addr %s\n", remote_addr);
 
-        return session;
+        return session->m_session;
     }
 
     
@@ -148,38 +157,22 @@ public:
         DEBUG("Task failed: %s", exception.getDescription().cStr());
     }
 
-    template<typename Func>
-    void executeLongRunning(Func && fun)
+    kj::Executor const & get_executor(const char * remote_addr)
     {
-        /* Execute the RPC on the thread running the event loop, and let this long
-           running task run in the background  */
-        m_executor->executeSync(
-            [this, fun = std::forward<Func>(fun)]() -> void {
-                m_taskset->add(fun());
-            }
-        );
-    }
-
-    kj::Executor const & get_executor()
-    {
-        return *m_executor;
-    }
-
-    kj::TaskSet & get_taskset()
-    {
-        return *m_taskset;
+        std::string remote_addr_str{remote_addr};
+        if(! m_sessions.exists(remote_addr_str))
+        {
+            fprintf(stderr, "No session for remote addr %s\n", remote_addr);
+            exit(1);
+        }
+        return *m_sessions.at(remote_addr_str)->m_executor;
     }
 
 
 private:
     std::jthread m_server_thread;
-    std::jthread m_client_thread;
 
-    kj::Executor const * m_executor = nullptr;
-    kj::TaskSet * m_taskset = nullptr;
-
-    std::condition_variable m_executor_set_cv;
-    std::mutex m_executor_lock;
+    ClientSessions m_sessions;
 };
 
 
@@ -207,24 +200,24 @@ void destroy_capnp_event_loop(CapnpEvloopThread * evloop)
     delete evloop;
 }
 
-ClientSession * new_client_rpc_session(CapnpEvloopThread * evloop, char const * server_addr)
+RPCClientSession * new_client_rpc_session(CapnpEvloopThread * evloop, char const * server_addr)
 {
     /* Create a new client session on the capnp thread */
     return evloop->start_client(server_addr);
 }
 
-void destroy_client_rpc_session(CapnpEvloopThread * evloop, ClientSession * session)
+void destroy_client_rpc_session(const char* remote_addr, CapnpEvloopThread * evloop, RPCClientSession * session)
 {
     /* MUST be destroyed on the thread where it was created ! */
-    evloop->get_executor().executeSync(
+    evloop->get_executor(remote_addr).executeSync(
         [session]() { delete session; }
     );
 }
 
-CVMRDMAClient * get_cvmrdma_client(CapnpEvloopThread * evloop, ClientSession * session)
+CVMRDMAClient * get_cvmrdma_client(const char* remote_addr, CapnpEvloopThread * evloop, RPCClientSession * session)
 {
     /* Create a new client session on the capnp thread */
-    auto client_cap = evloop->get_executor().executeSync(
+    auto client_cap = evloop->get_executor(remote_addr).executeSync(
         [session]() {
             return session->getMain<CVMRDMA>();
         }
@@ -233,10 +226,10 @@ CVMRDMAClient * get_cvmrdma_client(CapnpEvloopThread * evloop, ClientSession * s
     return new CVMRDMAClient{std::move(client_cap)};
 }
 
-void destroy_cvmrdma_client(CapnpEvloopThread * evloop, CVMRDMAClient * client)
+void destroy_cvmrdma_client(const char* remote_addr, CapnpEvloopThread * evloop, CVMRDMAClient * client)
 {
     /* MUST be destroyed on the thread where it was created ! */
-    evloop->get_executor().executeSync(
+    evloop->get_executor(remote_addr).executeSync(
         [client]() { delete client; }
     );
 }
@@ -250,14 +243,14 @@ void destroy_cvmrdma_client(CapnpEvloopThread * evloop, CVMRDMAClient * client)
    running the capnp event loop.
 
 */
-QPNotificationClient * get_qp_notification_client(CapnpEvloopThread * evloop, CVMRDMAClient * client, uint32_t remote_qpn)
+QPNotificationClient * get_qp_notification_client(const char* remote_addr, CapnpEvloopThread * evloop, CVMRDMAClient * client, uint32_t remote_qpn)
 {
     /* The RPC returns a lazy capability. However: we really want it to be done: wait
        for capability to be fully resolved. This way, we're sure that the remote has
        the tx key when we return. */
 
     QPNotificationClient * qnc = new QPNotificationClient{
-        evloop->get_executor().executeSync(
+        evloop->get_executor(remote_addr).executeSync(
             [=]() {
                 return register_qp_with_remote_qp_rpc(client, remote_qpn);
             }
@@ -270,29 +263,15 @@ QPNotificationClient * get_qp_notification_client(CapnpEvloopThread * evloop, CV
 }
 
 
-void set_remote_params(CapnpEvloopThread * evloop, QPNotificationClient *qnc, uint64_t const * tx_key, uint32_t local_ring_rkey, uint32_t local_control_rkey)
+void set_remote_params(const char* remote_addr, CapnpEvloopThread * evloop, QPNotificationClient *qnc, uint64_t const * tx_key, uint32_t local_ring_rkey, uint32_t local_control_rkey)
 {
     assert(evloop);
     assert(qnc);
     assert(tx_key);
     assert(local_ring_rkey != 0);
     assert(local_control_rkey != 0);
-    evloop->get_executor().executeSync(
+    DEBUG("[NE] Setting remote params for remote_addr %s\n", remote_addr);
+    evloop->get_executor(remote_addr).executeSync(
         [=]() { return set_remote_params_rpc(qnc, tx_key, local_ring_rkey, local_control_rkey); }
-    );
-}
-
-
-void remote_qp_notify_chunk_recv(CapnpEvloopThread *cev, QPNotificationClient *qnc)
-{
-    DEBUG("remote_qp_notify_chunk_recv\n");
-
-    /* Add to taskset on evloop thread */
-    cev->get_executor().executeSync(
-        [=]() {
-            cev->get_taskset().add(
-                remote_qp_notify_chunk_recv_rpc(qnc)
-            );
-        }
     );
 }

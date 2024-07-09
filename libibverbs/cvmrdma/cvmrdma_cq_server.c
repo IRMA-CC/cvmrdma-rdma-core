@@ -71,17 +71,38 @@ static int cq_server_loop_once(struct cvmrdma_context * ctxt)
         uint32_t wc_length = this_wc->byte_len;
         uint32_t qpn = this_wc->qp_num;
         struct cvmrdma_qp * qp = qp_metadata_manager_get_qp(qp_metadata_manager, qpn);
+        assert(qp);
 
-        DEBUG("[CQ] WRID = 0x%" PRIx64 " QPN %" PRIx32 "\n", this_wc->wr_id, qpn);
+        struct cvmrdma_pd * pd = (struct cvmrdma_pd *)qp->user_qp.qp.pd;
+        assert(pd);
+
+        DEBUG("[CQ] WRID = 0x%" PRIx64 " QPN 0x%" PRIx32 "\n", this_wc->wr_id, qpn);
 
         if(status != IBV_WC_SUCCESS)
         {
-            fprintf(stderr, "CQ server WARN: WC reports failure %d\n", status);
+            fprintf(stderr, "CQ server WARN: WC reports failure status: %d, vendor err %d\n", status, this_wc->vendor_err);
+            if(op == IBV_WC_SEND) {
+                struct cvmrdma_mr* mr = NULL;
+                int i = 0;
+                do {
+                    mr = get_bounce_metadata_for_rkey(pd->bounce_metadata, i);
+                    if (mr != NULL) {
+                        fprintf(stderr, "[CQ] bounce_metadata[%d]: len: %zx, user_mr addr: %p, user_mr hca_va: %p provider_mr len: %zx, provider_mr provider_va: %p, provider_mr lkey: 0x%lx\n", 
+                        i, mr->user_mr.ibv_mr.length, mr->user_mr.ibv_mr.addr, mr->hca_va,
+                        mr->provider_mr->length, mr->provider_va, mr->provider_mr->lkey);
+                    }
+                    i++;
+                } while (mr != NULL);
+                exit(1);
+            }
         }
         else if(! (op & IBV_WC_RECV))
         {
             /* This is a send completion (SEND, WRITE, WWI) */
-            DEBUG("[CQ] send op %d done\n", op);
+            DEBUG("[CQ] send op %d, wrid: 0x%lx done\n", op, this_wc->wr_id);
+            if (this_wc->wr_id == 0xc) {
+                exit(1);
+            }
 
             qp->wr_chunks_sent++;
 
@@ -129,9 +150,6 @@ static int cq_server_loop_once(struct cvmrdma_context * ctxt)
 
             DEBUG("starting chunk processing for qpn %" PRIx32 "\n", qpn);
 
-            struct cvmrdma_pd * pd = (struct cvmrdma_pd *)qp->user_qp.qp.pd;
-            assert(qp);
-
 
             /* immediately refuel the recv queue */
             {
@@ -148,8 +166,7 @@ static int cq_server_loop_once(struct cvmrdma_context * ctxt)
             DEBUG("before chunk: rcved 0x%zx bytes of WR\n", qp->wr_bytes_rcved);
 
             assert(qp->remote_params_set);
-            assert(qp->rx_key[0] || qp->rx_key[1] || qp->rx_key[2] || qp->rx_key[3]);
-            assert(qp->rx_nonce[0] || qp->rx_nonce[1] || qp->rx_nonce[2] || qp->rx_nonce[3]);
+            assert(qp->rx_key[0] || qp->rx_key[1] || qp->rx_key[2]);
             uint64_t const * rx_key = qp->rx_key;
             uint64_t const * shared_key = qp->shared_key;
 
@@ -492,9 +509,6 @@ static int cq_server_loop_once(struct cvmrdma_context * ctxt)
                 XXX: this could be pushed all the way up right after copying into private memory
                 But what about failures to decrypt?*/
             TIMING("chunk_notify_recv");
-            // remote_qp_notify_chunk_recv(
-            //     ctxt->network_evloop, qp->remote_qnc
-            // );
 
             pthread_mutex_lock(&qp->received_lines_lock);
             if ( ++qp->received_lines >= CVMRDMA_ACK_THRESHOLD)
@@ -584,7 +598,25 @@ void* cvmrdma_cq_wait_completion_event(void* ctxt) {
             }
         }
 
-        sleep(5);
+        // sleep(5);
+
+        // DEBUG("[CQ] MRs for ctxt %p\n", context);
+        // for (uint64_t i = 0; i < 10; i++) {
+        //     if(context->pd_list[i] != NULL) {
+        //         struct cvmrdma_pd* cpd = context->pd_list[i];
+        //         struct cvmrdma_mr* mr = NULL;
+        //         int k = 0;
+        //         do {
+        //             mr = get_bounce_metadata_for_rkey(cpd->bounce_metadata, k);
+        //             if (mr != NULL) {
+        //                 fprintf(stderr, "[CQ] ctxt: %p, pd[%d]: bounce_metadata[%d]: len: %zx, user_mr addr: %p, user_mr hca_va: %p provider_mr len: %zx, provider_mr provider_va: %p, provider_mr lkey: 0x%lx, provider_mr rkey: 0x%lx\n", 
+        //                 context, i, k, mr->user_mr.ibv_mr.length, mr->user_mr.ibv_mr.addr, mr->hca_va,
+        //                 mr->provider_mr->length, mr->provider_va, mr->provider_mr->lkey, mr->provider_mr->rkey);
+        //             }
+        //             k++;
+        //         } while (mr != NULL);
+        //     }
+        // }
 
         ret = cvmrdma_cq_server_run_once_if_idle(context);
         if(ret)

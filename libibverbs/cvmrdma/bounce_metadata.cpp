@@ -27,10 +27,18 @@ void register_bounce_mr(PdBounceMetadata * metadata, uint32_t mr_id, struct cvmr
 
 struct cvmrdma_mr * get_bounce_metadata_for_rkey(PdBounceMetadata * metadata, uint32_t rkey)
 {
-    return metadata->at(rkey);
+    if (metadata->exists(rkey)) {
+        return metadata->at(rkey);
+    } else {
+        return 0;
+    }
 }
 
 struct cvmrdma_mr * get_bounce_metadata_for_lkey(PdBounceMetadata * metadata, uint32_t lkey)
 {
-    return metadata->at(lkey);
+    if (metadata->exists(lkey)) {
+        return metadata->at(lkey);
+    } else {
+        return 0;
+    }
 }
