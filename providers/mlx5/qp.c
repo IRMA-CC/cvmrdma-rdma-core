@@ -45,6 +45,8 @@
 #include "mlx5_trace.h"
 #include "wqe.h"
 
+#include "../../libibverbs/cvmrdma/debug.h"
+
 #define MLX5_ATOMIC_SIZE 8
 
 static const uint32_t mlx5_ib_opcode[] = {
@@ -301,7 +303,11 @@ static void set_data_ptr_seg_end(struct mlx5_wqe_data_seg *dseg)
 static void mlx5_bf_copy(uint64_t *dst, const uint64_t *src, unsigned bytecnt,
 			 struct mlx5_qp *qp)
 {
+	DEBUG("[MLX5] mlx5_bf_copy dst %p src %p bytecnt %d\n", dst, src, bytecnt);
 	do {
+	    assert(((uintptr_t)dst) % __alignof__(*dst) == 0);
+	    assert(((uintptr_t)src) % __alignof__(*dst) == 0);
+
 		mmio_memcpy_x64(dst, src, 64);
 		bytecnt -= 64;
 		dst += 8;
@@ -1648,6 +1654,9 @@ _mlx5_send_wr_set_sge(struct mlx5_qp *mqp, uint32_t lkey, uint64_t addr,
 	dseg->lkey = htobe32(lkey);
 	dseg->addr = htobe64(addr);
 	mqp->cur_size += sizeof(*dseg) / 16;
+
+	DEBUG("[MLX5] addr %p lkey 0x%x length %d, cur_size %d, dseg->byte_count %d, dseg->lkey %d, dseg->addr %lu\n",
+		(void *)addr, lkey, length, mqp->cur_size, be32toh(dseg->byte_count), be32toh(dseg->lkey), be64toh(dseg->addr));
 }
 
 static void

@@ -173,7 +173,7 @@ static struct ibv_mr * alloc_public_mr(struct cvmrdma_context * ctxt, struct cvm
 	/* WARN: MUST attach+dma_map to dma-buf before mmap !! In our hacky implementation, the actual
 	   allocation is done in dma_map */
 	int access = IBV_ACCESS_LOCAL_WRITE | IBV_ACCESS_REMOTE_WRITE | IBV_ACCESS_RELAXED_ORDERING;
-	size_t offt = 0;
+	uint64_t offt = 0;
 	struct ibv_mr * mr = ctxt->prov_ops.reg_dmabuf_mr(
 		pd->provider_pd,
 		offt, size, 0,
@@ -317,7 +317,7 @@ static struct ibv_qp *cvmrdma_create_qp(struct ibv_pd * ibpd,
 	control_attr_ex.comp_mask = IBV_QP_INIT_ATTR_PD | IBV_QP_INIT_ATTR_SEND_OPS_FLAGS;
 
     struct ibv_qp * control_ibqp = ctxt->prov_ops.create_qp_ex(prov_ctxt, &control_attr_ex);
-    if(! ibqp)
+    if(! control_ibqp)
     {
         goto err;
     }
@@ -579,7 +579,7 @@ static int cvmrdma_modify_qp(struct ibv_qp *ibqp, struct ibv_qp_attr *attr,
 				assert(attr_mask & IBV_QP_DEST_QPN);
 				uint32_t dest_qpn = attr->dest_qp_num;
 
-				DEBUG("Obtain notification channel cap from remote for its QP with QPN 0x%" PRIx32 "\n", dest_qpn);
+				DEBUG("[MODIFY_QP] Obtain notification channel cap from remote for its QP with QPN 0x%" PRIx32 "\n", dest_qpn);
 
 				/* Get the qp notifier capability from the remote over the network and share the Tx key with the remote.
 				    */
@@ -624,7 +624,7 @@ static int cvmrdma_modify_qp(struct ibv_qp *ibqp, struct ibv_qp_attr *attr,
 		const bool skip_wait_for_remote_params = true; //(port_attr.lid == attr->ah_attr.dlid);
 		if (!skip_wait_for_remote_params)
 		{
-			DEBUG("MODIFY->RTR: wait for rx key...\n");
+			DEBUG("[MODIFY_QP] MODIFY->RTR: wait for rx key...\n");
 			pthread_mutex_lock(&qp->remote_params_lock);
 			while(! qp->remote_params_set)
 			{
@@ -632,7 +632,7 @@ static int cvmrdma_modify_qp(struct ibv_qp *ibqp, struct ibv_qp_attr *attr,
 			}
 			pthread_mutex_unlock(&qp->remote_params_lock);
 		} else {
-			DEBUG("MODIFY->RTR: skip wait for rx key\n");
+			DEBUG("[MODIFY_QP] MODIFY->RTR: skip wait for rx key\n");
 		}
 
 
@@ -668,10 +668,13 @@ static int cvmrdma_modify_qp(struct ibv_qp *ibqp, struct ibv_qp_attr *attr,
 		control_qp_attrs.dest_qp_num = control_remote_qpn;
 		control_qp_attrs.rq_psn = control_remote_psn;
 
+		DEBUG("[MODIFY_QP CS] control qp: dest_qp_num 0x%" PRIx32 " rq_psn 0x%" PRIx32 " dlid %d\n", control_remote_qpn, control_remote_psn, control_remote_dest->dlid);
+
 		control_qp_attr_mask |= IBV_QP_AV | IBV_QP_PATH_MTU | IBV_QP_DEST_QPN | IBV_QP_RQ_PSN;
 
 		control_qp_attrs.max_dest_rd_atomic = 1; /* ??? */
 		control_qp_attrs.min_rnr_timer = 12;     /* ??? */
+		control_qp_attrs.timeout = 21;           /* ??? */
 
 		control_qp_attr_mask |= IBV_QP_MAX_DEST_RD_ATOMIC | IBV_QP_MIN_RNR_TIMER;
 
@@ -930,19 +933,20 @@ static int post_send_do_bounce(struct cvmrdma_qp * qp, struct ibv_send_wr *wrs, 
 				((unsigned char *)cur_sge->addr)[12], ((unsigned char *)cur_sge->addr)[13], ((unsigned char *)cur_sge->addr)[14], ((unsigned char *)cur_sge->addr)[15],
 				((unsigned char *)cur_sge->addr)[16], ((unsigned char *)cur_sge->addr)[17]
 			);
-			if(cvmrdma_qp_send_wr_id == 0xc) {
-				struct cvmrdma_mr* mr = NULL;
-                int i = 0;
-                do {
-                    mr = get_bounce_metadata_for_rkey(pd->bounce_metadata, i);
-                    if (mr != NULL) {
-                        fprintf(stderr, "[SEND] bounce_metadata[%d]: len: 0x%zx, user_mr addr: %p, user_mr hca_va: %p provider_mr len: 0x%zx, provider_mr provider_va: %p, provider_mr lkey: 0x%lx\n", 
-                        i, mr->user_mr.ibv_mr.length, mr->user_mr.ibv_mr.addr, mr->hca_va,
-                        mr->provider_mr->length, mr->provider_va, mr->provider_mr->lkey);
-                    }
-                    i++;
-                } while (mr != NULL);
-			}
+
+			// if(cvmrdma_qp_send_wr_id == 0xc) {
+			// 	struct cvmrdma_mr* mr = NULL;
+            //     int i = 0;
+            //     do {
+            //         mr = get_bounce_metadata_for_rkey(pd->bounce_metadata, i);
+            //         if (mr != NULL) {
+            //             fprintf(stderr, "[SEND] bounce_metadata[%d]: len: 0x%zx, user_mr addr: %p, user_mr hca_va: %p provider_mr len: 0x%zx, provider_mr provider_va: %p, provider_mr lkey: 0x%lx\n", 
+            //             i, mr->user_mr.ibv_mr.length, mr->user_mr.ibv_mr.addr, mr->hca_va,
+            //             mr->provider_mr->length, mr->provider_va, mr->provider_mr->lkey);
+            //         }
+            //         i++;
+            //     } while (mr != NULL);
+			// }
 
 
 			/* Prepare the two nonces: for notif and for payload */
@@ -1134,9 +1138,6 @@ skip_payload_encryption:
 
 			prov_qpx->wr_id = cvmrdma_qp_send_wr_id++;
 			uint64_t send_offt = chunk_idx * cvmrdma_ring_slot_bytes(ctxt->aead);
-			if (prov_qpx->wr_id == 0xc) {
-				send_offt = 0;
-			}
 			DEBUG("[SEND QPN %x] WR ID 0x%lx\n", qp->user_qp.qp.qp_num, prov_qpx->wr_id);
 			DEBUG("[SEND QPN %x] provider lkey 0x%lx\n", qp->user_qp.qp.qp_num, local_provider_lkey);
 			DEBUG("[SEND QPN %x] remote rkey 0x%lx\n", qp->user_qp.qp.qp_num, remote_ring_rkey);
@@ -1493,6 +1494,8 @@ static int cvmrdma_query_qp(struct ibv_qp *ibqp, struct ibv_qp_attr *attr,
 	struct cvmrdma_context * ctxt = cvmrdma_get_ctx(qp->user_qp.qp.context);
 	int ret = ctxt->prov_ops.query_qp(qp->provider_qp, attr, attr_mask, init_attr);
 	assert(ret == 0);
+	// Disable inlining data as we need to bounce and encrypt data anyway
+	init_attr->cap.max_inline_data = 0;
 	return ret;
 }
 

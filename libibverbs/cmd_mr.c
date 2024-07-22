@@ -36,6 +36,8 @@
 #include <infiniband/driver.h>
 #include <infiniband/cmd_write.h>
 
+#include "cvmrdma/debug.h"
+
 int ibv_cmd_advise_mr(struct ibv_pd *pd,
 		      enum ibv_advise_mr_advice advice,
 		      uint32_t flags,
@@ -152,5 +154,12 @@ int ibv_cmd_reg_dmabuf_mr(struct ibv_pd *pd, uint64_t offset, size_t length,
 	vmr->ibv_mr.addr = (void *)(uintptr_t)offset;
 	vmr->ibv_mr.length = length;
 	vmr->mr_type = IBV_MR_TYPE_DMABUF_MR;
+
+	DEBUG("[CMD_MR] mr %p: handle %u, lkey %u, rkey %u, pd %p, addr %zu, length %zu\n",
+	      &vmr->ibv_mr, vmr->ibv_mr.handle, vmr->ibv_mr.lkey,
+	      vmr->ibv_mr.rkey, vmr->ibv_mr.pd, offset,
+	      vmr->ibv_mr.length);
+
+
 	return 0;
 }

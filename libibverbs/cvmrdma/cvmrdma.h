@@ -21,16 +21,16 @@ struct cq_server_notification
 
 #define CVMRDMA_SHARED_KEY_ENV "CVMRDMA_SHARED_KEY"
 
-#define CVMRDMA_CHUNK_BYTES ((unsigned long long)32 * PAGE_SIZE)
+#define CVMRDMA_CHUNK_BYTES ((uint64_t)32 * PAGE_SIZE)
 
-static inline unsigned long long cvmrdma_ring_slot_bytes(enum sodium_crypto_aead aead)
+static inline uint64_t cvmrdma_ring_slot_bytes(enum sodium_crypto_aead aead)
 {
 	return CVMRDMA_CHUNK_BYTES + cvmrdma_ABYTES(aead) 
 			+ sizeof(struct cq_server_notification) + cvmrdma_ABYTES(aead);
 }
 
 
-static inline unsigned long long cvmrdma_header_bytes(enum sodium_crypto_aead aead)
+static inline uint64_t cvmrdma_header_bytes(enum sodium_crypto_aead aead)
 {
 	return sizeof(struct cq_server_notification) + cvmrdma_ABYTES(aead);
 }
@@ -47,7 +47,7 @@ enum cvmrdma_priv_chunk_id {
 	__CVMRDMA_PRIV_CHUNK_NR,
 };
 
-static inline unsigned long long cvmrdma_priv_bounce_total_bytes(enum sodium_crypto_aead aead)
+static inline uint64_t cvmrdma_priv_bounce_total_bytes(enum sodium_crypto_aead aead)
 {
 	return __CVMRDMA_PRIV_CHUNK_NR * cvmrdma_ring_slot_bytes(aead);
 }

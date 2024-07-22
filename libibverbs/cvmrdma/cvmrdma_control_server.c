@@ -25,7 +25,7 @@ void *control_server_send_acks(void *args)
 		memcpy(qp->control_buf_va, &md, sizeof(struct control_metadata));
 		pthread_mutex_unlock(&qp->received_lines_lock);
 
-        DEBUG("[CS] Sending ACK for %ld lines\n", md.ack_revc_lines);
+        DEBUG("[CS 0x%x] Sending ACK for %ld lines for dlid %ld\n", qp->control_qp->qp_num, md.ack_revc_lines, qp->dlid);
 
 		ibv_wr_start(cqpx);
 		cqpx->wr_id = 0;
@@ -38,7 +38,7 @@ void *control_server_send_acks(void *args)
 
 		ret = ibv_wr_complete(cqpx);
 		if (ret) {
-			fprintf(stderr, "Failed to complete control WR\n");
+			fprintf(stderr, "[CS] Failed to complete control WR\n");
 			exit(1);
 		}
 	}
@@ -61,7 +61,7 @@ void *control_server_receive_acks(void *args)
 	}
 
 	while (true) {
-		DEBUG("[CS] Polling for control CQ\n");
+		DEBUG("[CS 0x%x] Waiting for ACK\n", qp->control_qp->qp_num);
 		struct ibv_wc wc = { 0 };
 		int num_comp = 0;
 		do {
@@ -83,15 +83,15 @@ void *control_server_receive_acks(void *args)
 
 		} while (num_comp == 0);
 
-		DEBUG("[CS] Control CQ polled: %d, status: %d opcode: %d \n", num_comp, wc.status, wc.opcode);
+		DEBUG("[CS 0x%x] Control CQ polled: %d, status: %d opcode: %d \n", qp->control_qp->qp_num, num_comp, wc.status, wc.opcode);
 
 		if (num_comp < 0) {
-			fprintf(stderr, "Failed to poll control CQ: %d\n", num_comp);
+			fprintf(stderr, "[CS] Failed to poll control CQ: %d\n", num_comp);
 			exit(1);
 		}
 
 		if (wc.status != IBV_WC_SUCCESS) {
-			fprintf(stderr, "Failed status %s (%d) for wr_id %d\n", ibv_wc_status_str(wc.status), wc.status, (int)wc.wr_id);
+			fprintf(stderr, "[CS] Failed status %s (%d) for wr_id %d\n", ibv_wc_status_str(wc.status), wc.status, (int)wc.wr_id);
 			exit(1);
 		}
 
@@ -104,7 +104,7 @@ void *control_server_receive_acks(void *args)
                 struct ibv_recv_wr * bad_wr = NULL;
                 err = prov_ops.post_recv(qp->control_qp, recv_wr, &bad_wr);
                 if (err) {
-                    fprintf(stderr, "Failed to post recv WR: %d\n", err);
+                    fprintf(stderr, "[CS] Failed to post recv WR: %d\n", err);
                     exit(1);
                 }
             }

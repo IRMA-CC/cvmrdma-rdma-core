@@ -100,9 +100,6 @@ static int cq_server_loop_once(struct cvmrdma_context * ctxt)
         {
             /* This is a send completion (SEND, WRITE, WWI) */
             DEBUG("[CQ] send op %d, wrid: 0x%lx done\n", op, this_wc->wr_id);
-            if (this_wc->wr_id == 0xc) {
-                exit(1);
-            }
 
             qp->wr_chunks_sent++;
 
@@ -276,12 +273,12 @@ static int cq_server_loop_once(struct cvmrdma_context * ctxt)
 
             unsigned long long payload_clen = wc_length - header_bytes;
 
-            DEBUG("[CQ] notif.payload_nonce %lx %lx\n", notif.payload_nonce[0], notif.payload_nonce[1]);
+            DEBUG("[CQ] notif.op %d notif.payload_nonce %lx %lx\n", notif.op, notif.payload_nonce[0], notif.payload_nonce[1]);
             DEBUG("[CQ] notif.chunk_offt 0x%"PRIx64" and notif.chunk_len %zu\n", notif.chunk_offt, notif.chunk_len);
             DEBUG("[CQ] clen %llu\n", payload_clen);
 
             size_t chunk_idx = offt / CVMRDMA_CHUNK_BYTES;
-            char * payload_start = NULL;
+            unsigned char * payload_start = NULL;
 
             if (! bypass_scatter)
             {
@@ -350,7 +347,8 @@ static int cq_server_loop_once(struct cvmrdma_context * ctxt)
             if(! bypass_scatter)
             {
                 if (is_write){
-                    DEBUG("[CQ] WRITE: writing with notif.chunk_offt 0x%"PRIx64" and notif.chunk_len %zu\n", notif.chunk_offt, notif.chunk_len);
+                    DEBUG("[CQ] WRITE: writing with notif.chunk_offt 0x%"PRIx64" and notif.chunk_len %zu to dest %p for notif.hca_addr %p\n", 
+                          notif.chunk_offt, notif.chunk_len, dest, (void *)notif.hca_addr);
                     memcpy(dest, decrypted + notif.chunk_offt, notif.chunk_len);
                 } else {
                     /* The operation is a SEND: use the next chunk on the current recv request */
@@ -440,7 +438,7 @@ static int cq_server_loop_once(struct cvmrdma_context * ctxt)
             if(notif.last_chunk)
             {
                 DEBUG("last_chunk!\n");
-                if(op == IBV_WC_RDMA_WRITE)
+                if(wr_op == IBV_WR_RDMA_WRITE)
                 {
                     /* Do not consume an RR, do not emit a WC. But restore the byte counter */
                     qp->wr_bytes_rcved = 0;
@@ -463,7 +461,7 @@ static int cq_server_loop_once(struct cvmrdma_context * ctxt)
 
                     /* The RR consuming ops also generate a WC. Convert the WR opcode to a WC opcode */
                     enum ibv_wc_opcode wc_op;
-                    switch(op)
+                    switch(wr_op)
                     {
                         case IBV_WR_RDMA_WRITE_WITH_IMM: {
                             wc_op = IBV_WC_RECV_RDMA_WITH_IMM;
@@ -487,6 +485,8 @@ static int cq_server_loop_once(struct cvmrdma_context * ctxt)
                         .status = IBV_WC_SUCCESS,
                         .wr_id = recv_wrid
                     };
+
+                    DEBUG("[CQ] Pushing WC, byte_len %zu, imm %x, opcode %d, qp_num %x, status %d, wr_id %lx\n", recv_wc.byte_len, recv_wc.imm_data, recv_wc.opcode, recv_wc.qp_num, recv_wc.status, recv_wc.wr_id);
 
                     /* Notify user CQ of a RECV */
                     wcq_push(rcq->wc_queue, &recv_wc);
