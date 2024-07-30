@@ -148,6 +148,7 @@ static int attach_qp_to_cq_server(struct cvmrdma_context * ctxt, struct cvmrdma_
 		qp->rx_key,
 		&qp->remote_ring_rkey,
 		&qp->remote_control_rkey,
+		&qp->dest_control_qp_num,
 		&qp->remote_params_set,
 		&qp->remote_params_lock,
 		&qp->remote_params_set_cv
@@ -284,7 +285,7 @@ static struct ibv_qp *cvmrdma_create_qp(struct ibv_pd * ibpd,
 	qp->provider_qp = ibqp;
 
 	/* Create the control Completion Queue */
-	struct ibv_cq * control_ibcq = ctxt->prov_ops.create_cq(prov_ctxt, 65536, ctxt->provider_comp_channel, 0);
+	struct ibv_cq * control_ibcq = ctxt->prov_ops.create_cq(prov_ctxt, 16384, NULL, 0);
 	if(! control_ibcq)
 	{
 		fprintf(stderr, "failed to create backend CQ for the control CQ\n");
@@ -571,6 +572,23 @@ static int cvmrdma_modify_qp(struct ibv_qp *ibqp, struct ibv_qp_attr *attr,
 			DEBUG("[MODIFY_QP] Already connected to the server\n");
 		}
 
+		/*
+			Setup control qp
+		*/
+		struct start_args * start_args = calloc(1, sizeof(struct start_args));
+		struct ibv_ah_attr * ah_attr = calloc(1, sizeof(struct ibv_ah_attr));
+		start_args->ctxt = ctxt;
+		start_args->qp = qp;
+		memcpy(ah_attr, &attr->ah_attr, sizeof(struct ibv_ah_attr));
+		start_args->ah_attr = ah_attr;
+		pthread_t control_start_thread;
+		ret = pthread_create(&control_start_thread, NULL, start_control_server, start_args);
+		if(ret)
+		{
+			fprintf(stderr, "Failed to start control server thread\n");
+			exit(1);
+		}
+
 
 		switch(ibqp->qp_type)
 		{
@@ -588,13 +606,13 @@ static int cvmrdma_modify_qp(struct ibv_qp *ibqp, struct ibv_qp_attr *attr,
 						ctxt->local_addr, ctxt->network_evloop, ctxt->local_network_client_cap, dest_qpn 
 					);
 					set_remote_params(ctxt->local_addr,  ctxt->network_evloop, qp->remote_qnc, qp->tx_key, 
-									  qp->ringbuf_mr->rkey, qp->control_buf_mr->rkey);
+									  qp->ringbuf_mr->rkey, qp->control_buf_mr->rkey, control_qp->qp_num);
 				} else {
 					qp->remote_qnc = get_qp_notification_client(
 						ctxt->remote_addr, ctxt->network_evloop, ctxt->remote_network_client_cap, dest_qpn 
 					);
 					set_remote_params(ctxt->remote_addr, ctxt->network_evloop, qp->remote_qnc, qp->tx_key, 
-									  qp->ringbuf_mr->rkey, qp->control_buf_mr->rkey);
+									  qp->ringbuf_mr->rkey, qp->control_buf_mr->rkey, control_qp->qp_num);
 				}
 
 				break;
@@ -636,86 +654,6 @@ static int cvmrdma_modify_qp(struct ibv_qp *ibqp, struct ibv_qp_attr *attr,
 		}
 
 
-		/*
-			Setup control qp
-		*/
-
-		// --> INIT
-		
-
-		// --> RTR
-		assert(attr_mask & IBV_QP_DEST_QPN);
-		uint32_t control_remote_qpn = attr->dest_qp_num + 1;
-		assert(attr_mask & IBV_QP_RQ_PSN);
-		uint32_t control_remote_psn = attr->rq_psn;
-		assert(attr_mask & IBV_QP_AV);
-		struct ibv_ah_attr * control_remote_dest = &attr->ah_attr;
-
-
-		int control_qp_attr_mask = IBV_QP_STATE;
-		struct ibv_qp_attr control_qp_attrs = (struct ibv_qp_attr) {
-			.qp_state = IBV_QPS_RTR,
-		};
-		control_qp_attrs.ah_attr.dlid = control_remote_dest->dlid;
-		control_qp_attrs.ah_attr.port_num = control_remote_dest->port_num;
-		control_qp_attrs.ah_attr.is_global = 1;
-
-		control_qp_attrs.ah_attr.grh.hop_limit = 8;
-		control_qp_attrs.ah_attr.grh.sgid_index = control_remote_dest->grh.sgid_index;
-		control_qp_attrs.ah_attr.grh.dgid = control_remote_dest->grh.dgid;
-
-		control_qp_attrs.path_mtu = IBV_MTU_1024;
-		control_qp_attrs.dest_qp_num = control_remote_qpn;
-		control_qp_attrs.rq_psn = control_remote_psn;
-
-		DEBUG("[MODIFY_QP CS] control qp: dest_qp_num 0x%" PRIx32 " rq_psn 0x%" PRIx32 " dlid %d\n", control_remote_qpn, control_remote_psn, control_remote_dest->dlid);
-
-		control_qp_attr_mask |= IBV_QP_AV | IBV_QP_PATH_MTU | IBV_QP_DEST_QPN | IBV_QP_RQ_PSN;
-
-		control_qp_attrs.max_dest_rd_atomic = 1; /* ??? */
-		control_qp_attrs.min_rnr_timer = 12;     /* ??? */
-		control_qp_attrs.timeout = 21;           /* ??? */
-
-		control_qp_attr_mask |= IBV_QP_MAX_DEST_RD_ATOMIC | IBV_QP_MIN_RNR_TIMER;
-
-		ret = ctxt->prov_ops.modify_qp(control_qp, &control_qp_attrs, control_qp_attr_mask);
-		if(ret)
-		{
-			goto err;
-		}
-
-		for (int i = 0; i < 10; i++)
-		{
-			struct ibv_recv_wr control_recv_wr[1] = {0};
-			struct ibv_recv_wr * control_bad_wr = NULL;
-			ret = ctxt->prov_ops.post_recv(control_qp, control_recv_wr, &control_bad_wr);
-			if(ret)
-			{
-				fprintf(stderr, "Failed to post recv initial RR for control qp (%d)\n", ret);
-				exit(1);
-			}
-		}
-
-		struct thread_args *args1 = calloc(1, sizeof(struct thread_args));
-		args1->qp = qp;
-		args1->ctxt = ctxt;
-		ret = pthread_create(&qp->control_server_send_acks_thread, NULL, &control_server_send_acks, (void *)args1);
-		if (ret)
-		{
-			fprintf(stderr, "Failed to create control_server_send_acks thread\n");
-			goto err;
-		}
-		struct thread_args *args2 = calloc(1, sizeof(struct thread_args));
-		args2->qp = qp;
-		args2->ctxt = ctxt;
-		ret = pthread_create(&qp->control_server_receive_acks_thread, NULL, &control_server_receive_acks, (void *)args2);
-		if (ret)
-		{
-			fprintf(stderr, "Failed to create control_server_receive_acks thread\n");
-			goto err;
-		}
-
-
 		// Get shared key from env
 		char * shared_key_str = getenv("CVMRDMA_SHARED_KEY");
 		if(shared_key_str == NULL)
@@ -726,36 +664,6 @@ static int cvmrdma_modify_qp(struct ibv_qp *ibqp, struct ibv_qp_attr *attr,
 		if(sodium_hex2bin((unsigned char *) qp->shared_key, cvmrdma_aead_KEYBYTES, shared_key_str, strlen(shared_key_str), NULL, NULL, NULL) == -1)
 		{
 			fprintf(stderr, "Failed to parse shared key\n");
-			goto err;
-		}
-	}
-
-	if((attr_mask & IBV_QP_STATE) && (attr->qp_state == IBV_QPS_RTS))
-	{
-		// --> RTS
-		assert(attr_mask & IBV_QP_SQ_PSN);
-		uint32_t control_sq_psn = attr->sq_psn;
-
-		int control_qp_attr_mask = 0;
-		control_qp_attr_mask = IBV_QP_STATE | IBV_QP_SQ_PSN;
-		struct ibv_qp_attr control_qp_attrs = (struct ibv_qp_attr) {
-			.qp_state = IBV_QPS_RTS,
-			.sq_psn = 0,
-		};
-		/* SQ PSN is remote's RQ PSN */
-		control_qp_attrs.sq_psn = control_sq_psn;
-		control_qp_attr_mask |= IBV_QP_SQ_PSN;
-
-		control_qp_attrs.timeout = 21;
-		control_qp_attrs.retry_cnt = 7;
-		control_qp_attrs.rnr_retry = 7;
-		control_qp_attrs.max_dest_rd_atomic = 1;
-
-		control_qp_attr_mask |= IBV_QP_MAX_QP_RD_ATOMIC | IBV_QP_RETRY_CNT | IBV_QP_RNR_RETRY | IBV_QP_TIMEOUT;
-
-		ret = ctxt->prov_ops.modify_qp(control_qp, &control_qp_attrs, control_qp_attr_mask);
-		if(ret)
-		{
 			goto err;
 		}
 	}
@@ -1674,7 +1582,7 @@ static struct verbs_context *cvmrdma_alloc_context(struct ibv_device *ibdev,
 	/* Get the root capability to the remote's RPC's API */
 	
 	/* Create a single CQ to get the send and recv WC for the chunks */
-	struct ibv_cq * ibcq = cvmrdma_ctx->prov_ops.create_cq(prov_ctx, 16384, NULL, 0);
+	struct ibv_cq * ibcq = cvmrdma_ctx->prov_ops.create_cq(prov_ctx, 16384, cvmrdma_ctx->provider_comp_channel, 0);
 	if(! ibcq)
 	{
 		fprintf(stderr, "failed to create backend CQ for the CQ server\n");

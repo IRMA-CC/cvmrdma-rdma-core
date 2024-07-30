@@ -113,6 +113,7 @@ struct cvmrdma_qp {
 	/* Second control channel hidden from the user */
 	struct ibv_qp *control_qp;
 	struct ibv_cq *control_cq;
+	uint32_t dest_control_qp_num;
 
 	/* Key shared between all endpoints used to encrypt payloads.
 	   In contrast, the tx_key and rx_key are unique to the endpoints
@@ -150,7 +151,7 @@ struct cvmrdma_qp {
 	int next_recv_slot;
 	/* Amount of entries in the send line
 	   increased during post_send, decreased in 
-	   QpNotificationChannel::notifyChunkRecv
+	   the control server
 	*/
 	int send_lines_full;
 	/* During recv the server counts the number of slots processed.
