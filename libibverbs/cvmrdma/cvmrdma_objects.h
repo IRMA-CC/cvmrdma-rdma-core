@@ -114,6 +114,8 @@ struct cvmrdma_qp {
 	struct ibv_qp *control_qp;
 	struct ibv_cq *control_cq;
 	uint32_t dest_control_qp_num;
+	uint32_t control_remote_psn;
+	uint32_t control_local_psn;
 
 	/* Key shared between all endpoints used to encrypt payloads.
 	   In contrast, the tx_key and rx_key are unique to the endpoints

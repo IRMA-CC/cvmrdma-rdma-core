@@ -23,9 +23,10 @@ void *start_control_server(void *args) {
 	}
 	pthread_mutex_unlock(&qp->remote_params_lock);
 
-	DEBUG("[CS 0x%x] remote control qp_num: 0x%" PRIx32 "\n", control_qp->qp_num, qp->dest_control_qp_num);
+	DEBUG("[CS 0x%x] remote qp_num: 0x%x, remote rkey: 0x%x, remote psn: 0x%x, local psn 0x%x\n",
+		control_qp->qp_num, qp->dest_control_qp_num, qp->remote_control_rkey, qp->control_remote_psn, qp->control_local_psn);
 
-	uint32_t control_remote_psn = 0x1337;
+	uint32_t control_remote_psn = qp->control_remote_psn;
 
 	int control_qp_attr_mask = IBV_QP_STATE;
 	struct ibv_qp_attr control_qp_attrs = (struct ibv_qp_attr) {
@@ -33,11 +34,7 @@ void *start_control_server(void *args) {
 	};
 	control_qp_attrs.ah_attr.dlid = attr->dlid;
 	control_qp_attrs.ah_attr.port_num = attr->port_num;
-	control_qp_attrs.ah_attr.is_global = 1;
-
-	control_qp_attrs.ah_attr.grh.hop_limit = 8;
-	control_qp_attrs.ah_attr.grh.sgid_index = attr->grh.sgid_index;
-	control_qp_attrs.ah_attr.grh.dgid = attr->grh.dgid;
+	control_qp_attrs.ah_attr.is_global = 0;
 
 	control_qp_attrs.path_mtu = IBV_MTU_1024;
 	control_qp_attrs.dest_qp_num = qp->dest_control_qp_num;
@@ -74,7 +71,7 @@ void *start_control_server(void *args) {
 	}
 
 	// --> RTS
-	uint32_t control_sq_psn = 0x1337;
+	uint32_t control_sq_psn = qp->control_local_psn;
 
 	control_qp_attr_mask = IBV_QP_STATE | IBV_QP_SQ_PSN;
 	control_qp_attrs = (struct ibv_qp_attr) {

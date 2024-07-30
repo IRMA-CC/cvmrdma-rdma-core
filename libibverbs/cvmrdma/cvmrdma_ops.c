@@ -149,6 +149,7 @@ static int attach_qp_to_cq_server(struct cvmrdma_context * ctxt, struct cvmrdma_
 		&qp->remote_ring_rkey,
 		&qp->remote_control_rkey,
 		&qp->dest_control_qp_num,
+		&qp->control_remote_psn,
 		&qp->remote_params_set,
 		&qp->remote_params_lock,
 		&qp->remote_params_set_cv
@@ -301,7 +302,6 @@ static struct ibv_qp *cvmrdma_create_qp(struct ibv_pd * ibpd,
 	/* Create the control Queue Pair */
 	struct ibv_qp_init_attr_ex control_attr_ex = {0};
 	control_attr_ex.sq_sig_all = 1;
-	/* Direct send and recv WCs to the CQ server */
 	control_attr_ex.send_cq = qp->control_cq;
 	control_attr_ex.recv_cq = qp->control_cq;
 
@@ -558,6 +558,7 @@ static int cvmrdma_modify_qp(struct ibv_qp *ibqp, struct ibv_qp_attr *attr,
 		DEBUG("[MODIFY_QP] attr->dest_qp_num 0x%" PRIx32 "\n", attr->dest_qp_num);
 		qp->lid = port_attr.lid;
 		qp->dlid = attr->ah_attr.dlid;
+		qp->control_local_psn = lrand48() & 0xffffff;
 
 		/* Start by connecting to the server if not already connected */
 		if(! ctxt->remote_network_client_connection && !is_local) {
@@ -606,13 +607,13 @@ static int cvmrdma_modify_qp(struct ibv_qp *ibqp, struct ibv_qp_attr *attr,
 						ctxt->local_addr, ctxt->network_evloop, ctxt->local_network_client_cap, dest_qpn 
 					);
 					set_remote_params(ctxt->local_addr,  ctxt->network_evloop, qp->remote_qnc, qp->tx_key, 
-									  qp->ringbuf_mr->rkey, qp->control_buf_mr->rkey, control_qp->qp_num);
+									  qp->ringbuf_mr->rkey, qp->control_buf_mr->rkey, control_qp->qp_num, qp->control_local_psn);
 				} else {
 					qp->remote_qnc = get_qp_notification_client(
 						ctxt->remote_addr, ctxt->network_evloop, ctxt->remote_network_client_cap, dest_qpn 
 					);
 					set_remote_params(ctxt->remote_addr, ctxt->network_evloop, qp->remote_qnc, qp->tx_key, 
-									  qp->ringbuf_mr->rkey, qp->control_buf_mr->rkey, control_qp->qp_num);
+									  qp->ringbuf_mr->rkey, qp->control_buf_mr->rkey, control_qp->qp_num, qp->control_local_psn);
 				}
 
 				break;

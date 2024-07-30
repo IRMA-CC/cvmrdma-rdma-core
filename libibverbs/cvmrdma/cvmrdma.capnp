@@ -2,13 +2,6 @@
 
 interface CVMRDMA {
 
-    enum IBVOp {
-      write @0;
-      writeWithImm @1;
-      send @2;
-      sendWithImm @3;
-    }
-
     interface QpNotificationChannel {
 
         # tx key for client, rx on server
@@ -16,6 +9,7 @@ interface CVMRDMA {
             localRingRkey :UInt32,
             localControlRkey :UInt32,
             controlQPN :UInt32,
+            controlLocalPSN :UInt32,
             txKey0 :UInt64, txKey1 :UInt64, txKey2 :UInt64, txKey3 :UInt64
         ) -> ();
     }
