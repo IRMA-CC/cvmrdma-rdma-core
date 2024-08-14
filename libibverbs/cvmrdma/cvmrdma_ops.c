@@ -558,6 +558,7 @@ static int cvmrdma_modify_qp(struct ibv_qp *ibqp, struct ibv_qp_attr *attr,
 		DEBUG("[MODIFY_QP] attr->dest_qp_num 0x%" PRIx32 "\n", attr->dest_qp_num);
 		qp->lid = port_attr.lid;
 		qp->dlid = attr->ah_attr.dlid;
+		srand48(time(NULL));
 		qp->control_local_psn = lrand48() & 0xffffff;
 
 		/* Start by connecting to the server if not already connected */
