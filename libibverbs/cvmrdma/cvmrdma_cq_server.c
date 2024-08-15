@@ -107,7 +107,7 @@ static int cq_server_loop_once(struct cvmrdma_context * ctxt)
         
             if(send_info->nchunks == qp->wr_chunks_sent)
             {
-                uint32_t wrid = send_info->wrid;
+                uint64_t wrid = send_info->wrid;
                 size_t bytes = send_info->bytes;
 
                 qp->wr_chunks_sent = 0;
