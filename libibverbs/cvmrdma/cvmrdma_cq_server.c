@@ -128,6 +128,7 @@ static int cq_server_loop_once(struct cvmrdma_context * ctxt)
                 */
                 if(send_info->send_signaled || qp->user_sq_sig_all) {
                     DEBUG("[CQ] Sending WC to user send_signaled %d user_sq_sig_all %d\n", send_info->send_signaled, qp->user_sq_sig_all);
+                    DEBUG("[CQ] User wrid %lx, byte_len %zu, imm_data %x, opcode %d, qp_num %x, status %d\n", send_wc.wr_id, send_wc.byte_len, send_wc.imm_data, send_wc.opcode, send_wc.qp_num, send_wc.status);
                     struct cvmrdma_cq * scq = (struct cvmrdma_cq *)qp->user_qp.qp.send_cq;
                     wcq_push(scq->wc_queue, &send_wc);
                 }

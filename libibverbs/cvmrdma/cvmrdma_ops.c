@@ -963,12 +963,12 @@ static int post_send_do_bounce(struct cvmrdma_qp * qp, struct ibv_send_wr *wrs, 
 			struct uffdio_writeprotect uffdio_wp = {
 				.range = {
 					.start = (unsigned long) ptxt,
-					.len = CVMRDMA_CHUNK_BYTES,
+					.len = last_chunk ? DIV_ROUND_UP(true_payload_bytes, PAGE_SIZE) * PAGE_SIZE : CVMRDMA_CHUNK_BYTES,
 				},
 				.mode = UFFDIO_WRITEPROTECT_MODE_WP,
 			};
 			if (ioctl(uffd, UFFDIO_WRITEPROTECT, &uffdio_wp) == -1) {
-				fprintf(stderr, "Failed to write protect the memory region; addr %p, len %lu, err: %d\n", ptxt, DIVIDE_ROUND_UP(true_payload_bytes, PAGE_SIZE) * PAGE_SIZE, errno);
+				fprintf(stderr, "Failed to write protect the memory region; addr %p, last_chunk %d, len %lu\n", ptxt, last_chunk, last_chunk ? DIV_ROUND_UP(true_payload_bytes, PAGE_SIZE) * PAGE_SIZE : CVMRDMA_CHUNK_BYTES);
 				exit(1);
 			}
 
