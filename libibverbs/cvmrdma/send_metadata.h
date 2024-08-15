@@ -11,6 +11,7 @@
 struct send_metadata_entry
 {
     uint64_t wrid;
+    enum ibv_wr_opcode op;
     size_t bytes;
     size_t nchunks;
     /* Whether this SEND was requested by the remote as a READ */
@@ -35,7 +36,7 @@ typedef struct QpSendMetadata QpSendMetadata;
 QpSendMetadata * alloc_qp_send_metadata(void);
 void free_qp_send_metadata(QpSendMetadata * send_metadata);
 
-void qp_send_metadata_push(QpSendMetadata * send_metadata_manager, uint64_t wrid, size_t bytes, size_t nchunks, bool write_for_read, bool send_signaled);
+void qp_send_metadata_push(QpSendMetadata * send_metadata_manager, uint64_t wrid, enum ibv_wr_opcode op, size_t bytes, size_t nchunks, bool write_for_read, bool send_signaled);
 struct send_metadata_entry * qp_send_metadata_front(QpSendMetadata * send_metadata);
 void qp_send_metadata_pop(QpSendMetadata * send_metadata);
 

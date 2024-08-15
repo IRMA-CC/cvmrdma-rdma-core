@@ -811,7 +811,7 @@ static int post_send_do_bounce(struct cvmrdma_qp * qp, struct ibv_send_wr *wrs, 
 		   BEFORE we start sending, so that CQ server has this informatin when WCs start to arrive
 		   This means that each chunk has to send EXACTLY payload_bytes, even if the tag ends up
 		   being shorter (bc of the AEAD choice) */
-		qp_send_metadata_push(qp->send_metadata, this_wr->wr_id, total_bytes, total_chunks, write_for_read, send_signaled);
+		qp_send_metadata_push(qp->send_metadata, this_wr->wr_id, this_op, total_bytes, total_chunks, write_for_read, send_signaled);
 
 		while(cur_sge_idx < nsge)
 		{

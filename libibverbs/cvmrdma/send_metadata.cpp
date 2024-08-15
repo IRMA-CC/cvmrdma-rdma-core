@@ -14,11 +14,12 @@ void free_qp_send_metadata(QpSendMetadata * send_metadata)
     delete send_metadata;
 }
 
-void qp_send_metadata_push(QpSendMetadata * send_metadata_manager, uint64_t wrid, size_t bytes, size_t nchunks, bool write_for_read, bool send_signaled)
+void qp_send_metadata_push(QpSendMetadata * send_metadata_manager, uint64_t wrid, enum ibv_wr_opcode op, size_t bytes, size_t nchunks, bool write_for_read, bool send_signaled)
 {
     DEBUG("push SEND metadata!\n");
     struct send_metadata_entry entry = {
         .wrid = wrid,
+        .op = op,
         .bytes = bytes,
         .nchunks = nchunks,
         .write_for_read = write_for_read,

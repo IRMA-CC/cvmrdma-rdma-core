@@ -109,6 +109,7 @@ static int cq_server_loop_once(struct cvmrdma_context * ctxt)
             {
                 uint64_t wrid = send_info->wrid;
                 size_t bytes = send_info->bytes;
+                bool is_write = (send_info->op == IBV_WR_RDMA_WRITE) || (send_info->op == IBV_WR_RDMA_WRITE_WITH_IMM);
 
                 qp->wr_chunks_sent = 0;
                 qp_send_metadata_pop(qp->send_metadata);
@@ -117,7 +118,7 @@ static int cq_server_loop_once(struct cvmrdma_context * ctxt)
                     .byte_len = bytes,
                     .wc_flags = 0,
                     .imm_data = 0,
-                    .opcode = IBV_WC_SEND,
+                    .opcode = is_write ? IBV_WC_RDMA_WRITE : IBV_WC_SEND,
                     .qp_num = qpn,
                     .status = IBV_WC_SUCCESS,
                     .wr_id = wrid
