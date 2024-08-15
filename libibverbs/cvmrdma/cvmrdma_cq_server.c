@@ -601,23 +601,7 @@ void* cvmrdma_cq_wait_completion_event(void* ctxt) {
 
         // sleep(5);
 
-        // DEBUG("[CQ] MRs for ctxt %p\n", context);
-        // for (uint64_t i = 0; i < 10; i++) {
-        //     if(context->pd_list[i] != NULL) {
-        //         struct cvmrdma_pd* cpd = context->pd_list[i];
-        //         struct cvmrdma_mr* mr = NULL;
-        //         int k = 0;
-        //         do {
-        //             mr = get_bounce_metadata_for_rkey(cpd->bounce_metadata, k);
-        //             if (mr != NULL) {
-        //                 fprintf(stderr, "[CQ] ctxt: %p, pd[%d]: bounce_metadata[%d]: len: %zx, user_mr addr: %p, user_mr hca_va: %p provider_mr len: %zx, provider_mr provider_va: %p, provider_mr lkey: 0x%lx, provider_mr rkey: 0x%lx\n", 
-        //                 context, i, k, mr->user_mr.ibv_mr.length, mr->user_mr.ibv_mr.addr, mr->hca_va,
-        //                 mr->provider_mr->length, mr->provider_va, mr->provider_mr->lkey, mr->provider_mr->rkey);
-        //             }
-        //             k++;
-        //         } while (mr != NULL);
-        //     }
-        // }
+
 
         ret = cvmrdma_cq_server_run_once_if_idle(context);
         if(ret)
@@ -635,4 +619,24 @@ void* cvmrdma_cq_wait_completion_event(void* ctxt) {
 int cq_server_register_qp(CQServer * server, struct cvmrdma_qp * qp)
 {
     return qp_metadata_manager_register_qp(server->qp_metadata_manager, qp->user_qp.qp.qp_num, qp);
+}
+
+void print_mr_from_ctxt(struct cvmrdma_context * context) {
+    DEBUG("[CQ] MRs for ctxt %p\n", context);
+    for (uint64_t i = 0; i < 10; i++) {
+        if(context->pd_list[i] != NULL) {
+            struct cvmrdma_pd* cpd = context->pd_list[i];
+            struct cvmrdma_mr* mr = NULL;
+            int k = 0;
+            do {
+                mr = get_bounce_metadata_for_rkey(cpd->bounce_metadata, k);
+                if (mr != NULL) {
+                    fprintf(stderr, "[CQ] ctxt: %p, pd[%d]: bounce_metadata[%d]: len: %zx, user_mr addr: %p, user_mr hca_va: %p provider_mr len: %zx, provider_mr provider_va: %p, provider_mr lkey: 0x%lx, provider_mr rkey: 0x%lx\n", 
+                    context, i, k, mr->user_mr.ibv_mr.length, mr->user_mr.ibv_mr.addr, mr->hca_va,
+                    mr->provider_mr->length, mr->provider_va, mr->provider_mr->lkey, mr->provider_mr->rkey);
+                }
+                k++;
+            } while (mr != NULL);
+        }
+    }
 }

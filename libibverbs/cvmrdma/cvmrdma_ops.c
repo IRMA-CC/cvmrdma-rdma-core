@@ -70,15 +70,15 @@ static struct ibv_pd * cvmrdma_alloc_pd(struct ibv_context * ibcontext)
     pd->bounce_metadata = bounce_metadata;
 	pd->mr_id_ctr = 0;
 
-	for (uint64_t i = 0; i < 10; i++) {
-		if(ctxt->pd_list[i] == NULL) {
-			ctxt->pd_list[i] = pd;
-			break;
-		} else if (i == 9) {
-			fprintf(stderr, "Failed to allocate PD, no space in pd_list\n");
-			exit(1);
-		}
-	}
+	// for (uint64_t i = 0; i < 10; i++) {
+	// 	if(ctxt->pd_list[i] == NULL) {
+	// 		ctxt->pd_list[i] = pd;
+	// 		break;
+	// 	} else if (i == 9) {
+	// 		fprintf(stderr, "Failed to allocate PD, no space in pd_list\n");
+	// 		exit(1);
+	// 	}
+	// }
 
 	DEBUG("Allocated PD %p\n", pd);
 
