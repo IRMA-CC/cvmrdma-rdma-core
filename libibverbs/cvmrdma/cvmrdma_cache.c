@@ -15,6 +15,7 @@
 void* fault_handler_thread(void* arg) {
     struct fault_handler_thread_args* targs;                  /* userfaultfd file descriptor */
     targs = (struct fault_handler_thread_args*) arg;
+    struct ibv_mr* user_mr = (struct ibv_mr*) targs->mr;
     int uffd = targs->uffd;
     struct uffd_msg  msg;  /* Data read from userfaultfd */
 
@@ -81,10 +82,12 @@ void* fault_handler_thread(void* arg) {
         struct uffdio_writeprotect uffdio_wp = {
             .range = {
                 .start = alinged_start,
-                .len = targs->mr->user_mr.ibv_mr.length < CVMRDMA_CHUNK_BYTES ? targs->mr->user_mr.ibv_mr.length : CVMRDMA_CHUNK_BYTES,
+                .len = (alinged_start - (uint64_t)user_mr->addr) + CVMRDMA_CHUNK_BYTES  > user_mr->length ? user_mr->length - (alinged_start - (uint64_t)user_mr->addr) : CVMRDMA_CHUNK_BYTES,
             },
             .mode = 0,
         };
+        DEBUG("[CACHE] start = %llx; len = %llx\n", uffdio_wp.range.start, uffdio_wp.range.len);
+        DEBUG("[CACHE] alinged_start = %llx; user_mr->length = %x user_mr->addr = %llx\n", alinged_start, user_mr->length, (uint64_t)user_mr->addr);
         if (ioctl(uffd, UFFDIO_WRITEPROTECT, &uffdio_wp) == -1) {
             fprintf(stderr, "[CACHE] ioctl-UFFDIO_WRITEPROTECT: %d\n", errno);
             exit(1);

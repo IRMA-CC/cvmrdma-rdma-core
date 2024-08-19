@@ -93,7 +93,6 @@ static int cq_server_loop_once(struct cvmrdma_context * ctxt)
                     }
                     i++;
                 } while (mr != NULL);
-                exit(1);
             }
         }
         else if(! (op & IBV_WC_RECV))
@@ -273,7 +272,7 @@ static int cq_server_loop_once(struct cvmrdma_context * ctxt)
                 }
             }
 
-            unsigned long long payload_clen = wc_length - header_bytes;
+            unsigned long long payload_clen = notif.payload_len + cvmrdma_ABYTES(aead);
 
             DEBUG("[CQ] notif.op %d notif.payload_nonce %lx %lx\n", notif.op, notif.payload_nonce[0], notif.payload_nonce[1]);
             DEBUG("[CQ] notif.chunk_offt 0x%"PRIx64" and notif.chunk_len %zu\n", notif.chunk_offt, notif.chunk_len);

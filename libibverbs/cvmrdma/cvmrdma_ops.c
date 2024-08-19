@@ -874,6 +874,7 @@ static int post_send_do_bounce(struct cvmrdma_qp * qp, struct ibv_send_wr *wrs, 
 			uint64_t alinged_offset = offt - (offt % CVMRDMA_CHUNK_BYTES);
 			/* location in memory */
 			unsigned char * ptxt = cur_mr->user_mr.ibv_mr.addr + alinged_offset;
+			uint64_t send_len = alinged_offset + CVMRDMA_CHUNK_BYTES > cur_mr->user_mr.ibv_mr.length ? cur_mr->user_mr.ibv_mr.length - alinged_offset : CVMRDMA_CHUNK_BYTES;
 
 			uint64_t true_payload_bytes = 0; 
 
@@ -888,6 +889,7 @@ static int post_send_do_bounce(struct cvmrdma_qp * qp, struct ibv_send_wr *wrs, 
 
 			DEBUG("[SEND QPN %x] chunk_idx %lu\n", qp->user_qp.qp.qp_num, chunk_idx);
 			DEBUG("[SEND QPN %x] true_payload_bytes %lu\n", qp->user_qp.qp.qp_num, true_payload_bytes);
+			DEBUG("[SEND QPN %x] send_len %lu\n", qp->user_qp.qp.qp_num, send_len);
 
 			struct chunk_tracking_info* chunk_info = &cur_mr->chunk_tracking[chunk_idx];
 			
@@ -917,6 +919,7 @@ static int post_send_do_bounce(struct cvmrdma_qp * qp, struct ibv_send_wr *wrs, 
 					notif.chunk_offt = offt % CVMRDMA_CHUNK_BYTES;
 					notif.chunk_len = true_payload_bytes;
 					notif.last_chunk = last_chunk;
+					notif.payload_len = send_len;
 				}
 				else
 				{
@@ -929,6 +932,7 @@ static int post_send_do_bounce(struct cvmrdma_qp * qp, struct ibv_send_wr *wrs, 
 					notif.chunk_offt = offt % CVMRDMA_CHUNK_BYTES;
 					notif.chunk_len = true_payload_bytes;
 					notif.last_chunk = last_chunk;
+					notif.payload_len = send_len;
 				}
 
 				notif_clen = header_bytes;
@@ -957,29 +961,31 @@ static int post_send_do_bounce(struct cvmrdma_qp * qp, struct ibv_send_wr *wrs, 
 				goto skip_payload_encryption;
 			}
 
+			DEBUG("[SEND QPN %x] Write protect region; addr %p, last_chunk %d, send_len %lu\n", qp->user_qp.qp.qp_num, ptxt, last_chunk, send_len);
+
 			// Mark chunk in userMR as write protected
 			atomic_store(&chunk_info->cached, true);
 			int uffd = cur_mr->uffd;
 			struct uffdio_writeprotect uffdio_wp = {
 				.range = {
 					.start = (unsigned long) ptxt,
-					.len = last_chunk ? DIV_ROUND_UP(true_payload_bytes, PAGE_SIZE) * PAGE_SIZE : CVMRDMA_CHUNK_BYTES,
+					.len = send_len,
 				},
 				.mode = UFFDIO_WRITEPROTECT_MODE_WP,
 			};
 			if (ioctl(uffd, UFFDIO_WRITEPROTECT, &uffdio_wp) == -1) {
-				fprintf(stderr, "Failed to write protect the memory region; addr %p, last_chunk %d, len %lu\n", ptxt, last_chunk, last_chunk ? DIV_ROUND_UP(true_payload_bytes, PAGE_SIZE) * PAGE_SIZE : CVMRDMA_CHUNK_BYTES);
+				fprintf(stderr, "Failed to write protect the memory region; addr %p, last_chunk %d, send_len %lu\n", ptxt, last_chunk, send_len);
 				exit(1);
 			}
-
+			
 			DEBUG("[SEND QPN %x] ptxt %x %x %x\n", qp->user_qp.qp.qp_num, ptxt[0], ptxt[1], ptxt[2]);
 			DEBUG("[SEND QPN %x] nonce %lx %lx\n", qp->user_qp.qp.qp_num, chunk_info->nonce[0], chunk_info->nonce[1]);
 
-			unsigned long long payload_clen = CVMRDMA_CHUNK_BYTES;
+			unsigned long long payload_clen = send_len;
 			err = cvmrdma_encrypt(
 				slot + notif_clen, /* start after the notif */
 				&payload_clen,
-				ptxt, CVMRDMA_CHUNK_BYTES,
+				ptxt, send_len,
 				NULL, 0,
 				NULL,
 				(unsigned char *)chunk_info->nonce,

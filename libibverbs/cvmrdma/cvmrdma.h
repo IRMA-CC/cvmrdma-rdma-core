@@ -14,9 +14,10 @@ struct cq_server_notification
     uint32_t rkey; // 16
     uint32_t imm; // 20
 	uint64_t payload_nonce[cvmrdma_aead_NPUB_WORDS]; // 44
-	uint64_t chunk_offt; // 52
-	uint64_t chunk_len; // 60
-    bool last_chunk; // 61
+	uint64_t payload_len; // 52
+	uint64_t chunk_offt; // 60
+	uint64_t chunk_len; // 68
+    bool last_chunk; // 69
 };
 
 #define CVMRDMA_SHARED_KEY_ENV "CVMRDMA_SHARED_KEY"
