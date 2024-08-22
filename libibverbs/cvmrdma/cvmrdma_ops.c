@@ -924,10 +924,14 @@ static int post_send_do_bounce(struct cvmrdma_qp * qp, struct ibv_send_wr *wrs, 
 			DEBUG("[SEND QPN %x] true_payload_bytes %lu\n", qp->user_qp.qp.qp_num, true_payload_bytes);
 			DEBUG("[SEND QPN %x] send_len %lu\n", qp->user_qp.qp.qp_num, send_len);
 
+
+			bool cached = false;
 			struct chunk_tracking_info* chunk_info = &cur_mr->chunk_tracking[chunk_idx];
-			
-			/* generate new payload nonce */
-			if (!chunk_info->cached){
+			if(!cvmrdma_disable_cache){
+				cached = atomic_load(&chunk_info->cached);
+			}
+			if(!cached) {
+				/* generate new payload nonce */
 				DEBUG("[SEND QPN %x] Generating new nonce for chunk %lu\n", qp->user_qp.qp.qp_num, chunk_idx);
 				randombytes_buf(chunk_info->nonce, cvmrdma_aead_NPUBBYTES);
 				DEBUG("[SEND QPN %x] nonce %lx %lx\n", qp->user_qp.qp.qp_num, chunk_info->nonce[0], chunk_info->nonce[1]);
@@ -989,27 +993,30 @@ static int post_send_do_bounce(struct cvmrdma_qp * qp, struct ibv_send_wr *wrs, 
 
 			TIMING("gec_t0");
 			/**** ENCRYPT *****/
-			if(chunk_info->cached){
+			if(cached){
 				DEBUG("[SEND QPN %x] Chunk %lu is cached\n", qp->user_qp.qp.qp_num, chunk_idx);
 				goto skip_payload_encryption;
 			}
 
 			DEBUG("[SEND QPN %x] Write protect region; addr %p, last_chunk %d, send_len %lu\n", qp->user_qp.qp.qp_num, ptxt, last_chunk, send_len);
 
-			// Mark chunk in userMR as write protected
-			atomic_store(&chunk_info->cached, true);
-			int uffd = cur_mr->uffd;
-			struct uffdio_writeprotect uffdio_wp = {
-				.range = {
-					.start = (unsigned long) ptxt,
-					.len = send_len,
-				},
-				.mode = UFFDIO_WRITEPROTECT_MODE_WP,
-			};
-			if (ioctl(uffd, UFFDIO_WRITEPROTECT, &uffdio_wp) == -1) {
-				fprintf(stderr, "Failed to write protect the memory region; addr %p, last_chunk %d, send_len %lu\n", ptxt, last_chunk, send_len);
-				exit(1);
+			if(!cvmrdma_disable_cache){
+				// Mark chunk in userMR as write protected
+				atomic_store(&chunk_info->cached, true);
+				int uffd = cur_mr->uffd;
+				struct uffdio_writeprotect uffdio_wp = {
+					.range = {
+						.start = (unsigned long) ptxt,
+						.len = send_len,
+					},
+					.mode = UFFDIO_WRITEPROTECT_MODE_WP,
+				};
+				if (ioctl(uffd, UFFDIO_WRITEPROTECT, &uffdio_wp) == -1) {
+					fprintf(stderr, "Failed to write protect the memory region; addr %p, last_chunk %d, send_len %lu\n", ptxt, last_chunk, send_len);
+					exit(1);
+				}
 			}
+			
 			
 			DEBUG("[SEND QPN %x] ptxt %x %x %x\n", qp->user_qp.qp.qp_num, ptxt[0], ptxt[1], ptxt[2]);
 			DEBUG("[SEND QPN %x] nonce %lx %lx\n", qp->user_qp.qp.qp_num, chunk_info->nonce[0], chunk_info->nonce[1]);
@@ -1115,18 +1122,15 @@ skip_payload_encryption:
 			bytes_sent += true_payload_bytes;
 			chunks_in_wr++;
 
-			/* after each send, try to dequeue some SEND WC from the CQ (if no other thread is polling the CQ)
-			   XXX: for performance, ideally don't dequeue after every send, and don't signal every send
-			*/
-			// err = cvmrdma_cq_server_run_once_if_idle(ctxt);
-			// if(err)
-			// {
-			// 	fprintf(stderr, "Polling the CQ after a post_send failed %d\n", err);
-			// 	exit(1);
-			// }
+			/* try to dequeue some SEND WC from the CQ (if no other thread is polling the CQ) */
 			if(++qp->cvmrdma_qp_send_wr_id % 100 == 0)
 			{
-				// TODO Poll the CQ
+				err = cvmrdma_cq_server_run_once_if_idle(ctxt, qp->provider_cq);
+				if(err)
+				{
+					fprintf(stderr, "Polling the CQ after a post_send failed %d\n", err);
+					exit(1);
+				}
 			}
 		}
 
@@ -1283,49 +1287,51 @@ static struct ibv_mr *cvmrdma_reg_mr(struct ibv_pd *ibpd, void *addr, size_t len
 	}
 
 
-	// Register userMR and Spin up userfaultfd thread
-	// See: man 2 userfaultfd
-	long uffd = syscall(__NR_userfaultfd, O_CLOEXEC | O_NONBLOCK);
-    if (uffd == -1) {
-		fprintf(stderr, "Failed to create userfaultfd %d\n", errno);
-		exit(1);
+	if(!cvmrdma_disable_cache) {
+		// Register userMR and Spin up userfaultfd thread
+		// See: man 2 userfaultfd
+		long uffd = syscall(__NR_userfaultfd, O_CLOEXEC | O_NONBLOCK);
+		if (uffd == -1) {
+			fprintf(stderr, "Failed to create userfaultfd %d\n", errno);
+			exit(1);
+		}
+
+		struct uffdio_api uffdio_api = {
+			.api = UFFD_API,
+			.features = UFFD_FEATURE_PAGEFAULT_FLAG_WP,
+		};
+		if (ioctl(uffd, UFFDIO_API, &uffdio_api) == -1) {
+			fprintf(stderr, "Failed to ioctl-UFFDIO_API %d\n", errno);
+			exit(1);
+		}
+
+		/* Register the memory range of the mapping we just created for
+		handling by the userfaultfd object. */
+		struct uffdio_register uffdio_register = {
+			.range = {
+				.start = (unsigned long) addr,
+				.len = length,
+			},
+			.mode = UFFDIO_REGISTER_MODE_WP | UFFDIO_REGISTER_MODE_MISSING,
+			//.mode = UFFDIO_REGISTER_MODE_WP,
+		};
+		if (ioctl(uffd, UFFDIO_REGISTER, &uffdio_register) == -1) {
+			fprintf(stderr, "Failed to ioctl-UFFDIO_REGISTER %d with addr %p and len %lu\n", errno, addr, length);
+			exit(1);
+		}
+
+		/* Create a thread that will process the userfaultfd events. */
+		struct fault_handler_thread_args *args = calloc(1, sizeof(struct fault_handler_thread_args));
+		args->mr = mr;
+		args->uffd = uffd;
+		int ret = pthread_create(&mr->cache_invalidation_thread, NULL, &fault_handler_thread, (void*) args);
+		if (ret) {
+			fprintf(stderr, "Failed to create fault handler thread\n");
+			exit(1);
+		}
+
+		mr->uffd = uffd;
 	}
-
-    struct uffdio_api uffdio_api = {
-        .api = UFFD_API,
-        .features = UFFD_FEATURE_PAGEFAULT_FLAG_WP,
-    };
-    if (ioctl(uffd, UFFDIO_API, &uffdio_api) == -1) {
-		fprintf(stderr, "Failed to ioctl-UFFDIO_API %d\n", errno);
-		exit(1);
-	}
-
-	/* Register the memory range of the mapping we just created for
-       handling by the userfaultfd object. */
-    struct uffdio_register uffdio_register = {
-        .range = {
-            .start = (unsigned long) addr,
-            .len = length,
-        },
-        .mode = UFFDIO_REGISTER_MODE_WP | UFFDIO_REGISTER_MODE_MISSING,
-        //.mode = UFFDIO_REGISTER_MODE_WP,
-    };
-    if (ioctl(uffd, UFFDIO_REGISTER, &uffdio_register) == -1) {
-		fprintf(stderr, "Failed to ioctl-UFFDIO_REGISTER %d with addr %p and len %lu\n", errno, addr, length);
-		exit(1);
-	}
-
-	/* Create a thread that will process the userfaultfd events. */
-	struct fault_handler_thread_args *args = calloc(1, sizeof(struct fault_handler_thread_args));
-	args->mr = mr;
-	args->uffd = uffd;
-    int ret = pthread_create(&mr->cache_invalidation_thread, NULL, &fault_handler_thread, (void*) args);
-    if (ret) {
-        fprintf(stderr, "Failed to create fault handler thread\n");
-		exit(1);
-    }
-
-	mr->uffd = uffd;
 
 	/*
 		The CVMRDMA MR exposes ibv_mr fields to the user containing data (eg the address)
@@ -1509,6 +1515,8 @@ _Atomic bool tcp_server_running = false;
 CapnpEvloopThread * evloop_server = NULL;
 CVMRDMAServer * tcp_server = NULL;
 
+bool cvmrdma_disable_cache = false;
+
 static struct verbs_context *cvmrdma_alloc_context(struct ibv_device *ibdev,
 						  int cmd_fd,
 						  void *private_data)
@@ -1559,6 +1567,13 @@ static struct verbs_context *cvmrdma_alloc_context(struct ibv_device *ibdev,
 	}
 
 	DEBUG("AEAD is %s\n", sodium_aead_str[aead]);
+
+
+	char const * cvmrdma_disable_cache_str = getenv("CVMRDMA_DISABLE_CACHE");
+	if(cvmrdma_disable_cache_str != NULL)
+	{
+		cvmrdma_disable_cache = true;
+	}
 
 
 	/* Initialize cryptographic APIs (can be called multiple times) */

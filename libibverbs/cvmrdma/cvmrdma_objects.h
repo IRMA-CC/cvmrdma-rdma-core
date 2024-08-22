@@ -243,3 +243,5 @@ struct chunk_tracking_info {
 	/* If the chink is not dirty this is true */
 	_Atomic bool cached; // 1 byte
 };
+
+extern bool cvmrdma_disable_cache;

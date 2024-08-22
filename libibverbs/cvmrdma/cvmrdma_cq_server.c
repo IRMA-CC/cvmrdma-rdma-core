@@ -269,7 +269,7 @@ static int cq_server_loop_once(struct cvmrdma_context * ctxt, struct cvmrdma_cq 
             size_t chunk_idx = offt / CVMRDMA_CHUNK_BYTES;
             unsigned char * payload_start = NULL;
 
-            if (! bypass_scatter)
+            if (!bypass_scatter || cvmrdma_disable_cache)
             {
                 /* Copy the payload into private memory */
                 payload_start = private + header_bytes;
@@ -333,7 +333,7 @@ static int cq_server_loop_once(struct cvmrdma_context * ctxt, struct cvmrdma_cq 
                 else the op is a SEND and we must use the next chunk in the current recv request */
 
 
-            if(! bypass_scatter)
+            if(!bypass_scatter || cvmrdma_disable_cache)
             {
                 if (is_write){
                     DEBUG("[CQ] WRITE: writing with notif.chunk_offt 0x%"PRIx64" and notif.chunk_len %zu to dest %p for notif.hca_addr %p\n", 
