@@ -2712,6 +2712,12 @@ static inline int ibv_bind_mw(struct ibv_qp *qp, struct ibv_mw *mw,
 struct ibv_comp_channel *ibv_create_comp_channel(struct ibv_context *context);
 
 /**
+ * ibv_create_comp_channel_prov - Create a completion event channel
+ * This is the original provider function which never mocks the channel
+ */
+struct ibv_comp_channel *ibv_create_comp_channel_prov(struct ibv_context *context);
+
+/**
  * ibv_destroy_comp_channel - Destroy a completion event channel
  */
 int ibv_destroy_comp_channel(struct ibv_comp_channel *channel);

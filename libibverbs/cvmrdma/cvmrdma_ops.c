@@ -21,6 +21,7 @@
 
 /* For get_ops */
 #include "../ibverbs.h"
+#include "../verbs.h"
 
 
 #include "cvmrdma.h"
@@ -101,6 +102,8 @@ static struct ibv_cq *cvmrdma_create_cq(struct ibv_context *ibcontext, int cqe,
 				int comp_vector)
 {
 	struct cvmrdma_cq * cq = calloc(1, sizeof(struct cvmrdma_cq));
+	struct cvmrdma_context * ctxt = cvmrdma_get_ctx(ibcontext);
+	int ret;
 
 	cq->user_cq.cq.context = ibcontext;
 	cq->user_cq.cq.cqe = cqe;
@@ -111,13 +114,33 @@ static struct ibv_cq *cvmrdma_create_cq(struct ibv_context *ibcontext, int cqe,
 	if(channel) {
 		assert(channel->fd >= 0);
 		cq->comp_channel_event_fd = channel->fd;
+		cq->provider_comp_channel = ibv_create_comp_channel_prov(ibcontext);
 	}
+	/* Create a single CQ to get the send and recv WC for the chunks */
+	struct ibv_cq * ibcq = ctxt->prov_ops.create_cq(ibcontext, 16384, cq->provider_comp_channel, 0);
+	if(! ibcq)
+	{
+		fprintf(stderr, "failed to create backend CQ for the CQ server\n");
+		exit(1);
+	}
+	/* see ibv_create_cq */
+	verbs_init_cq(ibcq, ibcontext, cq->provider_comp_channel, NULL);
+
+	if(channel != NULL) {
+		ret = ctxt->prov_ops.req_notify_cq(ibcq, 0);
+		if(ret)
+		{
+			fprintf(stderr, "Failed to request CQ notifications %d\n", ret);
+			exit(1);
+		}
+	}
+	cq->prov_cq = ibcq;
 
 	return &cq->user_cq.cq;
 }
 
 
-static int attach_qp_to_cq_server(struct cvmrdma_context * ctxt, struct cvmrdma_qp * qp)
+static int attach_qp_to_cq_manager(struct cvmrdma_context * ctxt, struct cvmrdma_qp * qp)
 {
 	/* Add this QP to the CQ server. This gives us one end of the notification
 	   channel ; the RPC server will push notifications there.
@@ -127,7 +150,7 @@ static int attach_qp_to_cq_server(struct cvmrdma_context * ctxt, struct cvmrdma_
 	uint32_t qpn = qp->user_qp.qp.qp_num;
 
 
-	err = cq_server_register_qp(&ctxt->cvmrdma_cq_server, qp);
+	err = qp_metadata_manager_register_qp(ctxt->qp_metadata_manager, qpn, qp);
     if(err)
     {
         fprintf(stderr, "failed to register QP on CQ server\n");
@@ -252,6 +275,8 @@ static struct ibv_qp *cvmrdma_create_qp(struct ibv_pd * ibpd,
 	struct cvmrdma_pd * pd = (struct cvmrdma_pd *)ibpd;
 	struct ibv_context * prov_ctxt = pd->user_pd.context;
     struct cvmrdma_context * ctxt = cvmrdma_get_ctx(prov_ctxt);
+	// TODO: in theory we could have different CQs for send and recv, but we don't support that yet
+	struct cvmrdma_cq * c_cq = (struct cvmrdma_cq *)attr->send_cq;
 	int err;
 
 	struct cvmrdma_qp * qp = calloc(1, sizeof(struct cvmrdma_qp));
@@ -260,8 +285,8 @@ static struct ibv_qp *cvmrdma_create_qp(struct ibv_pd * ibpd,
 	struct ibv_qp_init_attr_ex attr_ex = {0};
 	attr_ex.sq_sig_all = 1;
 	/* Direct send and recv WCs to the CQ server */
-	attr_ex.send_cq = ctxt->cvmrdma_cq_server.prov_cq;
-	attr_ex.recv_cq = ctxt->cvmrdma_cq_server.prov_cq;
+	attr_ex.send_cq = c_cq->prov_cq;
+	attr_ex.recv_cq = c_cq->prov_cq;
 
 	assert(attr->qp_type == IBV_QPT_RC);
 	attr_ex.qp_type = IBV_QPT_RC;
@@ -284,6 +309,7 @@ static struct ibv_qp *cvmrdma_create_qp(struct ibv_pd * ibpd,
     }
 
 	qp->provider_qp = ibqp;
+	qp->provider_cq = c_cq;
 
 	/* Create the control Completion Queue */
 	struct ibv_cq * control_ibcq = ctxt->prov_ops.create_cq(prov_ctxt, 16384, NULL, 0);
@@ -295,9 +321,6 @@ static struct ibv_qp *cvmrdma_create_qp(struct ibv_pd * ibpd,
 	/* see ibv_create_cq */
 	verbs_init_cq(control_ibcq, prov_ctxt, NULL, NULL);
 	qp->control_cq = control_ibcq;
-
-	
-
 
 	/* Create the control Queue Pair */
 	struct ibv_qp_init_attr_ex control_attr_ex = {0};
@@ -446,12 +469,22 @@ static struct ibv_qp *cvmrdma_create_qp(struct ibv_pd * ibpd,
 		goto dereg_ring_mr;
 	}
 
-
-	err = attach_qp_to_cq_server(ctxt, qp);
+	err = attach_qp_to_cq_manager(ctxt, qp);
 	if(err)
 	{
 		fprintf(stderr, "Failed to attach QP %" PRIx32 " to its recv cq (%d)\n", ibqp->qp_num, err);
 		goto free_send_lock;
+	}
+
+	// Since the actual application is likely to not poll the cq all the time,
+	// we need another trigger to wake up the cq server.
+	if(c_cq->provider_comp_channel != NULL) {
+		err = pthread_create(&c_cq->provider_comp_channel_thread, NULL, &cvmrdma_cq_wait_completion_event, (void *)c_cq);
+		if (err)
+		{
+			fprintf(stderr, "Error creating cvmrdma_cq_wait_completion_event thread: %d\n", err);
+			exit(1);
+		}
 	}
 
 	/* We can only get the capability to the remote QP once we know its QPN, this will be done
@@ -693,7 +726,7 @@ static int cvmrdma_poll_cq(struct ibv_cq * ibcq, int num_entries, struct ibv_wc 
 	}
 
 	/* run it ONLY if it is not running yet */
-	err = cvmrdma_cq_server_run_once_if_idle(ctxt);
+	err = cvmrdma_cq_server_run_once_if_idle(ctxt, cq);
 	if(err < 0)
 	{
 		return err;
@@ -724,7 +757,7 @@ static int cvmrdma_post_recv(struct ibv_qp *ibqp, struct ibv_recv_wr *wr,
 
 
 
-_Atomic uint64_t cvmrdma_qp_send_wr_id = 0;
+_Atomic uint64_t cvmrdma_global_send_wr_id = 0;
 static int post_send_do_bounce(struct cvmrdma_qp * qp, struct ibv_send_wr *wrs, struct ibv_send_wr **bad_wr, bool write_for_read)
 {
 	struct cvmrdma_context * ctxt = cvmrdma_get_ctx(qp->user_qp.qp.context);
@@ -844,7 +877,7 @@ static int post_send_do_bounce(struct cvmrdma_qp * qp, struct ibv_send_wr *wrs, 
 				((unsigned char *)cur_sge->addr)[16], ((unsigned char *)cur_sge->addr)[17]
 			);
 
-			// if(cvmrdma_qp_send_wr_id == 0xc) {
+			// if(cvmrdma_global_send_wr_id == 0xc) {
 			// 	struct cvmrdma_mr* mr = NULL;
             //     int i = 0;
             //     do {
@@ -1052,7 +1085,7 @@ skip_payload_encryption:
 
 			ibv_wr_start(prov_qpx);
 
-			prov_qpx->wr_id = cvmrdma_qp_send_wr_id++;
+			prov_qpx->wr_id = cvmrdma_global_send_wr_id++;
 			uint64_t send_offt = chunk_idx * cvmrdma_ring_slot_bytes(ctxt->aead);
 			DEBUG("[SEND QPN %x] WR ID 0x%lx\n", qp->user_qp.qp.qp_num, prov_qpx->wr_id);
 			DEBUG("[SEND QPN %x] provider lkey 0x%lx\n", qp->user_qp.qp.qp_num, local_provider_lkey);
@@ -1085,11 +1118,15 @@ skip_payload_encryption:
 			/* after each send, try to dequeue some SEND WC from the CQ (if no other thread is polling the CQ)
 			   XXX: for performance, ideally don't dequeue after every send, and don't signal every send
 			*/
-			err = cvmrdma_cq_server_run_once_if_idle(ctxt);
-			if(err)
+			// err = cvmrdma_cq_server_run_once_if_idle(ctxt);
+			// if(err)
+			// {
+			// 	fprintf(stderr, "Polling the CQ after a post_send failed %d\n", err);
+			// 	exit(1);
+			// }
+			if(++qp->cvmrdma_qp_send_wr_id % 100 == 0)
 			{
-				fprintf(stderr, "Polling the CQ after a post_send failed %d\n", err);
-				exit(1);
+				// TODO Poll the CQ
 			}
 		}
 
@@ -1587,31 +1624,8 @@ static struct verbs_context *cvmrdma_alloc_context(struct ibv_device *ibdev,
 	cvmrdma_ctx->remote_network_client_connection = NULL;
 	cvmrdma_ctx->remote_network_client_cap = NULL;
 
-	/* Get the root capability to the remote's RPC's API */
-	
-	/* Create a single CQ to get the send and recv WC for the chunks */
-	struct ibv_cq * ibcq = cvmrdma_ctx->prov_ops.create_cq(prov_ctx, 16384, cvmrdma_ctx->provider_comp_channel, 0);
-	if(! ibcq)
-	{
-		fprintf(stderr, "failed to create backend CQ for the CQ server\n");
-		exit(1);
-	}
-	/* see ibv_create_cq */
-	verbs_init_cq(ibcq, prov_ctx, NULL, NULL);
-
-	if(cvmrdma_ctx->provider_comp_channel) {
-		ret = cvmrdma_ctx->prov_ops.req_notify_cq(ibcq, 0);
-		if(ret)
-		{
-			fprintf(stderr, "Failed to request CQ notifications %d\n", ret);
-			goto err;
-		}
-	}
-
-
-	/* Initialize the CQ polling metadata */
-	cq_server_context_init(&cvmrdma_ctx->cvmrdma_cq_server, ibcq);
-
+	// TODO: qp_metadata_manager_destroy(server->qp_metadata_manager); when destroying the context
+	cvmrdma_ctx->qp_metadata_manager = qp_metadata_manager_alloc();
 
 #ifndef DUMMY_SYSTEM_HEAP
 	int system_heap_fd = open_system_heap();

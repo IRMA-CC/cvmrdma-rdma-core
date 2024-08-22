@@ -11,8 +11,9 @@
 #include "cvmrdma_network_client.h"
 #include "cvmrdma_network_server.h"
 #include "cvmrdma_network_evloop.h"
-#include "cvmrdma_cq_server.h"
+#include "bounce_metadata.h"
 #include "qp_metadata_manager.h"
+#include "wc_queue.h"
 
 
 struct cvmrdma_pd {
@@ -32,9 +33,6 @@ struct cvmrdma_context {
 	/* Save the function pointers to the provider ops here. */
 	struct verbs_context_ops prov_ops;
 
-	/* CQ server for every QP is in this process */
-	CQServer cvmrdma_cq_server;
-
 	/* Server and client for IP based RPCs.
         The event loop runs the server by default, and later on CVMRDMA layer can
         open as many sessions as necessary to remote servers on the same event loop.
@@ -50,9 +48,10 @@ struct cvmrdma_context {
 	RPCClientSession *remote_network_client_connection;
 	CVMRDMAClient *remote_network_client_cap;
 
-	struct ibv_comp_channel *provider_comp_channel;
-	pthread_t provider_comp_channel_thread;
-
+	/* Metadata manager maps QPNs to QPs
+	   This is shared between all CQ servers.
+	*/
+	QPMetadataManager * qp_metadata_manager;
 
 	char const *local_addr;
 	char const *remote_addr;
@@ -90,6 +89,16 @@ struct cvmrdma_mr {
 struct cvmrdma_cq {
 	struct verbs_cq user_cq;
 
+	/* Provider CQ */
+	struct ibv_cq * prov_cq;
+
+	/* The incomming WRITE_WITH_IMM need to be written to the user_mr in the
+	 * they arrive. E.g. when we emulate a SEND, we slowly copy segment by segment
+	 * to the address the user specified in the RECV.
+	 * In the future we can process different user WQEs in parallel.
+	 */
+	 _Atomic bool is_running;
+
 	/* a cvmrdma_cq does not correspond to a backend cq: there is a single CQ server,
        this CQ only gets notification through the WCQueue */
 
@@ -101,14 +110,24 @@ struct cvmrdma_cq {
 	*/
 	int comp_channel_event_fd;
 	_Atomic bool comp_channel_event_fd_filled;
+
+	/* Provider comp channel
+	   This is used when the application also uses a comp channel,
+	   since then the applications polls on that channel before calling ibv_poll_cq().
+	   Once we receive data on the provider qp/cq we can run the cq_server.
+	*/
+	struct ibv_comp_channel *provider_comp_channel;
+	pthread_t provider_comp_channel_thread;
 };
 
 struct cvmrdma_qp {
 	/* Fake user-visible data */
 	struct verbs_qp user_qp;
 
-	/* Actual provider qp */
+	/* Actual provider qp and cq*/
 	struct ibv_qp *provider_qp;
+	/* Note: multiple cvmrdma_qps can point to the same provider_cq */
+	struct cvmrdma_cq *provider_cq;
 
 	/* Second control channel hidden from the user */
 	struct ibv_qp *control_qp;
@@ -160,6 +179,9 @@ struct cvmrdma_qp {
 	   If a certain threshold is reached, the server sends an ACK.
 	*/
 	int received_lines;
+
+	/* qp specific counter of all send messages*/
+	_Atomic uint64_t cvmrdma_qp_send_wr_id;
 
 	/* Ringbuffer where ACKs are written to */
 	struct ibv_mr *control_buf_mr;

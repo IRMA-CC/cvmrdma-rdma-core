@@ -17,29 +17,17 @@
 #include <infiniband/verbs.h>
 #include "debug.h"
 
+#include "../ibverbs.h"
+
 #include "cvmrdma.h"
 #include "cvmrdma_objects.h"
 #include "cvmrdma_network_evloop_priv.h"
 
-void cq_server_context_init(CQServer * server, struct ibv_cq * prov_cq)
+#define CQ_SERVER_NUM_WCS 32 //CVMRDMA_RING_ENTRIES
+static int cq_server_loop_once(struct cvmrdma_context * ctxt, struct cvmrdma_cq * cq)
 {
-    server->prov_cq = prov_cq;
-    server->qp_metadata_manager = qp_metadata_manager_alloc();
-
-    atomic_store(&server->is_running, false);
-}
-
-void cq_server_context_destroy(CQServer * server)
-{
-    qp_metadata_manager_destroy(server->qp_metadata_manager);
-}
-
-#define CQ_SERVER_NUM_WCS CVMRDMA_RING_ENTRIES //32
-static int cq_server_loop_once(struct cvmrdma_context * ctxt)
-{
-    CQServer * server = &ctxt->cvmrdma_cq_server;
-    struct ibv_cq * prov_cq = server->prov_cq;
-    QPMetadataManager * qp_metadata_manager = server->qp_metadata_manager;
+    struct ibv_cq * prov_cq = cq->prov_cq;
+    QPMetadataManager * qp_metadata_manager = ctxt->qp_metadata_manager;
 
     enum sodium_crypto_aead aead = ctxt->aead;
 	unsigned long long header_bytes = cvmrdma_header_bytes(aead);
@@ -524,9 +512,8 @@ static int cq_server_loop_once(struct cvmrdma_context * ctxt)
 }
 
 
-int cvmrdma_cq_server_run_once_if_idle(struct cvmrdma_context * ctxt)
+int cvmrdma_cq_server_run_once_if_idle(struct cvmrdma_context * ctxt, struct cvmrdma_cq * cq)
 {
-    CQServer * server = &ctxt->cvmrdma_cq_server;
     int err;
 
     /*
@@ -538,55 +525,41 @@ int cvmrdma_cq_server_run_once_if_idle(struct cvmrdma_context * ctxt)
 	*/
 
 	bool expected = false;
-	bool first = atomic_compare_exchange_strong(&server->is_running, &expected, true);
+	bool first = atomic_compare_exchange_strong(&cq->is_running, &expected, true);
 	if(first)
 	{
-		err = cq_server_loop_once(ctxt);
+		err = cq_server_loop_once(ctxt, cq);
 		if(err)
 		{
 			return - err;
 		}
 
 		/* And bring it down */
-		atomic_store(&server->is_running, false);
+		atomic_store(&cq->is_running, false);
 	}
     return 0;
 }
 
 // This is used if the actual application uses the completion channel
 
-void* cvmrdma_cq_wait_completion_event(void* ctxt) {
-    struct cvmrdma_context * context = (struct cvmrdma_context *) ctxt;
+void* cvmrdma_cq_wait_completion_event(void* c_cq) {
+    struct cvmrdma_cq * cq = (struct cvmrdma_cq *)c_cq;
+    struct cvmrdma_context * context = cvmrdma_get_ctx(cq->user_cq.cq.context);
     struct ibv_cq *ev_cq;
     void *ev_ctx;
     int ret;
-        
-    struct pollfd my_pollfd;
-    my_pollfd.fd      = context->provider_comp_channel->fd;
-    my_pollfd.events  = POLLIN;
-    my_pollfd.revents = 0;
-    int ms_timeout = 10;
 
     DEBUG("[CQ] Waiting for CQ event\n");
 
     for(;;) {
         if(false) {
-            do {
-                ret = poll(&my_pollfd, 1, ms_timeout);
-            } while (ret == 0);
-            if (ret < 0) {
-                fprintf(stderr, "poll failed\n");
-                return -1;
-            }
-
-            DEBUG("[CQ] Polled CQ event\n");
-
-            ret = ibv_get_cq_event(context->provider_comp_channel, &ev_cq, &ev_ctx);
+            ret = ibv_get_cq_event(cq->provider_comp_channel, &ev_cq, &ev_ctx);
             if (ret) {
                 fprintf(stderr, "Failed to get CQ event\n");
                 exit(1);
             }
             DEBUG("[CQ] Got CQ event\n");
+            assert(ev_cq == cq->prov_cq);
 
             /* Ack the event */
             ibv_ack_cq_events(ev_cq, 1);
@@ -599,26 +572,13 @@ void* cvmrdma_cq_wait_completion_event(void* ctxt) {
             }
         }
 
-        // sleep(5);
-
-
-
-        ret = cvmrdma_cq_server_run_once_if_idle(context);
+        ret = cvmrdma_cq_server_run_once_if_idle(context, cq);
         if(ret)
         {
             fprintf(stderr, "CQ server error: poll CQ failed %d\n", ret);
             exit(1);
         }
     }
-}
-
-
-/* Every time a QP is added to a CQ, it has to be registered on the CQ server
-   Threadsafe, since the NQ manager is threadsafe.
-*/
-int cq_server_register_qp(CQServer * server, struct cvmrdma_qp * qp)
-{
-    return qp_metadata_manager_register_qp(server->qp_metadata_manager, qp->user_qp.qp.qp_num, qp);
 }
 
 void print_mr_from_ctxt(struct cvmrdma_context * context) {

@@ -529,30 +529,36 @@ struct ibv_comp_channel *ibv_create_comp_channel(struct ibv_context *context)
 		user_fd = eventfd(0, 0);
 		DEBUG("[VERBS] ibv_create_comp_channel: created user_fd %d\n", user_fd);
 		DEBUG("[VERBS] ibv_create_comp_channel: created provider_fd %d\n", resp.fd);
-
-		// Since the actual application is likely to not poll the cq all the time,
-		// we need another trigger to wake up the cq server.
-		struct cvmrdma_context * ctxt = cvmrdma_get_ctx(context);
-
-		struct ibv_comp_channel *provider_channel = malloc(sizeof *channel);
-		provider_channel->context = context;
-		provider_channel->fd      = resp.fd;
-		provider_channel->refcnt  = 0;
-
-		ctxt->provider_comp_channel = provider_channel;
-
-		int ret = pthread_create(&ctxt->provider_comp_channel_thread, NULL, &cvmrdma_cq_wait_completion_event, (void *)ctxt);
-		if (ret)
-		{
-			fprintf(stderr, "Error creating cvmrdma_cq_wait_completion_event thread: %d\n", ret);
-			exit(1);
-		}
 	} else {
 		user_fd = resp.fd;
 	}
 
 	channel->context = context;
 	channel->fd      = user_fd;
+	channel->refcnt  = 0;
+
+	return channel;
+}
+
+struct ibv_comp_channel *ibv_create_comp_channel_prov(struct ibv_context *context)
+{
+	struct ibv_create_comp_channel req;
+	struct ib_uverbs_create_comp_channel_resp resp;
+	struct ibv_comp_channel            *channel;
+
+	channel = malloc(sizeof *channel);
+	if (!channel)
+		return NULL;
+
+	req.core_payload = (struct ib_uverbs_create_comp_channel){};
+	if (execute_cmd_write(context, IB_USER_VERBS_CMD_CREATE_COMP_CHANNEL,
+				&req, sizeof(req), &resp, sizeof(resp))) {
+		free(channel);
+		return NULL;
+	}
+
+	channel->context = context;
+	channel->fd      = resp.fd;
 	channel->refcnt  = 0;
 
 	return channel;
