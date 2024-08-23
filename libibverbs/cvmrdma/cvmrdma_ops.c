@@ -1543,7 +1543,7 @@ static struct verbs_context *cvmrdma_alloc_context(struct ibv_device *ibdev,
 	}
 
 	char const * aead_str = getenv("CVMRDMA_AEAD");
-	enum sodium_crypto_aead aead = SODIUM_AEAD_XCHACHAPOLY;
+	enum sodium_crypto_aead aead = LIBAEGIS_AEAD_AEGIS128X4;
 	char const * sodium_aead_str[__SODIUM_AEAD_NR] = {
 		[SODIUM_AEAD_NONE] = "none",
 		[SODIUM_AEAD_XCHACHAPOLY] = "xchachapoly",
