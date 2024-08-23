@@ -1126,7 +1126,7 @@ skip_payload_encryption:
 			if(++qp->cvmrdma_qp_send_wr_id % 100 == 0)
 			{
 				err = cvmrdma_cq_server_run_once_if_idle(ctxt, qp->provider_cq);
-				if(err)
+				if(err < 0)
 				{
 					fprintf(stderr, "Polling the CQ after a post_send failed %d\n", err);
 					exit(1);

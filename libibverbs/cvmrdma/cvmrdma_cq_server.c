@@ -23,7 +23,7 @@
 #include "cvmrdma_objects.h"
 #include "cvmrdma_network_evloop_priv.h"
 
-#define CQ_SERVER_NUM_WCS 32 //CVMRDMA_RING_ENTRIES
+#define CQ_SERVER_NUM_WCS CVMRDMA_RING_ENTRIES
 static int cq_server_loop_once(struct cvmrdma_context * ctxt, struct cvmrdma_cq * cq)
 {
     struct ibv_cq * prov_cq = cq->prov_cq;
@@ -41,8 +41,8 @@ static int cq_server_loop_once(struct cvmrdma_context * ctxt, struct cvmrdma_cq 
     if(nwcs < 0)
     {
         err = nwcs;
-        fprintf(stderr, "CQ server error: poll CQ failed %d\n", err);
-        return err;
+        fprintf(stderr, "[CQ] poll provider CQ failed %d\n", err);
+        exit(1);
     }
     if(nwcs > 0)
     {
@@ -508,13 +508,13 @@ static int cq_server_loop_once(struct cvmrdma_context * ctxt, struct cvmrdma_cq 
         }
     }
 
-    return 0;
+    return nwcs;
 }
 
 
 int cvmrdma_cq_server_run_once_if_idle(struct cvmrdma_context * ctxt, struct cvmrdma_cq * cq)
 {
-    int err;
+    int ret = 1;
 
     /*
     ! is_running => (is_running = true && first = true)
@@ -528,16 +528,11 @@ int cvmrdma_cq_server_run_once_if_idle(struct cvmrdma_context * ctxt, struct cvm
 	bool first = atomic_compare_exchange_strong(&cq->is_running, &expected, true);
 	if(first)
 	{
-		err = cq_server_loop_once(ctxt, cq);
-		if(err)
-		{
-			return - err;
-		}
-
+		ret = cq_server_loop_once(ctxt, cq);
 		/* And bring it down */
 		atomic_store(&cq->is_running, false);
 	}
-    return 0;
+    return ret;
 }
 
 // This is used if the actual application uses the completion channel
@@ -546,6 +541,7 @@ void* cvmrdma_cq_wait_completion_event(void* c_cq) {
     struct cvmrdma_cq * cq = (struct cvmrdma_cq *)c_cq;
     struct cvmrdma_context * context = cvmrdma_get_ctx(cq->user_cq.cq.context);
     struct ibv_cq *ev_cq;
+    struct pollfd pfd;
     void *ev_ctx;
     int ret;
 
@@ -553,6 +549,14 @@ void* cvmrdma_cq_wait_completion_event(void* c_cq) {
 
     for(;;) {
         if(false) {
+            pfd.fd = cq->provider_comp_channel->fd;
+            pfd.events = POLLIN;
+            pfd.revents = 0;
+            if (poll(&pfd, 1, 1) < 0) {
+                fprintf(stderr, "Failed to poll CQ event\n");
+                exit(1);
+            }
+
             ret = ibv_get_cq_event(cq->provider_comp_channel, &ev_cq, &ev_ctx);
             if (ret) {
                 fprintf(stderr, "Failed to get CQ event\n");
@@ -561,22 +565,21 @@ void* cvmrdma_cq_wait_completion_event(void* c_cq) {
             DEBUG("[CQ] Got CQ event\n");
             assert(ev_cq == cq->prov_cq);
 
-            /* Ack the event */
-            ibv_ack_cq_events(ev_cq, 1);
-
             /* Request notification upon the next completion event */
             ret = context->prov_ops.req_notify_cq(ev_cq, 0);
             if (ret) {
                 fprintf(stderr, "Couldn't request CQ notification\n");
                 exit(1);
             }
-        }
 
-        ret = cvmrdma_cq_server_run_once_if_idle(context, cq);
-        if(ret)
-        {
-            fprintf(stderr, "CQ server error: poll CQ failed %d\n", ret);
-            exit(1);
+            do {
+                ret = cvmrdma_cq_server_run_once_if_idle(context, cq);
+            } while (ret > 0);
+
+            /* Ack the event */
+            ibv_ack_cq_events(ev_cq, 1);
+        } else {
+            cvmrdma_cq_server_run_once_if_idle(context, cq);
         }
     }
 }
