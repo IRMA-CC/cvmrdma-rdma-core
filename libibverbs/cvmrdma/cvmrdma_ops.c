@@ -331,9 +331,9 @@ static struct ibv_qp *cvmrdma_create_qp(struct ibv_pd * ibpd,
 	control_attr_ex.qp_type = IBV_QPT_RC;
 
 	control_attr_ex.cap.max_recv_sge = 16;
-	control_attr_ex.cap.max_recv_wr = CVMRDMA_RING_ENTRIES;
+	control_attr_ex.cap.max_recv_wr = 4096;
 	control_attr_ex.cap.max_send_sge = 16;
-	control_attr_ex.cap.max_send_wr = CVMRDMA_RING_ENTRIES;
+	control_attr_ex.cap.max_send_wr = 4096;
 	control_attr_ex.cap.max_inline_data = 0; /* we're not using inline */
 
 	control_attr_ex.pd = pd->provider_pd;
@@ -661,7 +661,7 @@ static int cvmrdma_modify_qp(struct ibv_qp *ibqp, struct ibv_qp_attr *attr,
 		/* Prepare all the slots: need one RR per WRITE_WITH_IMM. Can only post recv  
 			after RTR state */
 		struct ibv_recv_wr recv_wr[1] = {0};
-		for(int i = 0 ; i < CVMRDMA_RING_ENTRIES ; i++)
+		for(int i = 0 ; i < 4096 ; i++)
 		{
 			struct ibv_recv_wr * bad_wr = NULL;
 			ret = ctxt->prov_ops.post_recv(prov_qp, recv_wr, &bad_wr);

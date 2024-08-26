@@ -22,7 +22,7 @@ struct cq_server_notification
 
 #define CVMRDMA_SHARED_KEY_ENV "CVMRDMA_SHARED_KEY"
 
-#define CVMRDMA_CHUNK_BYTES ((uint64_t)32 * PAGE_SIZE)
+#define CVMRDMA_CHUNK_BYTES ((uint64_t)1 * PAGE_SIZE)
 
 static inline uint64_t cvmrdma_ring_slot_bytes(enum sodium_crypto_aead aead)
 {
@@ -36,7 +36,7 @@ static inline uint64_t cvmrdma_header_bytes(enum sodium_crypto_aead aead)
 	return sizeof(struct cq_server_notification) + cvmrdma_ABYTES(aead);
 }
 
-#define CVMRDMA_RING_ENTRIES 4096
+#define CVMRDMA_RING_ENTRIES 8192
 
 #define CVMRDMA_ACK_THRESHOLD DIVIDE_ROUND_UP(CVMRDMA_RING_ENTRIES, 2)
 
