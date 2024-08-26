@@ -178,7 +178,6 @@ void *control_server_receive_acks(void *args)
 		int num_comp = 0;
 		do {
 			num_comp = prov_ops.poll_cq(control_cq, 1, &wc);
-			sleep(1);
 
 			err = pthread_setcancelstate(PTHREAD_CANCEL_ENABLE, NULL);
 			if (err != 0)
