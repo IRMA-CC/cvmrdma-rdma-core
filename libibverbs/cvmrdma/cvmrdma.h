@@ -36,7 +36,7 @@ static inline uint64_t cvmrdma_header_bytes(enum sodium_crypto_aead aead)
 	return sizeof(struct cq_server_notification) + cvmrdma_ABYTES(aead);
 }
 
-#define CVMRDMA_RING_ENTRIES 512
+#define CVMRDMA_RING_ENTRIES 4096
 
 #define CVMRDMA_ACK_THRESHOLD DIVIDE_ROUND_UP(CVMRDMA_RING_ENTRIES, 2)
 
