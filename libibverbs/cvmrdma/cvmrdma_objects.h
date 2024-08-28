@@ -242,6 +242,7 @@ struct chunk_tracking_info {
 	uint64_t nonce[cvmrdma_aead_NPUB_WORDS]; // 24 bytes
 	/* If the chink is not dirty this is true */
 	_Atomic bool cached; // 1 byte
+	pthread_mutex_t lock;
 };
 
 extern bool cvmrdma_disable_cache;

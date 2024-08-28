@@ -926,19 +926,15 @@ static int post_send_do_bounce(struct cvmrdma_qp * qp, struct ibv_send_wr *wrs, 
 
 
 			bool cached = false;
-			uint64_t payload_nonce[cvmrdma_aead_NPUB_WORDS];
 			struct chunk_tracking_info* chunk_info = &cur_mr->chunk_tracking[chunk_idx];
 			if(!cvmrdma_disable_cache){
+				pthread_mutex_lock(&chunk_info->lock);
 				cached = atomic_load(&chunk_info->cached);
 			}
-			if(cached) {
-				DEBUG("[SEND QPN %x] Chunk %lu is cached\n", qp->user_qp.qp.qp_num, chunk_idx);
-				memcpy(payload_nonce, chunk_info->nonce, cvmrdma_aead_NPUBBYTES);
-			}
-			else {
+			if(!cached) {
 				/* generate new payload nonce */
 				DEBUG("[SEND QPN %x] Generating new nonce for chunk %lu\n", qp->user_qp.qp.qp_num, chunk_idx);
-				randombytes_buf(&payload_nonce, cvmrdma_aead_NPUBBYTES);
+				randombytes_buf(chunk_info->nonce, cvmrdma_aead_NPUBBYTES);
 				DEBUG("[SEND QPN %x] nonce %lx %lx\n", qp->user_qp.qp.qp_num, chunk_info->nonce[0], chunk_info->nonce[1]);
 			}
 
@@ -957,7 +953,7 @@ static int post_send_do_bounce(struct cvmrdma_qp * qp, struct ibv_send_wr *wrs, 
 					notif.op = this_op;
 					notif.rkey = rkey;
 					notif.imm = this_imm;
-					memcpy(notif.payload_nonce, payload_nonce, cvmrdma_aead_NPUBBYTES);
+					memcpy(notif.payload_nonce, chunk_info->nonce, cvmrdma_aead_NPUBBYTES);
 					notif.chunk_offt = offt % CVMRDMA_CHUNK_BYTES;
 					notif.chunk_len = true_payload_bytes;
 					notif.last_chunk = last_chunk;
@@ -970,7 +966,7 @@ static int post_send_do_bounce(struct cvmrdma_qp * qp, struct ibv_send_wr *wrs, 
 					notif.op = this_op;
 					notif.rkey = 0;
 					notif.imm = this_imm;
-					memcpy(notif.payload_nonce, payload_nonce, cvmrdma_aead_NPUBBYTES);
+					memcpy(notif.payload_nonce, chunk_info->nonce, cvmrdma_aead_NPUBBYTES);
 					notif.chunk_offt = offt % CVMRDMA_CHUNK_BYTES;
 					notif.chunk_len = true_payload_bytes;
 					notif.last_chunk = last_chunk;
@@ -1005,7 +1001,7 @@ static int post_send_do_bounce(struct cvmrdma_qp * qp, struct ibv_send_wr *wrs, 
 
 			DEBUG("[SEND QPN %x] Write protect region; addr %p, last_chunk %d, send_len %lu\n", qp->user_qp.qp.qp_num, ptxt, last_chunk, send_len);			
 			DEBUG("[SEND QPN %x] ptxt %x %x %x\n", qp->user_qp.qp.qp_num, ptxt[0], ptxt[1], ptxt[2]);
-			DEBUG("[SEND QPN %x] payload_nonce %lx %lx\n", qp->user_qp.qp.qp_num, payload_nonce[0], payload_nonce[1]);
+			DEBUG("[SEND QPN %x] chunk_info->nonce %lx %lx\n", qp->user_qp.qp.qp_num, chunk_info->nonce[0], chunk_info->nonce[1]);
 
 			unsigned long long payload_clen = send_len;
 			err = cvmrdma_encrypt(
@@ -1014,7 +1010,7 @@ static int post_send_do_bounce(struct cvmrdma_qp * qp, struct ibv_send_wr *wrs, 
 				ptxt, send_len,
 				NULL, 0,
 				NULL,
-				(unsigned char *)payload_nonce,
+				(unsigned char *)chunk_info->nonce,
 				(unsigned char const *)shared_key,
 				aead
 			);
@@ -1041,7 +1037,6 @@ static int post_send_do_bounce(struct cvmrdma_qp * qp, struct ibv_send_wr *wrs, 
 					fprintf(stderr, "Failed to write protect the memory region; addr %p, last_chunk %d, send_len %lu\n", ptxt, last_chunk, send_len);
 					exit(1);
 				}
-				memcpy(chunk_info->nonce, payload_nonce, cvmrdma_aead_NPUBBYTES);
 				atomic_store(&chunk_info->cached, true);
 			}
 
@@ -1124,6 +1119,10 @@ skip_payload_encryption:
 			{
 				fprintf(stderr, "Failed to post WWI for a chunk (%d)\n", err);
 				exit(1);
+			}
+
+			if(!cvmrdma_disable_cache){
+				pthread_mutex_unlock(&chunk_info->lock);
 			}
 
 			bytes_sent += true_payload_bytes;
@@ -1291,6 +1290,10 @@ static struct ibv_mr *cvmrdma_reg_mr(struct ibv_pd *ibpd, void *addr, size_t len
 	{
 		fprintf(stderr, "Failed to allocate chunk tracking array\n");
 		exit(1);
+	}
+	for (uint64_t i = 0; i < num_chunks; i++)
+	{
+		pthread_mutex_init(&mr->chunk_tracking[i].lock, NULL);
 	}
 
 

@@ -268,6 +268,7 @@ static int cq_server_loop_once(struct cvmrdma_context * ctxt, struct cvmrdma_cq 
 
             size_t chunk_idx = offt / CVMRDMA_CHUNK_BYTES;
             unsigned char * payload_start = NULL;
+            struct chunk_tracking_info* chunk_info = &cur_mr->chunk_tracking[chunk_idx];
 
             if (!bypass_scatter || cvmrdma_disable_cache)
             {
@@ -285,6 +286,7 @@ static int cq_server_loop_once(struct cvmrdma_context * ctxt, struct cvmrdma_cq 
                 // TODO: this is wrong
                 assert(offt % CVMRDMA_CHUNK_BYTES == 0);
                 DEBUG("[CQ] chunk_idx %zu to chunk cache\n", chunk_idx);
+                pthread_mutex_lock(&chunk_info->lock);
                 payload_start = cur_mr->provider_va + chunk_idx * cvmrdma_ring_slot_bytes(ctxt->aead) +  cvmrdma_header_bytes(ctxt->aead);
 
                 memcpy(payload_start, slot + header_bytes, cvmrdma_ring_slot_bytes(ctxt->aead) - cvmrdma_header_bytes(ctxt->aead));
@@ -407,8 +409,9 @@ static int cq_server_loop_once(struct cvmrdma_context * ctxt, struct cvmrdma_cq 
                     fprintf(stderr, "[CQ] ioctl-UFFDIO_WRITEPROTECT: %d\n", errno);
                     exit(1);
                 }
-                memcpy(cur_mr->chunk_tracking[chunk_idx].nonce, notif.payload_nonce, cvmrdma_aead_NPUBBYTES);
-                atomic_store(&cur_mr->chunk_tracking[chunk_idx].cached, true);
+                memcpy(chunk_info->nonce, notif.payload_nonce, cvmrdma_aead_NPUBBYTES);
+                atomic_store(&chunk_info->cached, true);
+                pthread_mutex_unlock(&chunk_info->lock);
 
 
                 /* Record in the QP the number of bytes written during the decrypt (directly to dest) */
