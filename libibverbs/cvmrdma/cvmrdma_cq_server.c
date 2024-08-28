@@ -289,7 +289,12 @@ static int cq_server_loop_once(struct cvmrdma_context * ctxt, struct cvmrdma_cq 
 
                 memcpy(payload_start, slot + header_bytes, cvmrdma_ring_slot_bytes(ctxt->aead) - cvmrdma_header_bytes(ctxt->aead));
 
-                memcpy(cur_mr->chunk_tracking[chunk_idx].nonce, notif.payload_nonce, cvmrdma_aead_NPUBBYTES);
+                DEBUG("[CQ] payload_start %x %x %x %x %x %x %x %x %x %x %x %x %x %x %x %x %x %x\n", 
+                    payload_start[0], payload_start[1], payload_start[2], payload_start[3],
+                    payload_start[4], payload_start[5], payload_start[6], payload_start[7],
+                    payload_start[8], payload_start[9], payload_start[10], payload_start[11],
+                    payload_start[12], payload_start[13], payload_start[14], payload_start[15],
+                    payload_start[16], payload_start[17]);
 
                 struct uffdio_writeprotect uffdio_wp = {
                     .range = {
@@ -391,19 +396,6 @@ static int cq_server_loop_once(struct cvmrdma_context * ctxt, struct cvmrdma_cq 
             }
             else
             {
-                /* Record in the QP the number of bytes written during the decrypt (directly to dest) */
-                struct recv_metadata_entry * recv_info = qp_recv_metadata_front(qp->recv_metadata);
-                struct ibv_sge * rcv_sgl = recv_info->sgl;
-                struct ibv_sge * cur_sge = &rcv_sgl[qp->cur_sge_idx];
-
-                qp->cur_offt_in_sge += notif.chunk_len;
-                if(qp->cur_offt_in_sge >= cur_sge->length)
-                {
-                    qp->cur_offt_in_sge = 0;
-                    qp->cur_sge_idx++;
-                }
-
-                atomic_store(&cur_mr->chunk_tracking[chunk_idx].cached, true);
                 struct uffdio_writeprotect uffdio_wp = {
                     .range = {
                         .start = (unsigned long) decrypted,
@@ -414,6 +406,21 @@ static int cq_server_loop_once(struct cvmrdma_context * ctxt, struct cvmrdma_cq 
                 if (ioctl(cur_mr->uffd, UFFDIO_WRITEPROTECT, &uffdio_wp) == -1) {
                     fprintf(stderr, "[CQ] ioctl-UFFDIO_WRITEPROTECT: %d\n", errno);
                     exit(1);
+                }
+                memcpy(cur_mr->chunk_tracking[chunk_idx].nonce, notif.payload_nonce, cvmrdma_aead_NPUBBYTES);
+                atomic_store(&cur_mr->chunk_tracking[chunk_idx].cached, true);
+
+
+                /* Record in the QP the number of bytes written during the decrypt (directly to dest) */
+                struct recv_metadata_entry * recv_info = qp_recv_metadata_front(qp->recv_metadata);
+                struct ibv_sge * rcv_sgl = recv_info->sgl;
+                struct ibv_sge * cur_sge = &rcv_sgl[qp->cur_sge_idx];
+
+                qp->cur_offt_in_sge += notif.chunk_len;
+                if(qp->cur_offt_in_sge >= cur_sge->length)
+                {
+                    qp->cur_offt_in_sge = 0;
+                    qp->cur_sge_idx++;
                 }
             }
 

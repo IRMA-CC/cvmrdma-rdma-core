@@ -926,14 +926,19 @@ static int post_send_do_bounce(struct cvmrdma_qp * qp, struct ibv_send_wr *wrs, 
 
 
 			bool cached = false;
+			uint64_t payload_nonce[cvmrdma_aead_NPUB_WORDS];
 			struct chunk_tracking_info* chunk_info = &cur_mr->chunk_tracking[chunk_idx];
 			if(!cvmrdma_disable_cache){
 				cached = atomic_load(&chunk_info->cached);
 			}
-			if(!cached) {
+			if(cached) {
+				DEBUG("[SEND QPN %x] Chunk %lu is cached\n", qp->user_qp.qp.qp_num, chunk_idx);
+				memcpy(payload_nonce, chunk_info->nonce, cvmrdma_aead_NPUBBYTES);
+			}
+			else {
 				/* generate new payload nonce */
 				DEBUG("[SEND QPN %x] Generating new nonce for chunk %lu\n", qp->user_qp.qp.qp_num, chunk_idx);
-				randombytes_buf(chunk_info->nonce, cvmrdma_aead_NPUBBYTES);
+				randombytes_buf(&payload_nonce, cvmrdma_aead_NPUBBYTES);
 				DEBUG("[SEND QPN %x] nonce %lx %lx\n", qp->user_qp.qp.qp_num, chunk_info->nonce[0], chunk_info->nonce[1]);
 			}
 
@@ -952,7 +957,7 @@ static int post_send_do_bounce(struct cvmrdma_qp * qp, struct ibv_send_wr *wrs, 
 					notif.op = this_op;
 					notif.rkey = rkey;
 					notif.imm = this_imm;
-					memcpy(notif.payload_nonce, chunk_info->nonce, cvmrdma_aead_NPUBBYTES);
+					memcpy(notif.payload_nonce, payload_nonce, cvmrdma_aead_NPUBBYTES);
 					notif.chunk_offt = offt % CVMRDMA_CHUNK_BYTES;
 					notif.chunk_len = true_payload_bytes;
 					notif.last_chunk = last_chunk;
@@ -965,7 +970,7 @@ static int post_send_do_bounce(struct cvmrdma_qp * qp, struct ibv_send_wr *wrs, 
 					notif.op = this_op;
 					notif.rkey = 0;
 					notif.imm = this_imm;
-					memcpy(notif.payload_nonce, chunk_info->nonce, cvmrdma_aead_NPUBBYTES);
+					memcpy(notif.payload_nonce, payload_nonce, cvmrdma_aead_NPUBBYTES);
 					notif.chunk_offt = offt % CVMRDMA_CHUNK_BYTES;
 					notif.chunk_len = true_payload_bytes;
 					notif.last_chunk = last_chunk;
@@ -998,11 +1003,32 @@ static int post_send_do_bounce(struct cvmrdma_qp * qp, struct ibv_send_wr *wrs, 
 				goto skip_payload_encryption;
 			}
 
-			DEBUG("[SEND QPN %x] Write protect region; addr %p, last_chunk %d, send_len %lu\n", qp->user_qp.qp.qp_num, ptxt, last_chunk, send_len);
+			DEBUG("[SEND QPN %x] Write protect region; addr %p, last_chunk %d, send_len %lu\n", qp->user_qp.qp.qp_num, ptxt, last_chunk, send_len);			
+			DEBUG("[SEND QPN %x] ptxt %x %x %x\n", qp->user_qp.qp.qp_num, ptxt[0], ptxt[1], ptxt[2]);
+			DEBUG("[SEND QPN %x] payload_nonce %lx %lx\n", qp->user_qp.qp.qp_num, payload_nonce[0], payload_nonce[1]);
 
+			unsigned long long payload_clen = send_len;
+			err = cvmrdma_encrypt(
+				slot + notif_clen, /* start after the notif */
+				&payload_clen,
+				ptxt, send_len,
+				NULL, 0,
+				NULL,
+				(unsigned char *)payload_nonce,
+				(unsigned char const *)shared_key,
+				aead
+			);
+			if(err)
+			{
+				fprintf(stderr, "Failed to encrypt chunk!\n");
+				exit(1);
+			}
+
+			// We should be fine with only marking it the user_mr data _after_ the encryption
+			// since writes during the encryption above are writes when the send completion 
+			// was not issued to the user program.
 			if(!cvmrdma_disable_cache){
 				// Mark chunk in userMR as write protected
-				atomic_store(&chunk_info->cached, true);
 				int uffd = cur_mr->uffd;
 				struct uffdio_writeprotect uffdio_wp = {
 					.range = {
@@ -1015,27 +1041,8 @@ static int post_send_do_bounce(struct cvmrdma_qp * qp, struct ibv_send_wr *wrs, 
 					fprintf(stderr, "Failed to write protect the memory region; addr %p, last_chunk %d, send_len %lu\n", ptxt, last_chunk, send_len);
 					exit(1);
 				}
-			}
-			
-			
-			DEBUG("[SEND QPN %x] ptxt %x %x %x\n", qp->user_qp.qp.qp_num, ptxt[0], ptxt[1], ptxt[2]);
-			DEBUG("[SEND QPN %x] nonce %lx %lx\n", qp->user_qp.qp.qp_num, chunk_info->nonce[0], chunk_info->nonce[1]);
-
-			unsigned long long payload_clen = send_len;
-			err = cvmrdma_encrypt(
-				slot + notif_clen, /* start after the notif */
-				&payload_clen,
-				ptxt, send_len,
-				NULL, 0,
-				NULL,
-				(unsigned char *)chunk_info->nonce,
-				(unsigned char const *)shared_key,
-				aead
-			);
-			if(err)
-			{
-				fprintf(stderr, "Failed to encrypt chunk!\n");
-				exit(1);
+				memcpy(chunk_info->nonce, payload_nonce, cvmrdma_aead_NPUBBYTES);
+				atomic_store(&chunk_info->cached, true);
 			}
 
 			DEBUG("[SEND QPN %x] slot[0] %x %x %x ...\n", qp->user_qp.qp.qp_num, slot[0], slot[1], slot[2]);
