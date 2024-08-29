@@ -16,7 +16,7 @@ void free_qp_send_metadata(QpSendMetadata * send_metadata)
 
 void qp_send_metadata_push(QpSendMetadata * send_metadata_manager, uint64_t wrid, enum ibv_wr_opcode op, size_t bytes, size_t nchunks, bool write_for_read, bool send_signaled)
 {
-    DEBUG("push SEND metadata!\n");
+    DEBUG("[SM] push SEND metadata: currently has %zu entries\n", send_metadata_manager->queue.size());
     struct send_metadata_entry entry = {
         .wrid = wrid,
         .op = op,
@@ -31,13 +31,13 @@ void qp_send_metadata_push(QpSendMetadata * send_metadata_manager, uint64_t wrid
 
 void qp_send_metadata_pop(QpSendMetadata * send_metadata_manager)
 {
-    DEBUG("pop SEND metadata!\n");
+    DEBUG("[SM] pop SEND metadata: currently has %zu entries\n", send_metadata_manager->queue.size());
     send_metadata_manager->queue.pop();
 }
 
 struct send_metadata_entry * qp_send_metadata_front(QpSendMetadata * send_metadata_manager)
 {
-    DEBUG("SEND metadata front...!\n");
+    DEBUG("[SM] SEND metadata front: currently has %zu entries\n", send_metadata_manager->queue.size());
     assert(send_metadata_manager);
     return &send_metadata_manager->queue.front();
 }

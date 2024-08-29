@@ -62,6 +62,12 @@ public:
             else is waiting. */
     }
 
+    size_t size()
+    {
+        auto locked = std::scoped_lock{m_lock};
+        return m_queue.size();
+    }
+
 
 private:
     std::deque<T> m_queue;
