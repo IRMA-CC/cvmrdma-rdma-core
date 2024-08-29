@@ -541,6 +541,7 @@ int cvmrdma_cq_server_run_once_if_idle_recv(struct cvmrdma_context * ctxt, struc
 		/* And bring it down */
 		atomic_store(&cq->is_running_recv, false);
 	}
+    cvmrdma_cq_server_run_once_if_idle_send(ctxt, cq);
     return ret;
 }
 
