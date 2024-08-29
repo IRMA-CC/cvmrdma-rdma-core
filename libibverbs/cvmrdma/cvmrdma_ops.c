@@ -936,6 +936,34 @@ static int post_send_do_bounce(struct cvmrdma_qp * qp, struct ibv_send_wr *wrs, 
 			DEBUG("[SEND QPN %x] send_len %lu\n", qp->user_qp.qp.qp_num, send_len);
 
 
+			/* Get a slot. If all the slots are full, wait for a slot to be acked */
+			/* We must get the slot here in order to not also hold any chunk lock which 
+			 * would block the CQ server.
+			*/
+			int slot_id = 0;
+			{
+				/* LOCK */
+				pthread_mutex_lock(&qp->send_lines_full_lock);
+
+				while(qp->send_lines_full >= CVMRDMA_RING_ENTRIES)
+				{
+					TIMING("wait_free_sendlines!");
+					pthread_cond_wait(&qp->send_lines_avail, &qp->send_lines_full_lock);
+				}
+
+				slot_id = qp->next_send_slot;
+
+				qp->next_send_slot = (slot_id + 1) % CVMRDMA_RING_ENTRIES;
+				
+				qp->send_lines_full++;
+				DEBUG("[SEND QPN %x] slot_id %d\n", qp->user_qp.qp.qp_num, slot_id);
+				DEBUG("[SEND QPN %x] send_lines_full %d\n", qp->user_qp.qp.qp_num, qp->send_lines_full);
+
+				pthread_mutex_unlock(&qp->send_lines_full_lock);
+				/*  UNLOCK */
+			}
+
+
 			bool cached = false;
 			struct chunk_tracking_info* chunk_info = &cur_mr->chunk_tracking[chunk_idx];
 			if(!cvmrdma_disable_cache){
@@ -1056,30 +1084,6 @@ static int post_send_do_bounce(struct cvmrdma_qp * qp, struct ibv_send_wr *wrs, 
 			DEBUG("[SEND QPN %x] notif_clen %llu\npayload_clen %llu\n", qp->user_qp.qp.qp_num, notif_clen, payload_clen);
 
 skip_payload_encryption:
-
-			/* Get a slot. If all the slots are full, wait for a slot to be acked */
-			int slot_id = 0;
-			{
-				/* LOCK */
-				pthread_mutex_lock(&qp->send_lines_full_lock);
-
-				while(qp->send_lines_full >= CVMRDMA_RING_ENTRIES)
-				{
-					TIMING("wait_free_sendlines!");
-					pthread_cond_wait(&qp->send_lines_avail, &qp->send_lines_full_lock);
-				}
-
-				slot_id = qp->next_send_slot;
-
-				qp->next_send_slot = (slot_id + 1) % CVMRDMA_RING_ENTRIES;
-				
-				qp->send_lines_full++;
-				DEBUG("[SEND QPN %x] slot_id %d\n", qp->user_qp.qp.qp_num, slot_id);
-				DEBUG("[SEND QPN %x] send_lines_full %d\n", qp->user_qp.qp.qp_num, qp->send_lines_full);
-
-				pthread_mutex_unlock(&qp->send_lines_full_lock);
-				/*  UNLOCK */
-			}
 
 			TIMING("gec_t1");
 
