@@ -229,7 +229,8 @@ void *control_server_receive_acks(void *args)
 			// ACK slots
 			pthread_mutex_lock(&qp->send_lines_full_lock);
 			if (md.ack_revc_lines > qp->send_lines_full) {
-				qp->send_lines_full = 0;
+				fprintf(stderr, "Received ACK for %ld lines, but only %d lines are full\n", md.ack_revc_lines, qp->send_lines_full);
+				exit(1);
 			} else {
 				qp->send_lines_full = qp->send_lines_full - md.ack_revc_lines;
 			}
