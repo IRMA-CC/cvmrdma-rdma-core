@@ -128,7 +128,7 @@ void *control_server_send_acks(void *args)
 	int ret;
 	while (true) {
 		pthread_mutex_lock(&qp->received_lines_lock);
-		while (!(qp->received_lines >= 1)) {
+		while (!(qp->received_lines >= CVMRDMA_ACK_THRESHOLD)) {
 			pthread_cond_wait(&qp->recv_lines_ack, &qp->received_lines_lock);
 		}
 		md.ack_revc_lines = qp->received_lines;

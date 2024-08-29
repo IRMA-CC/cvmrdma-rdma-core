@@ -1129,7 +1129,7 @@ skip_payload_encryption:
 			chunks_in_wr++;
 
 			/* try to dequeue some SEND WC from the CQ (if no other thread is polling the CQ) */
-			if(++qp->cvmrdma_qp_send_wr_id % 100 == 0)
+			if(qp->send_lines_full >= DIVIDE_ROUND_UP(CVMRDMA_ACK_THRESHOLD, 200))
 			{
 				err = cvmrdma_cq_server_run_once_if_idle(ctxt, qp->provider_cq);
 				if(err < 0)
