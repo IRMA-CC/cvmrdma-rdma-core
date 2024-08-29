@@ -116,25 +116,36 @@ static struct ibv_cq *cvmrdma_create_cq(struct ibv_context *ibcontext, int cqe,
 		cq->comp_channel_event_fd = channel->fd;
 		cq->provider_comp_channel = ibv_create_comp_channel_prov(ibcontext);
 	}
-	/* Create a single CQ to get the send and recv WC for the chunks */
-	struct ibv_cq * ibcq = ctxt->prov_ops.create_cq(ibcontext, 16384, cq->provider_comp_channel, 0);
-	if(! ibcq)
+	/* Create the recv CQ */
+	struct ibv_cq * ibcq_recv = ctxt->prov_ops.create_cq(ibcontext, 16384, cq->provider_comp_channel, 0);
+	if(! ibcq_recv)
 	{
-		fprintf(stderr, "failed to create backend CQ for the CQ server\n");
+		fprintf(stderr, "failed to create backend recv CQ for the CQ server\n");
 		exit(1);
 	}
 	/* see ibv_create_cq */
-	verbs_init_cq(ibcq, ibcontext, cq->provider_comp_channel, NULL);
+	verbs_init_cq(ibcq_recv, ibcontext, cq->provider_comp_channel, NULL);
 
 	if(channel != NULL) {
-		ret = ctxt->prov_ops.req_notify_cq(ibcq, 0);
+		ret = ctxt->prov_ops.req_notify_cq(ibcq_recv, 0);
 		if(ret)
 		{
 			fprintf(stderr, "Failed to request CQ notifications %d\n", ret);
 			exit(1);
 		}
 	}
-	cq->prov_cq = ibcq;
+	cq->prov_cq_recv = ibcq_recv;
+
+	/* Create send CQ */
+	struct ibv_cq * ibcq_send = ctxt->prov_ops.create_cq(ibcontext, 16384, NULL, 0);
+	if(! ibcq_send)
+	{
+		fprintf(stderr, "failed to create backend send CQ for the CQ server\n");
+		exit(1);
+	}
+	/* see ibv_create_cq */
+	verbs_init_cq(ibcq_send, ibcontext, NULL, NULL);
+	cq->prov_cq_send = ibcq_send;
 
 	return &cq->user_cq.cq;
 }
@@ -285,8 +296,8 @@ static struct ibv_qp *cvmrdma_create_qp(struct ibv_pd * ibpd,
 	struct ibv_qp_init_attr_ex attr_ex = {0};
 	attr_ex.sq_sig_all = 1;
 	/* Direct send and recv WCs to the CQ server */
-	attr_ex.send_cq = c_cq->prov_cq;
-	attr_ex.recv_cq = c_cq->prov_cq;
+	attr_ex.send_cq = c_cq->prov_cq_send;
+	attr_ex.recv_cq = c_cq->prov_cq_recv;
 
 	assert(attr->qp_type == IBV_QPT_RC);
 	attr_ex.qp_type = IBV_QPT_RC;
@@ -726,7 +737,7 @@ static int cvmrdma_poll_cq(struct ibv_cq * ibcq, int num_entries, struct ibv_wc 
 	}
 
 	/* run it ONLY if it is not running yet */
-	err = cvmrdma_cq_server_run_once_if_idle(ctxt, cq);
+	err = cvmrdma_cq_server_run_once_if_idle_recv(ctxt, cq);
 	if(err < 0)
 	{
 		return err;
@@ -1131,7 +1142,7 @@ skip_payload_encryption:
 			/* try to dequeue some SEND WC from the CQ (if no other thread is polling the CQ) */
 			if(qp->send_lines_full >= DIVIDE_ROUND_UP(CVMRDMA_ACK_THRESHOLD, 200))
 			{
-				err = cvmrdma_cq_server_run_once_if_idle(ctxt, qp->provider_cq);
+				err = cvmrdma_cq_server_run_once_if_idle_send(ctxt, qp->provider_cq);
 				if(err < 0)
 				{
 					fprintf(stderr, "Polling the CQ after a post_send failed %d\n", err);

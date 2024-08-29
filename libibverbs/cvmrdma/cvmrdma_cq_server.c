@@ -24,9 +24,8 @@
 #include "cvmrdma_network_evloop_priv.h"
 
 #define CQ_SERVER_NUM_WCS CVMRDMA_RING_ENTRIES
-static int cq_server_loop_once(struct cvmrdma_context * ctxt, struct cvmrdma_cq * cq)
+static int cq_server_loop_once(struct cvmrdma_context * ctxt, struct ibv_cq * prov_cq)
 {
-    struct ibv_cq * prov_cq = cq->prov_cq;
     QPMetadataManager * qp_metadata_manager = ctxt->qp_metadata_manager;
 
     enum sodium_crypto_aead aead = ctxt->aead;
@@ -522,7 +521,7 @@ static int cq_server_loop_once(struct cvmrdma_context * ctxt, struct cvmrdma_cq 
 }
 
 
-int cvmrdma_cq_server_run_once_if_idle(struct cvmrdma_context * ctxt, struct cvmrdma_cq * cq)
+int cvmrdma_cq_server_run_once_if_idle_recv(struct cvmrdma_context * ctxt, struct cvmrdma_cq * cq)
 {
     int ret = 1;
 
@@ -535,12 +534,27 @@ int cvmrdma_cq_server_run_once_if_idle(struct cvmrdma_context * ctxt, struct cvm
 	*/
 
 	bool expected = false;
-	bool first = atomic_compare_exchange_strong(&cq->is_running, &expected, true);
+	bool first = atomic_compare_exchange_strong(&cq->is_running_recv, &expected, true);
 	if(first)
 	{
-		ret = cq_server_loop_once(ctxt, cq);
+		ret = cq_server_loop_once(ctxt, cq->prov_cq_recv);
 		/* And bring it down */
-		atomic_store(&cq->is_running, false);
+		atomic_store(&cq->is_running_recv, false);
+	}
+    return ret;
+}
+
+int cvmrdma_cq_server_run_once_if_idle_send(struct cvmrdma_context * ctxt, struct cvmrdma_cq * cq)
+{
+    int ret = 1;
+
+	bool expected = false;
+	bool first = atomic_compare_exchange_strong(&cq->is_running_send, &expected, true);
+	if(first)
+	{
+		ret = cq_server_loop_once(ctxt, cq->prov_cq_send);
+		/* And bring it down */
+		atomic_store(&cq->is_running_send, false);
 	}
     return ret;
 }
@@ -573,7 +587,7 @@ void* cvmrdma_cq_wait_completion_event(void* c_cq) {
                 exit(1);
             }
             DEBUG("[CQ] Got CQ event\n");
-            assert(ev_cq == cq->prov_cq);
+            assert(ev_cq == cq->prov_cq_recv);
 
             /* Request notification upon the next completion event */
             ret = context->prov_ops.req_notify_cq(ev_cq, 0);
@@ -583,13 +597,13 @@ void* cvmrdma_cq_wait_completion_event(void* c_cq) {
             }
 
             do {
-                ret = cvmrdma_cq_server_run_once_if_idle(context, cq);
+                ret = cvmrdma_cq_server_run_once_if_idle_recv(context, cq);
             } while (ret > 0);
 
             /* Ack the event */
             ibv_ack_cq_events(ev_cq, 1);
         } else {
-            cvmrdma_cq_server_run_once_if_idle(context, cq);
+            cvmrdma_cq_server_run_once_if_idle_recv(context, cq);
         }
     }
 }

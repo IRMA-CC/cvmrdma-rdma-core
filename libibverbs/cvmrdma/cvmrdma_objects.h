@@ -90,14 +90,16 @@ struct cvmrdma_cq {
 	struct verbs_cq user_cq;
 
 	/* Provider CQ */
-	struct ibv_cq * prov_cq;
+	struct ibv_cq * prov_cq_recv;
+	struct ibv_cq * prov_cq_send;
 
 	/* The incomming WRITE_WITH_IMM need to be written to the user_mr in the
 	 * they arrive. E.g. when we emulate a SEND, we slowly copy segment by segment
 	 * to the address the user specified in the RECV.
 	 * In the future we can process different user WQEs in parallel.
 	 */
-	 _Atomic bool is_running;
+	 _Atomic bool is_running_recv;
+	 _Atomic bool is_running_send;
 
 	/* a cvmrdma_cq does not correspond to a backend cq: there is a single CQ server,
        this CQ only gets notification through the WCQueue */
