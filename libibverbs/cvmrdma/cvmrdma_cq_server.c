@@ -583,6 +583,7 @@ void* cvmrdma_cq_wait_completion_event(void* c_cq) {
     struct cvmrdma_context * context = cvmrdma_get_ctx(cq->user_cq.cq.context);
     bool run_again_recv = false;
     bool run_again_send = false;
+    struct ib_uverbs_comp_event_desc ev;
     struct ibv_cq *ev_cq;
     void *ev_ctx;
     int ret;
@@ -591,11 +592,22 @@ void* cvmrdma_cq_wait_completion_event(void* c_cq) {
 
     for(;;) {
         if(true) {
-            ret = ibv_get_cq_event(cq->provider_comp_channel, &ev_cq, &ev_ctx);
-            if (ret) {
-                fprintf(stderr, "Failed to get CQ event\n");
+            // verbs.c:632 ibv_get_cq_event
+            // This emulates:
+            // ret = ibv_get_cq_event(cq->provider_comp_channel, &ev_cq, &ev_ctx);
+            // if (ret) {
+            //     fprintf(stderr, "Failed to get CQ event\n");
+            //     exit(1);
+            // }
+
+            if (read(cq->provider_comp_channel->fd, &ev, sizeof ev) != sizeof ev) {
+                fprintf(stderr, "Failed to read CQ event\n");
                 exit(1);
             }
+            ev_cq = (struct ibv_cq *) (uintptr_t) ev.cq_handle;
+            ev_ctx = ev_cq->cq_context;
+            context->prov_ops.cq_event(ev_cq);
+
             DEBUG("[CQ] Got CQ event\n");
             assert(ev_cq == cq->prov_cq_recv || ev_cq == cq->prov_cq_send);
 
@@ -606,7 +618,12 @@ void* cvmrdma_cq_wait_completion_event(void* c_cq) {
                 exit(1);
             }
 
-            ibv_ack_cq_events(ev_cq, 1);
+            // This emulates:
+            // ibv_ack_cq_events(ev_cq, 1);
+            pthread_mutex_lock(&ev_cq->mutex);
+            ev_cq->comp_events_completed += 1;
+            pthread_cond_signal(&ev_cq->cond);
+            pthread_mutex_unlock(&ev_cq->mutex);
 
             if(ev_cq == cq->prov_cq_recv) {
                 do {
