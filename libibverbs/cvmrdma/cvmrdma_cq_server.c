@@ -521,7 +521,7 @@ static int cq_server_loop_once(struct cvmrdma_context * ctxt, struct ibv_cq * pr
 }
 
 
-int cvmrdma_cq_server_run_once_if_idle_recv(struct cvmrdma_context * ctxt, struct cvmrdma_cq * cq)
+int cvmrdma_cq_server_run_once_if_idle_recv(struct cvmrdma_context * ctxt, struct cvmrdma_cq * cq, bool* again)
 {
     int ret = 1;
 
@@ -540,12 +540,16 @@ int cvmrdma_cq_server_run_once_if_idle_recv(struct cvmrdma_context * ctxt, struc
 		ret = cq_server_loop_once(ctxt, cq->prov_cq_recv);
 		/* And bring it down */
 		atomic_store(&cq->is_running_recv, false);
-	}
-    cvmrdma_cq_server_run_once_if_idle_send(ctxt, cq);
+        if (again != NULL) {
+            *again = false;
+        }
+	} else if(again != NULL) {
+        *again = true;
+    }
     return ret;
 }
 
-int cvmrdma_cq_server_run_once_if_idle_send(struct cvmrdma_context * ctxt, struct cvmrdma_cq * cq)
+int cvmrdma_cq_server_run_once_if_idle_send(struct cvmrdma_context * ctxt, struct cvmrdma_cq * cq, bool* again)
 {
     int ret = 1;
 
@@ -556,7 +560,14 @@ int cvmrdma_cq_server_run_once_if_idle_send(struct cvmrdma_context * ctxt, struc
 		ret = cq_server_loop_once(ctxt, cq->prov_cq_send);
 		/* And bring it down */
 		atomic_store(&cq->is_running_send, false);
-	}
+        if (again != NULL) {
+            *again = false;
+        }
+	} else {
+        if(again != NULL) {
+            *again = true;
+        }
+    }
     return ret;
 }
 
@@ -565,30 +576,23 @@ int cvmrdma_cq_server_run_once_if_idle_send(struct cvmrdma_context * ctxt, struc
 void* cvmrdma_cq_wait_completion_event(void* c_cq) {
     struct cvmrdma_cq * cq = (struct cvmrdma_cq *)c_cq;
     struct cvmrdma_context * context = cvmrdma_get_ctx(cq->user_cq.cq.context);
+    bool run_again_recv = false;
+    bool run_again_send = false;
     struct ibv_cq *ev_cq;
-    struct pollfd pfd;
     void *ev_ctx;
     int ret;
 
     DEBUG("[CQ] Waiting for CQ event\n");
 
     for(;;) {
-        if(false) {
-            pfd.fd = cq->provider_comp_channel->fd;
-            pfd.events = POLLIN;
-            pfd.revents = 0;
-            if (poll(&pfd, 1, 1) < 0) {
-                fprintf(stderr, "Failed to poll CQ event\n");
-                exit(1);
-            }
-
+        if(true) {
             ret = ibv_get_cq_event(cq->provider_comp_channel, &ev_cq, &ev_ctx);
             if (ret) {
                 fprintf(stderr, "Failed to get CQ event\n");
                 exit(1);
             }
             DEBUG("[CQ] Got CQ event\n");
-            assert(ev_cq == cq->prov_cq_recv);
+            assert(ev_cq == cq->prov_cq_recv || ev_cq == cq->prov_cq_send);
 
             /* Request notification upon the next completion event */
             ret = context->prov_ops.req_notify_cq(ev_cq, 0);
@@ -597,14 +601,20 @@ void* cvmrdma_cq_wait_completion_event(void* c_cq) {
                 exit(1);
             }
 
-            do {
-                ret = cvmrdma_cq_server_run_once_if_idle_recv(context, cq);
-            } while (ret > 0);
-
-            /* Ack the event */
             ibv_ack_cq_events(ev_cq, 1);
+
+            if(ev_cq == cq->prov_cq_recv) {
+                do {
+                    cvmrdma_cq_server_run_once_if_idle_recv(context, cq, &run_again_recv);
+                } while(run_again_recv);
+            } else {
+                do {
+                    cvmrdma_cq_server_run_once_if_idle_send(context, cq, &run_again_send);
+                } while(run_again_send);
+            }
         } else {
-            cvmrdma_cq_server_run_once_if_idle_recv(context, cq);
+            cvmrdma_cq_server_run_once_if_idle_recv(context, cq, NULL);
+            cvmrdma_cq_server_run_once_if_idle_recv(context, cq, NULL);
         }
     }
 }

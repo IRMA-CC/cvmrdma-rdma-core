@@ -130,22 +130,31 @@ static struct ibv_cq *cvmrdma_create_cq(struct ibv_context *ibcontext, int cqe,
 		ret = ctxt->prov_ops.req_notify_cq(ibcq_recv, 0);
 		if(ret)
 		{
-			fprintf(stderr, "Failed to request CQ notifications %d\n", ret);
+			fprintf(stderr, "Failed to request CQ notifications for recv %d\n", ret);
 			exit(1);
 		}
 	}
 	cq->prov_cq_recv = ibcq_recv;
 
 	/* Create send CQ */
-	struct ibv_cq * ibcq_send = ctxt->prov_ops.create_cq(ibcontext, 16384, NULL, 0);
+	struct ibv_cq * ibcq_send = ctxt->prov_ops.create_cq(ibcontext, 16384, cq->provider_comp_channel, 0);
 	if(! ibcq_send)
 	{
 		fprintf(stderr, "failed to create backend send CQ for the CQ server\n");
 		exit(1);
 	}
 	/* see ibv_create_cq */
-	verbs_init_cq(ibcq_send, ibcontext, NULL, NULL);
+	verbs_init_cq(ibcq_send, ibcontext, cq->provider_comp_channel, NULL);
 	cq->prov_cq_send = ibcq_send;
+
+	ret = ctxt->prov_ops.req_notify_cq(ibcq_send, 0);
+	if(channel != NULL) {
+		if(ret)
+		{
+			fprintf(stderr, "Failed to request CQ notifications for send %d\n", ret);
+			exit(1);
+		}
+	}
 
 	return &cq->user_cq.cq;
 }
