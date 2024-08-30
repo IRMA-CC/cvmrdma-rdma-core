@@ -210,7 +210,7 @@ static int cq_server_loop_once(struct cvmrdma_context * ctxt, struct ibv_cq * pr
             );
             if(err)
             {
-                fprintf(stderr, "WARN: Failed to decrypt bounce buffer for notif, exiting.\n");
+                fprintf(stderr, "WARN: Failed to decrypt bounce buffer for notif with key %lx %lx and nonce %lx %lx\n", rx_key[0], rx_key[1], qp_nonce[0], qp_nonce[1]);
                 exit(1);
             }
 
