@@ -60,7 +60,7 @@ public:
         *m_remote_params_set_ptr = true;
         pthread_mutex_unlock(m_remote_params_lock_ptr);
 
-        pthread_cond_signal(m_remote_params_set_cv_ptr);
+        pthread_cond_broadcast(m_remote_params_set_cv_ptr);
     }
 
 private:

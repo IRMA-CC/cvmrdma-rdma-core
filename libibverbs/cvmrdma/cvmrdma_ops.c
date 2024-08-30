@@ -746,7 +746,7 @@ static int cvmrdma_poll_cq(struct ibv_cq * ibcq, int num_entries, struct ibv_wc 
 	}
 
 	/* run it ONLY if it is not running yet */
-	err = cvmrdma_cq_server_run_once_if_idle_recv(ctxt, cq);
+	err = cvmrdma_cq_server_run_once_if_idle_recv(ctxt, cq, NULL);
 	if(err < 0)
 	{
 		return err;
@@ -1155,7 +1155,7 @@ skip_payload_encryption:
 			/* try to dequeue some SEND WC from the CQ (if no other thread is polling the CQ) */
 			if(qp->send_lines_full >= DIVIDE_ROUND_UP(CVMRDMA_ACK_THRESHOLD, 200))
 			{
-				err = cvmrdma_cq_server_run_once_if_idle_send(ctxt, qp->provider_cq);
+				err = cvmrdma_cq_server_run_once_if_idle_send(ctxt, qp->provider_cq, NULL);
 				if(err < 0)
 				{
 					fprintf(stderr, "Polling the CQ after a post_send failed %d\n", err);

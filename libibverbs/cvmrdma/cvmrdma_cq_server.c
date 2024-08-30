@@ -150,6 +150,11 @@ static int cq_server_loop_once(struct cvmrdma_context * ctxt, struct ibv_cq * pr
 
             DEBUG("before chunk: rcved 0x%zx bytes of WR\n", qp->wr_bytes_rcved);
 
+            pthread_mutex_lock(&qp->remote_params_lock);
+            while (!qp->remote_params_set) {
+                pthread_cond_wait(&qp->remote_params_set_cv, &qp->remote_params_lock);
+            }
+            pthread_mutex_unlock(&qp->remote_params_lock);
             assert(qp->remote_params_set);
             assert(qp->rx_key[0] || qp->rx_key[1] || qp->rx_key[2]);
             uint64_t const * rx_key = qp->rx_key;
