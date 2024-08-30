@@ -752,6 +752,12 @@ static int cvmrdma_poll_cq(struct ibv_cq * ibcq, int num_entries, struct ibv_wc 
 		return err;
 	}
 
+	err = cvmrdma_cq_server_run_once_if_idle_send(ctxt, cq, NULL);
+	if(err < 0)
+	{
+		return err;
+	}
+
 	/* Let tje next poll return */
 	return 0;
 
