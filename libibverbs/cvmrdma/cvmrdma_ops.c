@@ -1146,7 +1146,7 @@ skip_payload_encryption:
 			/* try to dequeue some SEND WC from the CQ (if no other thread is polling the CQ) */
 			if(qp->send_lines_full >= DIVIDE_ROUND_UP(CVMRDMA_ACK_THRESHOLD, 200))
 			{
-				err = cvmrdma_cq_server_run_once_if_idle_recv(ctxt, qp->provider_cq);
+				err = cvmrdma_cq_server_run_once_if_idle_send(ctxt, qp->provider_cq);
 				if(err < 0)
 				{
 					fprintf(stderr, "Polling the CQ after a post_send failed %d\n", err);
