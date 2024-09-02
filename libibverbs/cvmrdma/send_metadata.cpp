@@ -39,5 +39,7 @@ struct send_metadata_entry * qp_send_metadata_front(QpSendMetadata * send_metada
 {
     DEBUG("[SM] SEND metadata front: currently has %zu entries\n", send_metadata_manager->queue.size());
     assert(send_metadata_manager);
-    return &send_metadata_manager->queue.front();
+    send_metadata_entry * entry = &send_metadata_manager->queue.front();
+    assert(entry);
+    return entry;
 }

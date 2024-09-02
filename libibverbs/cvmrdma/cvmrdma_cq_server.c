@@ -90,6 +90,8 @@ static int cq_server_loop_once(struct cvmrdma_context * ctxt, struct ibv_cq * pr
             qp->wr_chunks_sent++;
 
             struct send_metadata_entry * send_info = qp_send_metadata_front(qp->send_metadata);
+
+            DEBUG("[CQ] send op %d, wrid: 0x%lx done, chunks sent %zu send_info->nchunks %zu\n", op, this_wc->wr_id, qp->wr_chunks_sent, send_info->nchunks);
         
             if(send_info->nchunks == qp->wr_chunks_sent)
             {
@@ -97,8 +99,12 @@ static int cq_server_loop_once(struct cvmrdma_context * ctxt, struct ibv_cq * pr
                 size_t bytes = send_info->bytes;
                 bool is_write = (send_info->op == IBV_WR_RDMA_WRITE) || (send_info->op == IBV_WR_RDMA_WRITE_WITH_IMM);
 
+                DEBUG("[CQ] send op %d, wrid: 0x%lx done, all chunks sent\n", op, wrid);
+
                 qp->wr_chunks_sent = 0;
                 qp_send_metadata_pop(qp->send_metadata);
+
+                DEBUG("[CQ] send op %d, wrid: 0x%lx done, popped metadata\n", op, wrid);
 
                 struct ibv_wc send_wc = {
                     .byte_len = bytes,
@@ -149,12 +155,15 @@ static int cq_server_loop_once(struct cvmrdma_context * ctxt, struct ibv_cq * pr
 
 
             DEBUG("before chunk: rcved 0x%zx bytes of WR\n", qp->wr_bytes_rcved);
-
             pthread_mutex_lock(&qp->remote_params_lock);
+            if(!qp->remote_params_set) {
+                DEBUG("WARN: remote params not set for QPN %x\n", qpn);
+            }
             while (!qp->remote_params_set) {
                 pthread_cond_wait(&qp->remote_params_set_cv, &qp->remote_params_lock);
             }
             pthread_mutex_unlock(&qp->remote_params_lock);
+            DEBUG("remote params set for QPN %x\n", qpn);
             assert(qp->remote_params_set);
             assert(qp->rx_key[0] || qp->rx_key[1] || qp->rx_key[2]);
             uint64_t const * rx_key = qp->rx_key;
