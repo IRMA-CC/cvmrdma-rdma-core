@@ -14,13 +14,13 @@ public:
     template <typename TT>
     void push(TT && item)
     {
-        auto locked = std::scoped_lock{m_lock};
+        {
+            auto locked = std::scoped_lock{m_lock};
+            m_queue.push_back(std::forward<TT>(item));
+            // unlocking before notifing to avoid waking up
+            // the waiting thread only to block again (see notify_one for details)
+        }
 
-        m_queue.push_back(std::forward<TT>(item));
-
-        // manual unlocking is done before notifying, to avoid waking up
-        // the waiting thread only to block again (see notify_one for details)
-        m_lock.unlock();
         m_queue_has_data_cv.notify_one();
     }
 
