@@ -35,6 +35,7 @@ publish_internal_headers(infiniband/cvmrdma
   cvmrdma/send_metadata.h
   cvmrdma/taskset_wrapper.h
   cvmrdma/wc_queue.h
+  cvmrdma/wr_queue.h
   cvmrdma/dma_heap.h
   cvmrdma/cvmrdma_control_server.h
   cvmrdma/cvmrdma_cache.h
@@ -97,6 +98,7 @@ rdma_library(ibverbs "${CMAKE_CURRENT_BINARY_DIR}/libibverbs.map"
   cvmrdma/send_metadata.cpp
   cvmrdma/taskset_wrapper.cpp
   cvmrdma/wc_queue.cpp
+  cvmrdma/wr_queue.cpp
   cvmrdma/dma_heap.c
   cvmrdma/cvmrdma_control_server.c
   cvmrdma/cvmrdma_cache.c

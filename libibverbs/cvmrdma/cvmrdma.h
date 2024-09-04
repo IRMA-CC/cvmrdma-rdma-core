@@ -27,6 +27,7 @@ extern uint64_t cvmrdma_chunk_bytes;
 
 static inline uint64_t cvmrdma_ring_slot_bytes(enum sodium_crypto_aead aead)
 {
+	assert(cvmrdma_chunk_bytes != 0);
 	return cvmrdma_chunk_bytes + cvmrdma_ABYTES(aead) 
 			+ sizeof(struct cq_server_notification) + cvmrdma_ABYTES(aead);
 }

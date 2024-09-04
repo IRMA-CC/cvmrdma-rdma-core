@@ -14,6 +14,7 @@
 #include "bounce_metadata.h"
 #include "qp_metadata_manager.h"
 #include "wc_queue.h"
+#include "wr_queue.h"
 
 
 struct cvmrdma_pd {
@@ -151,8 +152,10 @@ struct cvmrdma_qp {
 	uint64_t tx_key[cvmrdma_aead_KEY_WORDS];
 	uint64_t tx_nonce[cvmrdma_aead_NPUB_WORDS];
 
-	/* Preserve order of post_* and the related notifications */
-	pthread_mutex_t cvmrdma_send_lock;
+	/* This thread consumes entries in the wr_queue.
+	 * Note that the order of WRs is preserved.	
+	 */
+	pthread_t send_server_thread;
 
 	/* Protext send_lines_full */
 	pthread_mutex_t send_lines_full_lock;
@@ -214,6 +217,12 @@ struct cvmrdma_qp {
 	/* Save number of chunks of future sends in FIFO. When this many chunks are sent, report to
 	   user. */
 	QpSendMetadata *send_metadata;
+
+	/* Save ibv_send_wr during ibv_post_send in order to handle the WRs async as 
+	 * usually from the library. The user program can only be sure that the WR is 
+	 * completed when the WC is received. It _should_ not touch the data before that.
+	 */
+	WRQueue *wr_queue;
 
 	/* Count the number of chunks sent in this WR, to know when to report WC */
 	size_t wr_chunks_sent;

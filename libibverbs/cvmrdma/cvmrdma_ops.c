@@ -34,6 +34,7 @@
 #include "cvmrdma_control_server.h"
 #include "recv_metadata.h"
 #include "wc_queue.h"
+#include "wr_queue.h"
 #include "dma_heap.h"
 #include "cvmrdma_cache.h"
 
@@ -300,6 +301,7 @@ static struct ibv_qp *cvmrdma_create_qp(struct ibv_pd * ibpd,
 	int err;
 
 	struct cvmrdma_qp * qp = calloc(1, sizeof(struct cvmrdma_qp));
+	qp->wr_queue = alloc_wr_queue();
 
 	/* Create the provider QP */
 	struct ibv_qp_init_attr_ex attr_ex = {0};
@@ -458,12 +460,6 @@ static struct ibv_qp *cvmrdma_create_qp(struct ibv_pd * ibpd,
 
 
 	/* Initialize the mutex */
-	err = pthread_mutex_init(&qp->cvmrdma_send_lock, NULL);
-	if(err)
-	{
-		fprintf(stderr, "Failed to initialize the CVMRDMA cvmrdma_send_lock mutex %d\n", err);
-		goto dereg_ring_mr;
-	}
 	err = pthread_mutex_init(&qp->send_lines_full_lock, NULL);
 	if(err)
 	{
@@ -493,7 +489,7 @@ static struct ibv_qp *cvmrdma_create_qp(struct ibv_pd * ibpd,
 	if(err)
 	{
 		fprintf(stderr, "Failed to attach QP %" PRIx32 " to its recv cq (%d)\n", ibqp->qp_num, err);
-		goto free_send_lock;
+		goto dereg_ring_mr;
 	}
 
 	// Since the actual application is likely to not poll the cq all the time,
@@ -505,6 +501,13 @@ static struct ibv_qp *cvmrdma_create_qp(struct ibv_pd * ibpd,
 			fprintf(stderr, "Error creating cvmrdma_cq_wait_completion_event thread: %d\n", err);
 			exit(1);
 		}
+	}
+
+	err = pthread_create(&qp->send_server_thread, NULL, &cvmrdma_do_bounce_loop, (void *)qp);
+	if (err)
+	{
+		fprintf(stderr, "Error creating cvmrdma_cq_wait_completion_event thread: %d\n", err);
+		exit(1);
 	}
 
 	/* We can only get the capability to the remote QP once we know its QPN, this will be done
@@ -524,8 +527,6 @@ static struct ibv_qp *cvmrdma_create_qp(struct ibv_pd * ibpd,
 
 	return &qp->user_qp.qp;
 
-free_send_lock:
-	pthread_mutex_destroy(&qp->cvmrdma_send_lock);
 dereg_ring_mr:
 	ctxt->prov_ops.dereg_mr(verbs_get_mr(ringbuf_mr));
 	close(dmabuf_fd);
@@ -906,7 +907,7 @@ static int post_send_do_bounce(struct cvmrdma_qp * qp, struct ibv_send_wr *wrs, 
 			/* Prepare the two nonces: for notif and for payload */
 			uint64_t * qp_nonce = qp->tx_nonce;
 
-			uint64_t nonce_metadata[cvmrdma_aead_NPUB_WORDS], nonce_payload[cvmrdma_aead_NPUB_WORDS];
+			uint64_t nonce_metadata[cvmrdma_aead_NPUB_WORDS];
 			memcpy(nonce_metadata, qp_nonce, cvmrdma_aead_NPUBBYTES);
 			/* and increment nonce */
 			qp_nonce[0] += 1;
@@ -1170,49 +1171,48 @@ static int cvmrdma_post_send(struct ibv_qp *ibqp, struct ibv_send_wr *wr,
     struct cvmrdma_qp * qp = (struct cvmrdma_qp *)ibqp;
 	int ret = 0;
 
-	TIMING("post_send_t0");
-
-	/* We need to lock so that the notifications and the send actually
-	   match (i.e. no interleaved send)*/
-
-	pthread_mutex_lock(&qp->cvmrdma_send_lock);
-
-
-    /*
-	CVMRDMA: do the bounce and modify the WRs to use the bounce buffers
-    
-    on WRITE
-	- find the local (base_addr, bounce_addr) for lkey
-	- AEAD the plaintext region to the bounce buffer,
-	  keeping the same offset
-	- change WRITE into WRITE_WITH_IMM to notify the remote.
-	- RPC send the dest hca_addr, rkey, imm
-	*/
-
-	ret = post_send_do_bounce(qp, wr, bad_wr, false);
-	if(ret < 0)
+	// In theory we'd need to do wr validation in order to send rejected wr as bad_wr to the user.
+	
+	// Just push the WRs here and handle them asynchronously in cvmrdma_do_bounce_loop.
+	for(struct ibv_send_wr * this_wr = wr ; this_wr != NULL ; this_wr = this_wr->next)
 	{
-		fprintf(stderr, "Failed to bounce before send!\n");
-		goto ret;
+		wrq_push(qp->wr_queue, this_wr);
 	}
 
-	TIMING("post_send_t1");
+	DEBUG("[SEND QPN %x] WRs posted\n", qp->user_qp.qp.qp_num);
 
-
-ret:
-	pthread_mutex_unlock(&qp->cvmrdma_send_lock);
     return ret;
+}
 
-/* XXX: do error handling here, if the send fails then things are
-   a bit tricky: the remote has already been notified of the incoming
-   WRITE, but the WRITE will not happen ... The remote will wait forever.
+// This function is started in a thread to process the WRs posted by the user.
+void *cvmrdma_do_bounce_loop(void *args) {
+	struct cvmrdma_qp * qp = (struct cvmrdma_qp *)args;
 
-    TODO:
-    1. either send the capnp notif only in case of success
-    2. or send a notification cancelling the WRITE
+	struct ibv_send_wr * wr = calloc(1, sizeof(struct ibv_send_wr));
 
-   The bounce will be overwritten later and do not need to be rolled back
-   */
+
+	pthread_mutex_lock(&qp->remote_params_lock);
+	if(!qp->remote_params_set) {
+		DEBUG("WARN: remote params not set");
+	}
+	while (!qp->remote_params_set) {
+		pthread_cond_wait(&qp->remote_params_set_cv, &qp->remote_params_lock);
+	}
+	pthread_mutex_unlock(&qp->remote_params_lock);
+
+	while(1) {
+		// If there are no entries to pop, this blocks non-busy until there are.
+		wr = wrq_front(qp->wr_queue);
+
+		struct ibv_send_wr * bad_wr = NULL;
+		int ret = post_send_do_bounce(qp, wr, &bad_wr, false);
+		if(ret < 0)
+		{
+			fprintf(stderr, "failed to send WR with wr_id %lu, ret %d\n", wr->wr_id, ret);
+			exit(1);
+		}
+		wrq_pop(qp->wr_queue);
+	}
 }
 
 static int cvmrdma_query_device_ex(struct ibv_context *ibctxt,

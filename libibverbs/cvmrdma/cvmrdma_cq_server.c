@@ -70,15 +70,15 @@ static int cq_server_loop_once(struct cvmrdma_context * ctxt, struct ibv_cq * pr
             fprintf(stderr, "CQ server WARN: WC reports failure status: %d, vendor err %d\n", status, this_wc->vendor_err);
             if(op == IBV_WC_SEND) {
                 struct cvmrdma_mr* mr = NULL;
-                int i = 0;
+                int k = 0;
                 do {
-                    mr = get_bounce_metadata_for_rkey(pd->bounce_metadata, i);
+                    mr = get_bounce_metadata_for_rkey(pd->bounce_metadata, k);
                     if (mr != NULL) {
                         fprintf(stderr, "[CQ] bounce_metadata[%d]: len: %zx, user_mr addr: %p, user_mr hca_va: %p provider_mr len: %zx, provider_mr provider_va: %p, provider_mr lkey: 0x%lx\n", 
-                        i, mr->user_mr.ibv_mr.length, mr->user_mr.ibv_mr.addr, mr->hca_va,
+                        k, mr->user_mr.ibv_mr.length, mr->user_mr.ibv_mr.addr, mr->hca_va,
                         mr->provider_mr->length, mr->provider_va, mr->provider_mr->lkey);
                     }
-                    i++;
+                    k++;
                 } while (mr != NULL);
             }
         }
@@ -219,7 +219,8 @@ static int cq_server_loop_once(struct cvmrdma_context * ctxt, struct ibv_cq * pr
             );
             if(err)
             {
-                fprintf(stderr, "WARN: Failed to decrypt bounce buffer for notif with key %lx %lx and nonce %lx %lx\n", rx_key[0], rx_key[1], qp_nonce[0], qp_nonce[1]);
+                fprintf(stderr, "WARN: Failed to decrypt bounce buffer for notif with key %lx %lx and nonce %lx %lx notif_start[0] %x %x %x %x notif_start %p notif_clen %llu\n", 
+                    rx_key[0], rx_key[1], nonce_metadata[0], nonce_metadata[1], notif_start[0], notif_start[1], notif_start[2], notif_start[3], notif_start, notif_clen);
                 exit(1);
             }
 

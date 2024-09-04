@@ -1,6 +1,7 @@
 #include "recv_metadata.h"
 
 #include <cstring>
+#include <cassert>
 #include "debug.h"
 
 QpRecvMetadata * alloc_qp_recv_metadata(void)
@@ -16,6 +17,9 @@ void free_qp_recv_metadata(QpRecvMetadata * recv_metadata)
 void qp_recv_metadata_push(QpRecvMetadata * recv_metadata_manager, uint64_t wrid, struct ibv_sge * sgl, int nsge)
 {
     DEBUG("[RM] push RECV metadata: currently has %zu entries\n", recv_metadata_manager->queue.size());
+    
+    // The sgl is a _list_ not an array that simply can be copied. It contains a next pointer after all.
+    assert(nsge == 1);
 
     struct ibv_sge * sgl_entry = new ibv_sge[nsge];
 
