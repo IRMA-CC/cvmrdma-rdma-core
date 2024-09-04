@@ -244,7 +244,7 @@ static int cq_server_loop_once(struct cvmrdma_context * ctxt, struct ibv_cq * pr
                 offt = hca_addr - cur_mr->hca_va;
                 dest = (unsigned char *)cur_mr->user_mr.ibv_mr.addr + offt;
 
-                if(notif.chunk_len == CVMRDMA_CHUNK_BYTES){
+                if(notif.chunk_len == cvmrdma_chunk_bytes){
                     decrypted = dest;
                     bypass_scatter = true;
                 }
@@ -261,7 +261,7 @@ static int cq_server_loop_once(struct cvmrdma_context * ctxt, struct ibv_cq * pr
                 cur_mr = get_bounce_metadata_for_lkey(pd->bounce_metadata, cur_sge->lkey);
                 assert(cur_mr);
 
-                if(notif.chunk_len == CVMRDMA_CHUNK_BYTES 
+                if(notif.chunk_len == cvmrdma_chunk_bytes 
                     && qp->cur_offt_in_sge + notif.chunk_len <= cur_sge->length)
                 {
                     /* can write directly to dest! */
@@ -279,7 +279,7 @@ static int cq_server_loop_once(struct cvmrdma_context * ctxt, struct ibv_cq * pr
             DEBUG("[CQ] notif.chunk_offt 0x%"PRIx64" and notif.chunk_len %zu\n", notif.chunk_offt, notif.chunk_len);
             DEBUG("[CQ] clen %llu\n", payload_clen);
 
-            size_t chunk_idx = offt / CVMRDMA_CHUNK_BYTES;
+            size_t chunk_idx = offt / cvmrdma_chunk_bytes;
             unsigned char * payload_start = NULL;
             struct chunk_tracking_info* chunk_info = &cur_mr->chunk_tracking[chunk_idx];
 
@@ -297,7 +297,7 @@ static int cq_server_loop_once(struct cvmrdma_context * ctxt, struct ibv_cq * pr
             } else {
                 /* Copy the payload into the private chunk cache */
                 // TODO: this is wrong
-                assert(offt % CVMRDMA_CHUNK_BYTES == 0);
+                assert(offt % cvmrdma_chunk_bytes == 0);
                 DEBUG("[CQ] chunk_idx %zu to chunk cache\n", chunk_idx);
                 pthread_mutex_lock(&chunk_info->lock);
                 payload_start = cur_mr->provider_va + chunk_idx * cvmrdma_ring_slot_bytes(ctxt->aead) +  cvmrdma_header_bytes(ctxt->aead);
@@ -314,7 +314,7 @@ static int cq_server_loop_once(struct cvmrdma_context * ctxt, struct ibv_cq * pr
                 struct uffdio_writeprotect uffdio_wp = {
                     .range = {
                         .start = decrypted,
-                        .len = CVMRDMA_CHUNK_BYTES,
+                        .len = cvmrdma_chunk_bytes,
                     },
                     .mode = 0,
                 };
@@ -324,7 +324,7 @@ static int cq_server_loop_once(struct cvmrdma_context * ctxt, struct ibv_cq * pr
                 }
             }
 
-            unsigned long long payload_mlen = CVMRDMA_CHUNK_BYTES;
+            unsigned long long payload_mlen = cvmrdma_chunk_bytes;
             err = cvmrdma_decrypt(
                 decrypted, &payload_mlen,
                 NULL,
@@ -414,7 +414,7 @@ static int cq_server_loop_once(struct cvmrdma_context * ctxt, struct ibv_cq * pr
                 struct uffdio_writeprotect uffdio_wp = {
                     .range = {
                         .start = (unsigned long) decrypted,
-                        .len = CVMRDMA_CHUNK_BYTES,
+                        .len = cvmrdma_chunk_bytes,
                     },
                     .mode = UFFDIO_WRITEPROTECT_MODE_WP,
                 };

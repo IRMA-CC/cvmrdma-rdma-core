@@ -72,17 +72,17 @@ void* fault_handler_thread(void* arg) {
 
         // Mark chunk where this address falls into as dirty
         uint64_t offt = (msg.arg.pagefault.address - targs->mr->hca_va);
-        uint64_t chunk_idx = offt / CVMRDMA_CHUNK_BYTES;
+        uint64_t chunk_idx = offt / cvmrdma_chunk_bytes;
         DEBUG("[CACHE] chunk_idx = %llu\n", chunk_idx);
         atomic_store(&targs->mr->chunk_tracking[chunk_idx].cached, false);
 
 
         // make all pages of the chunk as writable
-        uint64_t alinged_start = msg.arg.pagefault.address - (offt % CVMRDMA_CHUNK_BYTES);
+        uint64_t alinged_start = msg.arg.pagefault.address - (offt % cvmrdma_chunk_bytes);
         struct uffdio_writeprotect uffdio_wp = {
             .range = {
                 .start = alinged_start,
-                .len = (alinged_start - (uint64_t)user_mr->addr) + CVMRDMA_CHUNK_BYTES  > user_mr->length ? user_mr->length - (alinged_start - (uint64_t)user_mr->addr) : CVMRDMA_CHUNK_BYTES,
+                .len = (alinged_start - (uint64_t)user_mr->addr) + cvmrdma_chunk_bytes  > user_mr->length ? user_mr->length - (alinged_start - (uint64_t)user_mr->addr) : cvmrdma_chunk_bytes,
             },
             .mode = 0,
         };

@@ -861,7 +861,7 @@ static int post_send_do_bounce(struct cvmrdma_qp * qp, struct ibv_send_wr *wrs, 
 		for(size_t i = 0 ; i < nsge ; i++) {
 			total_bytes += sgl[i].length;
 			struct cvmrdma_mr * cur_mr = get_bounce_metadata_for_lkey(pd->bounce_metadata, sgl[i].lkey);
-			size_t sge_chunks = DIVIDE_ROUND_UP(sgl[i].length + ((sgl[i].addr- cur_mr->hca_va) % CVMRDMA_CHUNK_BYTES), CVMRDMA_CHUNK_BYTES);
+			size_t sge_chunks = DIVIDE_ROUND_UP(sgl[i].length + ((sgl[i].addr- cur_mr->hca_va) % cvmrdma_chunk_bytes), cvmrdma_chunk_bytes);
 			total_chunks += sge_chunks;
 		}
 
@@ -880,7 +880,7 @@ static int post_send_do_bounce(struct cvmrdma_qp * qp, struct ibv_send_wr *wrs, 
 			uint64_t offt = (cur_sge->addr - cur_mr->hca_va) + cur_sge_offt;
 
 			/* If this is the last chunk, we'll need to notify that it's a WC generating chunk (if op != WRITE) */
-			size_t chunks_num = DIVIDE_ROUND_UP(cur_sge->length + ((cur_sge->addr - cur_mr->hca_va) % CVMRDMA_CHUNK_BYTES), CVMRDMA_CHUNK_BYTES);
+			size_t chunks_num = DIVIDE_ROUND_UP(cur_sge->length + ((cur_sge->addr - cur_mr->hca_va) % cvmrdma_chunk_bytes), cvmrdma_chunk_bytes);
 			
 			
 
@@ -903,21 +903,6 @@ static int post_send_do_bounce(struct cvmrdma_qp * qp, struct ibv_send_wr *wrs, 
 				((unsigned char *)cur_sge->addr)[16], ((unsigned char *)cur_sge->addr)[17]
 			);
 
-			// if(cvmrdma_global_send_wr_id == 0xc) {
-			// 	struct cvmrdma_mr* mr = NULL;
-            //     int i = 0;
-            //     do {
-            //         mr = get_bounce_metadata_for_rkey(pd->bounce_metadata, i);
-            //         if (mr != NULL) {
-            //             fprintf(stderr, "[SEND] bounce_metadata[%d]: len: 0x%zx, user_mr addr: %p, user_mr hca_va: %p provider_mr len: 0x%zx, provider_mr provider_va: %p, provider_mr lkey: 0x%lx\n", 
-            //             i, mr->user_mr.ibv_mr.length, mr->user_mr.ibv_mr.addr, mr->hca_va,
-            //             mr->provider_mr->length, mr->provider_va, mr->provider_mr->lkey);
-            //         }
-            //         i++;
-            //     } while (mr != NULL);
-			// }
-
-
 			/* Prepare the two nonces: for notif and for payload */
 			uint64_t * qp_nonce = qp->tx_nonce;
 
@@ -928,17 +913,17 @@ static int post_send_do_bounce(struct cvmrdma_qp * qp, struct ibv_send_wr *wrs, 
 
 
 			/* offt in MR*/
-			uint64_t chunk_idx = offt / CVMRDMA_CHUNK_BYTES;
+			uint64_t chunk_idx = offt / cvmrdma_chunk_bytes;
 
-			uint64_t alinged_offset = offt - (offt % CVMRDMA_CHUNK_BYTES);
+			uint64_t alinged_offset = offt - (offt % cvmrdma_chunk_bytes);
 			/* location in memory */
 			unsigned char * ptxt = cur_mr->user_mr.ibv_mr.addr + alinged_offset;
-			uint64_t send_len = alinged_offset + CVMRDMA_CHUNK_BYTES > cur_mr->user_mr.ibv_mr.length ? cur_mr->user_mr.ibv_mr.length - alinged_offset : CVMRDMA_CHUNK_BYTES;
+			uint64_t send_len = alinged_offset + cvmrdma_chunk_bytes > cur_mr->user_mr.ibv_mr.length ? cur_mr->user_mr.ibv_mr.length - alinged_offset : cvmrdma_chunk_bytes;
 
 			uint64_t true_payload_bytes = 0; 
 
 			if (!last_chunk){
-				true_payload_bytes = CVMRDMA_CHUNK_BYTES - (offt % CVMRDMA_CHUNK_BYTES);
+				true_payload_bytes = cvmrdma_chunk_bytes - (offt % cvmrdma_chunk_bytes);
 				cur_sge_offt += true_payload_bytes;
 			} else {
 				true_payload_bytes = cur_sge->length - cur_sge_offt;
@@ -1008,7 +993,7 @@ static int post_send_do_bounce(struct cvmrdma_qp * qp, struct ibv_send_wr *wrs, 
 					notif.rkey = rkey;
 					notif.imm = this_imm;
 					memcpy(notif.payload_nonce, chunk_info->nonce, cvmrdma_aead_NPUBBYTES);
-					notif.chunk_offt = offt % CVMRDMA_CHUNK_BYTES;
+					notif.chunk_offt = offt % cvmrdma_chunk_bytes;
 					notif.chunk_len = true_payload_bytes;
 					notif.last_chunk = last_chunk;
 					notif.payload_len = send_len;
@@ -1021,7 +1006,7 @@ static int post_send_do_bounce(struct cvmrdma_qp * qp, struct ibv_send_wr *wrs, 
 					notif.rkey = 0;
 					notif.imm = this_imm;
 					memcpy(notif.payload_nonce, chunk_info->nonce, cvmrdma_aead_NPUBBYTES);
-					notif.chunk_offt = offt % CVMRDMA_CHUNK_BYTES;
+					notif.chunk_offt = offt % cvmrdma_chunk_bytes;
 					notif.chunk_len = true_payload_bytes;
 					notif.last_chunk = last_chunk;
 					notif.payload_len = send_len;
@@ -1111,7 +1096,7 @@ skip_payload_encryption:
 			uint32_t remote_ring_rkey = qp->remote_ring_rkey;
 			assert(remote_ring_rkey != 0);
 
-			uint64_t helper_offt = (offt%CVMRDMA_CHUNK_BYTES)+header_bytes;
+			uint64_t helper_offt = (offt%cvmrdma_chunk_bytes)+header_bytes;
 			DEBUG("[SEND QPN %x] writing encrypted %x %x %x %x %x %x %x %x %x %x %x %x %x %x %x %x %x %x\n", 
 			 	qp->user_qp.qp.qp_num, 
 				slot[0+helper_offt], slot[1+helper_offt], slot[2+helper_offt], slot[3+helper_offt],
@@ -1294,7 +1279,7 @@ static struct ibv_mr *cvmrdma_reg_mr(struct ibv_pd *ibpd, void *addr, size_t len
 	
 	struct cvmrdma_mr * mr = calloc(1, sizeof(struct cvmrdma_mr));
 
-	uint64_t num_chunks = DIVIDE_ROUND_UP((length + (((uint64_t)addr) % CVMRDMA_CHUNK_BYTES)), CVMRDMA_CHUNK_BYTES);
+	uint64_t num_chunks = DIVIDE_ROUND_UP((length + (((uint64_t)addr) % cvmrdma_chunk_bytes)), cvmrdma_chunk_bytes);
 	uint64_t provider_mr_size = num_chunks * cvmrdma_ring_slot_bytes(ctxt->aead);
 
 	DEBUG("[MR] Allocating provider buffer MR of size %lu for user MR of size %lu\n", provider_mr_size, length);
@@ -1556,7 +1541,7 @@ CapnpEvloopThread * evloop_server = NULL;
 CVMRDMAServer * tcp_server = NULL;
 
 bool cvmrdma_disable_cache = false;
-
+uint64_t cvmrdma_chunk_bytes = 32 * 4096;
 static struct verbs_context *cvmrdma_alloc_context(struct ibv_device *ibdev,
 						  int cmd_fd,
 						  void *private_data)
@@ -1614,6 +1599,17 @@ static struct verbs_context *cvmrdma_alloc_context(struct ibv_device *ibdev,
 	{
 		cvmrdma_disable_cache = true;
 	}
+
+	char const* cvmrdma_chunk_bytes_str = getenv("CVMRDMA_CHUNK_BYTES");
+	if(cvmrdma_chunk_bytes_str != NULL)
+	{
+		cvmrdma_chunk_bytes = atoi(cvmrdma_chunk_bytes_str);
+		if (cvmrdma_chunk_bytes == 0)
+		{
+			fprintf(stderr, "ERROR: CVMRDMA_CHUNK_BYTES must be a positive integer\n");
+			goto err;
+		}
+	} 
 
 
 	/* Initialize cryptographic APIs (can be called multiple times) */
