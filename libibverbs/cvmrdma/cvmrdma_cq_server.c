@@ -23,7 +23,7 @@
 #include "cvmrdma_objects.h"
 #include "cvmrdma_network_evloop_priv.h"
 
-#define CQ_SERVER_NUM_WCS CVMRDMA_RING_ENTRIES
+#define CQ_SERVER_NUM_WCS 16
 static int cq_server_loop_once(struct cvmrdma_context * ctxt, struct ibv_cq * prov_cq)
 {
     QPMetadataManager * qp_metadata_manager = ctxt->qp_metadata_manager;
