@@ -40,7 +40,7 @@ void qp_recv_metadata_pop(QpRecvMetadata * recv_metadata_manager)
 {
     DEBUG("[RM] pop RECV metadata: currently has %zu entries\n", recv_metadata_manager->queue.size());
     struct recv_metadata_entry & entry = recv_metadata_manager->queue.front();
-    delete entry.sgl;
+    delete [] entry.sgl;
     recv_metadata_manager->queue.pop();
 }
 

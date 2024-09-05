@@ -22,7 +22,7 @@ struct ibv_send_wr* wrq_front(WRQueue * wrq)
 void wrq_pop(WRQueue * wrq)
 {
     struct ibv_send_wr * wr = &wrq->front();
-    delete wr->sg_list;
+    delete [] wr->sg_list;
     wrq->pop();
 }
 
