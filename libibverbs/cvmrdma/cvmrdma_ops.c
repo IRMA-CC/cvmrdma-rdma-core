@@ -503,13 +503,6 @@ static struct ibv_qp *cvmrdma_create_qp(struct ibv_pd * ibpd,
 		}
 	}
 
-	err = pthread_create(&qp->send_server_thread, NULL, &cvmrdma_do_bounce_loop, (void *)qp);
-	if (err)
-	{
-		fprintf(stderr, "Error creating cvmrdma_cq_wait_completion_event thread: %d\n", err);
-		exit(1);
-	}
-
 	/* We can only get the capability to the remote QP once we know its QPN, this will be done
 	   in modify_qp. We'll also get the rkey to its ring */
 	qp->remote_qnc = NULL;
@@ -520,6 +513,13 @@ static struct ibv_qp *cvmrdma_create_qp(struct ibv_pd * ibpd,
 	pthread_mutex_init(&qp->remote_params_lock, NULL);
 	pthread_cond_init(&qp->remote_params_set_cv, NULL);
 
+
+	err = pthread_create(&qp->send_server_thread, NULL, &cvmrdma_do_bounce_loop, (void *)qp);
+	if (err)
+	{
+		fprintf(stderr, "Error creating cvmrdma_cq_wait_completion_event thread: %d\n", err);
+		exit(1);
+	}
 
 	/* Generate a random tx key */
 	randombytes_buf(qp->tx_key, cvmrdma_aead_KEYBYTES);
