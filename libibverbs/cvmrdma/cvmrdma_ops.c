@@ -310,8 +310,8 @@ static struct ibv_qp *cvmrdma_create_qp(struct ibv_pd * ibpd,
 	attr_ex.send_cq = c_cq->prov_cq_send;
 	attr_ex.recv_cq = c_cq->prov_cq_recv;
 
-	assert(attr->qp_type == IBV_QPT_RC);
-	attr_ex.qp_type = IBV_QPT_RC;
+	assert(attr->qp_type == IBV_QPT_RC || attr->qp_type == IBV_QPT_UC);
+	attr_ex.qp_type = attr->qp_type;
 
 	/* Don't keep the user set QP capacity */
 	attr_ex.cap.max_recv_sge = 30;
@@ -795,9 +795,9 @@ static int post_send_do_bounce(struct cvmrdma_qp * qp, struct ibv_send_wr *wrs, 
 
 	int err;
 
-	if(qp->user_qp.qp.qp_type != IBV_QPT_RC)
+	if(qp->user_qp.qp.qp_type != IBV_QPT_RC && qp->user_qp.qp.qp_type != IBV_QPT_UC)
 	{
-		fprintf(stderr, "ERROR: for now CVMRDMA only supports RC\n");
+		fprintf(stderr, "ERROR: for now CVMRDMA only supports RC and UC\n");
 		return EINVAL;
 	}
 
