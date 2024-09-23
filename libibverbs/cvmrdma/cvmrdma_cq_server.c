@@ -601,7 +601,10 @@ void* cvmrdma_cq_wait_completion_event(void* c_cq) {
     DEBUG("[CQ] Waiting for CQ event\n");
 
     for(;;) {
-        if(true) {
+        // Toggle between busy polling and waiting for event
+        // Since the event waiting seems to have problems (cf. the gam benchmark)
+        // we still busy poll.
+        if(false) {
             // verbs.c:632 ibv_get_cq_event
             // This emulates:
             // ret = ibv_get_cq_event(cq->provider_comp_channel, &ev_cq, &ev_ctx);
@@ -646,7 +649,7 @@ void* cvmrdma_cq_wait_completion_event(void* c_cq) {
             }
         } else {
             cvmrdma_cq_server_run_once_if_idle_recv(context, cq, NULL);
-            cvmrdma_cq_server_run_once_if_idle_recv(context, cq, NULL);
+            cvmrdma_cq_server_run_once_if_idle_send(context, cq, NULL);
         }
     }
 }
