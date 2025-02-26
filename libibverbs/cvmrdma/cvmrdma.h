@@ -10,14 +10,14 @@
 struct cq_server_notification
 {
     uint64_t hca_addr; // 8
-    enum ibv_wr_opcode op; // 12
+    enum ibv_wr_opcode op; // 16
     uint32_t rkey; // 16
-    uint32_t imm; // 20
-	uint64_t payload_nonce[cvmrdma_aead_NPUB_WORDS]; // 44
-	uint64_t payload_len; // 52
-	uint64_t chunk_offt; // 60
-	uint64_t chunk_len; // 68
-    bool last_chunk; // 69
+    uint32_t imm; // 24
+	uint64_t payload_nonce[cvmrdma_aead_NPUB_WORDS]; // 48
+	uint64_t payload_len; // 56
+	uint64_t chunk_offt; // 64
+	uint64_t chunk_len; // 72
+    bool last_chunk; // 80
 };
 
 #define CVMRDMA_SHARED_KEY_ENV "CVMRDMA_SHARED_KEY"
