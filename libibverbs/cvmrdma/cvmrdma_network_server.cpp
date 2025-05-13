@@ -87,6 +87,16 @@ kj::Promise<void> QpNotificationChannel::setRemoteParams(SetRemoteParamsContext 
     return kj::READY_NOW;
 }
 
+kj::Promise<void> QpNotificationChannel::notifyNonce(NotifyNonceContext context)
+{
+    auto p = context.getParams();
+    uint64_t nonce = p.getNonce();
+
+    DEBUG("[NS] notifyNonce: nonce: 0x%" PRIx64 "\n", nonce);
+
+    return kj::READY_NOW;
+}
+
 
 kj::Promise<void> CVMRDMAServer::registerQpWithRemoteQp(RegisterQpWithRemoteQpContext context)
 {

@@ -303,3 +303,17 @@ void remote_qp_notify_chunk_recv(const char* remote_addr, CapnpEvloopThread *cev
         }
     );
 }
+
+void notify_nonce(const char* remote_addr, CapnpEvloopThread *cev, QPNotificationClient *qnc, uint64_t nonce)
+{
+    DEBUG("notify_nonce\n");
+
+    /* Add to taskset on evloop thread */
+    cev->get_executor(remote_addr).executeSync(
+        [=]() {
+            cev->get_taskset(remote_addr).add(
+                notify_nonce_rpc(qnc, nonce)
+            );
+        }
+    );
+}

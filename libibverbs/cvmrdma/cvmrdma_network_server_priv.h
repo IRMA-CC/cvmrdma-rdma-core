@@ -41,6 +41,7 @@ public:
     
     kj::Promise<void> notifyChunkRecv(NotifyChunkRecvContext context) override;
     kj::Promise<void> setRemoteParams(SetRemoteParamsContext context) override;
+    kj::Promise<void> notifyNonce(NotifyNonceContext context) override;
     
     uint32_t get_qpn()
     {

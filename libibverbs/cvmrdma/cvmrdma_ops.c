@@ -982,6 +982,8 @@ static int post_send_do_bounce(struct cvmrdma_qp * qp, struct ibv_send_wr *wrs, 
 
 			unsigned char * slot = cur_mr->provider_va + (chunk_idx * cvmrdma_ring_slot_bytes(ctxt->aead));
 
+			notify_nonce(ctxt->remote_addr, ctxt->network_evloop, qp->remote_qnc, chunk_info->nonce[0]);
+
 			/***** NOTIFY ******/
 			TIMING("chunk_notify");
 			unsigned long long notif_clen;

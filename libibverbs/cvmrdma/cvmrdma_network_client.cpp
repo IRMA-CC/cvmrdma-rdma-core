@@ -40,6 +40,17 @@ kj::Promise<void> set_remote_params_rpc(QPNotificationClient * qnc, uint64_t con
     return req.send().ignoreResult();
 }
 
+kj::Promise<void> notify_nonce_rpc(QPNotificationClient * qnc, uint64_t nonce)
+{
+    auto req = qnc->notifyNonceRequest();
+
+    req.setNonce(nonce);
+
+    DEBUG("[NC] Notify nonce: 0x%" PRIx64 "\n", nonce);
+
+    return req.send().ignoreResult();
+}
+
 QPNotificationClient register_qp_with_remote_qp_rpc(CVMRDMAClient * client, uint32_t remote_qpn)
 {
     auto req = client->registerQpWithRemoteQpRequest();

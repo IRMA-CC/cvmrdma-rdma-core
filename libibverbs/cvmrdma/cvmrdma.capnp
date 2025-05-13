@@ -4,6 +4,10 @@ interface CVMRDMA {
 
     interface QpNotificationChannel {
 
+        notifyNonce @2 (
+            nonce: UInt64
+        ) -> ();
+
         # called on WC for a WWI, freeing up a slot in the ring buffer
         notifyChunkRecv @0 () -> ();
 
