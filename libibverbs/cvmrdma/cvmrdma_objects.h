@@ -192,8 +192,8 @@ struct cvmrdma_qp {
 	struct ibv_mr *control_buf_mr;
 	void *control_buf_va;
 
-	pthread_t control_server_send_acks_thread;
-	pthread_t control_server_receive_acks_thread;
+	//pthread_t control_server_send_acks_thread;
+	//pthread_t control_server_receive_acks_thread;
 
 	/* Remote params */
 	uint64_t rx_key[cvmrdma_aead_KEY_WORDS];
