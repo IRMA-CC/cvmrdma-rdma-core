@@ -196,7 +196,10 @@ static int attach_qp_to_cq_manager(struct cvmrdma_context * ctxt, struct cvmrdma
 		&qp->control_remote_psn,
 		&qp->remote_params_set,
 		&qp->remote_params_lock,
-		&qp->remote_params_set_cv
+		&qp->remote_params_set_cv,
+		&qp->receive_nonce_lock,
+		&qp->receive_nonce_cv,
+		&qp->nonce
 	);
 
 	return 0;
@@ -514,6 +517,10 @@ static struct ibv_qp *cvmrdma_create_qp(struct ibv_pd * ibpd,
 	qp->remote_params_set = false;
 	pthread_mutex_init(&qp->remote_params_lock, NULL);
 	pthread_cond_init(&qp->remote_params_set_cv, NULL);
+
+	pthread_mutex_init(&qp->receive_nonce_lock, NULL);
+	pthread_cond_init(&qp->receive_nonce_cv, NULL);
+	qp->nonce = 0;
 
 
 	err = pthread_create(&qp->send_server_thread, NULL, &cvmrdma_do_bounce_loop, (void *)qp);

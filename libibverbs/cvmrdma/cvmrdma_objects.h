@@ -233,6 +233,10 @@ struct cvmrdma_qp {
 	/* Information for debugging purposes */
 	u_int64_t lid;
 	uint64_t dlid;
+
+	pthread_mutex_t receive_nonce_lock;
+	pthread_cond_t receive_nonce_cv;
+	uint64_t nonce;
 };
 
 struct cvmrdma_srq {

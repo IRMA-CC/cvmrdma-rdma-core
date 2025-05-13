@@ -29,7 +29,10 @@ QpNotificationChannel::QpNotificationChannel(
     uint32_t * control_remote_psn_ptr,
     bool * remote_params_set_ptr,
     pthread_mutex_t *  remote_params_lock_ptr,
-    pthread_cond_t * remote_params_set_cv_ptr
+    pthread_cond_t * remote_params_set_cv_ptr,
+    pthread_mutex_t * receive_nonce_lock,
+    pthread_cond_t * receive_nonce_cv_ptr,
+    uint64_t * nonce_ptr
 )
 : m_qpn{qpn},
 m_send_lines_full_ptr{send_lines_full_ptr},
@@ -42,7 +45,10 @@ m_control_qpn_ptr{control_qpn_ptr},
 m_control_remote_psn_ptr{control_remote_psn_ptr},
 m_remote_params_set_ptr{remote_params_set_ptr},
 m_remote_params_lock_ptr{remote_params_lock_ptr},
-m_remote_params_set_cv_ptr{remote_params_set_cv_ptr}
+m_remote_params_set_cv_ptr{remote_params_set_cv_ptr},
+m_receive_nonce_lock{receive_nonce_lock},
+m_receive_nonce_cv_ptr{receive_nonce_cv_ptr},
+m_nonce_ptr{nonce_ptr}
 { }
 
 static int recv_counter = 0;
@@ -92,6 +98,8 @@ kj::Promise<void> QpNotificationChannel::notifyNonce(NotifyNonceContext context)
     auto p = context.getParams();
     uint64_t nonce = p.getNonce();
 
+    this->notify_nonce(nonce);
+
     DEBUG("[NS] notifyNonce: nonce: 0x%" PRIx64 "\n", nonce);
 
     return kj::READY_NOW;
@@ -129,11 +137,14 @@ void CVMRDMAServer::qp_notification_channel_create(
     uint32_t * control_remote_psn_ptr,
     bool * remote_params_set_ptr,
     pthread_mutex_t *  remote_params_lock_ptr,
-    pthread_cond_t * remote_params_set_cv_ptr
+    pthread_cond_t * remote_params_set_cv_ptr,
+    pthread_mutex_t * receive_nonce_lock,
+    pthread_cond_t * receive_nonce_cv_ptr,
+    uint64_t * nonce_ptr
 )
 {
     auto qnc_server = kj::heap<QpNotificationChannel>(local_qpn, send_lines_full_ptr, send_lines_lock_ptr, send_lines_avail_ptr,
-        rx_key_ptr, remote_ring_rkey_ptr, remote_control_rkey_ptr, control_qpn_ptr, control_remote_psn_ptr, remote_params_set_ptr, remote_params_lock_ptr, remote_params_set_cv_ptr);
+        rx_key_ptr, remote_ring_rkey_ptr, remote_control_rkey_ptr, control_qpn_ptr, control_remote_psn_ptr, remote_params_set_ptr, remote_params_lock_ptr, remote_params_set_cv_ptr, receive_nonce_lock, receive_nonce_cv_ptr, nonce_ptr);
     DEBUG("[NS] Register fresh notification channel for qpn 0x%" PRIx32 "\n", local_qpn);
 
     auto qnc_client = qnc_capset.add(std::move(qnc_server));
@@ -169,10 +180,13 @@ void cvmrdma_server_register_qp(CVMRDMAServer * cs,
     uint32_t * control_remote_psn_ptr,
     bool * remote_params_set_ptr,
     pthread_mutex_t *  remote_params_lock_ptr,
-    pthread_cond_t * remote_params_set_cv_ptr
+    pthread_cond_t * remote_params_set_cv_ptr,
+    pthread_mutex_t * receive_nonce_lock,
+    pthread_cond_t * receive_nonce_cv_ptr,
+    uint64_t * nonce_ptr
 )
 {
     assert(cs != nullptr);
     cs->qp_notification_channel_create(local_qpn, send_lines_full_ptr, send_lines_lock_ptr, send_lines_avail_ptr,
-        rx_key_ptr, remote_ring_rkey_ptr, remote_control_rkey_ptr, control_qpn_ptr, control_remote_psn_ptr, remote_params_set_ptr, remote_params_lock_ptr, remote_params_set_cv_ptr);
+        rx_key_ptr, remote_ring_rkey_ptr, remote_control_rkey_ptr, control_qpn_ptr, control_remote_psn_ptr, remote_params_set_ptr, remote_params_lock_ptr, remote_params_set_cv_ptr, receive_nonce_lock, receive_nonce_cv_ptr, nonce_ptr);
 }

@@ -36,7 +36,10 @@ public:
         uint32_t * control_remote_psn_ptr,
         bool * remote_params_set_ptr,
         pthread_mutex_t *  remote_params_lock_ptr,
-        pthread_cond_t * remote_params_set_cv_ptr
+        pthread_cond_t * remote_params_set_cv_ptr,
+        pthread_mutex_t * receive_nonce_lock,
+        pthread_cond_t * receive_nonce_cv_ptr,
+        uint64_t * nonce_ptr
     );
     
     kj::Promise<void> notifyChunkRecv(NotifyChunkRecvContext context) override;
@@ -65,6 +68,14 @@ public:
         pthread_cond_broadcast(m_remote_params_set_cv_ptr);
     }
 
+    void notify_nonce(uint64_t nonce)
+    {
+        pthread_mutex_lock(m_receive_nonce_lock);
+        *m_nonce_ptr = nonce;
+        pthread_mutex_unlock(m_receive_nonce_lock);
+        pthread_cond_signal(m_receive_nonce_cv_ptr);
+    }
+
 private:
     uint32_t m_qpn = 0;
 
@@ -76,6 +87,9 @@ private:
 	bool * m_remote_params_set_ptr = nullptr;
 	pthread_mutex_t * m_remote_params_lock_ptr = nullptr;
 	pthread_cond_t * m_remote_params_set_cv_ptr = nullptr;
+    pthread_mutex_t * m_receive_nonce_lock = nullptr;
+    pthread_cond_t * m_receive_nonce_cv_ptr = nullptr;
+    uint64_t * m_nonce_ptr = nullptr;
 
     /* Counter in the original qp tracking the number of lines full in the remote recv ring / the locl send ring */
     int * m_send_lines_full_ptr = nullptr;
@@ -101,7 +115,10 @@ public:
         uint32_t * control_remote_psn_ptr,
         bool * remote_params_set_ptr,
         pthread_mutex_t *  remote_params_lock_ptr,
-        pthread_cond_t * remote_params_set_cv_ptr
+        pthread_cond_t * remote_params_set_cv_ptr,
+        pthread_mutex_t * receive_nonce_lock,
+        pthread_cond_t * receive_nonce_cv_ptr,
+        uint64_t * nonce_ptr
     );
     void qp_notification_channel_destroy(QpNotificationChannel * pnc);
 
@@ -127,7 +144,10 @@ void cvmrdma_server_register_qp(CVMRDMAServer * cs,
     uint32_t * control_remote_psn_ptr,
     bool * remote_params_set_ptr,
     pthread_mutex_t *  remote_params_lock_ptr,
-    pthread_cond_t * remote_params_set_cv_ptr
+    pthread_cond_t * remote_params_set_cv_ptr,
+    pthread_mutex_t * receive_nonce_lock,
+    pthread_cond_t * receive_nonce_cv_ptr,
+    uint64_t * nonce_ptr
 );
 
 #ifdef __cplusplus
