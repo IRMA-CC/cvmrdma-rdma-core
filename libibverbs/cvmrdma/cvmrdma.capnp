@@ -4,8 +4,12 @@ interface CVMRDMA {
 
     interface QpNotificationChannel {
 
+        # called on WC for a WWI, freeing up a slot in the ring buffer
+        notifyChunkRecv @0 () -> ();
+
+
         # tx key for client, rx on server
-        setRemoteParams @0 (
+        setRemoteParams @1 (
             localRingRkey :UInt32,
             localControlRkey :UInt32,
             controlQPN :UInt32,

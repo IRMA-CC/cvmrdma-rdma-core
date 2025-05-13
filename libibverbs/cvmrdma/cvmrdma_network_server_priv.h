@@ -39,6 +39,7 @@ public:
         pthread_cond_t * remote_params_set_cv_ptr
     );
     
+    kj::Promise<void> notifyChunkRecv(NotifyChunkRecvContext context) override;
     kj::Promise<void> setRemoteParams(SetRemoteParamsContext context) override;
     
     uint32_t get_qpn()

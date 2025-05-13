@@ -401,6 +401,7 @@ static struct ibv_qp *cvmrdma_create_qp(struct ibv_pd * ibpd,
 	qp->cur_offt_in_sge = 0;
 	qp->wr_bytes_rcved = 0;
 
+	// this might not be needed, if we send the metadata over ip again?
 	QpSendMetadata * send_metadata = alloc_qp_send_metadata();
 	if(! send_metadata)
 	{
@@ -444,6 +445,7 @@ static struct ibv_qp *cvmrdma_create_qp(struct ibv_pd * ibpd,
 
 	qp->user_sq_sig_all = attr->sq_sig_all;
 
+	// probably also not needed when sending over ip
 	/* Allocate rungbuffer where the other side writes the ACKs to*/
 	size_t control_rings_bytes = PAGE_SIZE;
 
@@ -631,7 +633,7 @@ static int cvmrdma_modify_qp(struct ibv_qp *ibqp, struct ibv_qp_attr *attr,
 		/*
 			Setup control qp
 		*/
-		struct start_args * start_args = calloc(1, sizeof(struct start_args));
+		/*struct start_args * start_args = calloc(1, sizeof(struct start_args));
 		struct ibv_ah_attr * ah_attr = calloc(1, sizeof(struct ibv_ah_attr));
 		start_args->ctxt = ctxt;
 		start_args->qp = qp;
@@ -643,7 +645,7 @@ static int cvmrdma_modify_qp(struct ibv_qp *ibqp, struct ibv_qp_attr *attr,
 		{
 			fprintf(stderr, "Failed to start control server thread\n");
 			exit(1);
-		}
+		}*/
 
 
 		switch(ibqp->qp_type)
@@ -1387,7 +1389,7 @@ static struct ibv_mr *cvmrdma_reg_mr(struct ibv_pd *ibpd, void *addr, size_t len
 	return &mr->user_mr.ibv_mr;
 }
 
-int cvmrdma_destroy_qp(struct ibv_qp *ibqp)
+/*int cvmrdma_destroy_qp(struct ibv_qp *ibqp)
 {
 	struct cvmrdma_qp * qp = (struct cvmrdma_qp *)ibqp;
 	void* t_ret;
@@ -1426,7 +1428,7 @@ int cvmrdma_destroy_qp(struct ibv_qp *ibqp)
 	// TODO(@ANONYMIZED): This should likely do more cleanup
 
 	return 0;
-}
+}*/
 
 static struct ibv_srq *cvmrdma_create_srq(struct ibv_pd *ibpd, struct ibv_srq_init_attr *attr)
 {
@@ -1507,7 +1509,7 @@ struct verbs_context_ops cvmrdma_ops = {
     // .dealloc_pd = cvmrdma_dealloc_pd,
     // .dereg_mr = cvmrdma_dereg_mr,
     // .destroy_cq = cvmrdma_destroy_cq,
-    .destroy_qp = cvmrdma_destroy_qp,
+    // .destroy_qp = cvmrdma_destroy_qp,
     // .free_context = cvmrdma_free_context,
     .modify_qp = cvmrdma_modify_qp,
     .poll_cq = cvmrdma_poll_cq,

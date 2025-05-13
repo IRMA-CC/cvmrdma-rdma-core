@@ -523,12 +523,18 @@ static int cq_server_loop_once(struct cvmrdma_context * ctxt, struct ibv_cq * pr
                 But what about failures to decrypt?*/
             TIMING("chunk_notify_recv");
 
-            pthread_mutex_lock(&qp->received_lines_lock);
+            DEBUG("FFF [CQ] notifying remote that chunk %zu is free\n", this_recv_slot_id);
+            remote_qp_notify_chunk_recv(
+                ctxt->remote_addr, ctxt->network_evloop, qp->remote_qnc
+            );
+
+
+            /*pthread_mutex_lock(&qp->received_lines_lock);
             if ( ++qp->received_lines >= CVMRDMA_ACK_THRESHOLD)
             {
                 pthread_cond_signal(&qp->recv_lines_ack);
             }
-            pthread_mutex_unlock(&qp->received_lines_lock);
+            pthread_mutex_unlock(&qp->received_lines_lock);*/
         }
     }
 

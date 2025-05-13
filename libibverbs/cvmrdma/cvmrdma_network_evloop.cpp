@@ -168,6 +168,17 @@ public:
         return *m_sessions.at(remote_addr_str)->m_executor;
     }
 
+    kj::TaskSet & get_taskset(const char * remote_addr)
+    {
+        std::string remote_addr_str{remote_addr};
+        if(! m_sessions.exists(remote_addr_str))
+        {
+            fprintf(stderr, "No session for remote addr %s\n", remote_addr);
+            exit(1);
+        }
+        return *m_sessions.at(remote_addr_str)->m_taskset;
+    }
+
 
 private:
     std::jthread m_server_thread;
@@ -276,5 +287,19 @@ void set_remote_params(const char* remote_addr, CapnpEvloopThread * evloop, QPNo
     DEBUG("[NE] Setting remote params for remote_addr %s\n", remote_addr);
     evloop->get_executor(remote_addr).executeSync(
         [=]() { return set_remote_params_rpc(qnc, tx_key, local_ring_rkey, local_control_rkey, control_qpn, control_local_psn); }
+    );
+}
+
+void remote_qp_notify_chunk_recv(const char* remote_addr, CapnpEvloopThread *cev, QPNotificationClient *qnc)
+{
+    DEBUG("remote_qp_notify_chunk_recv\n");
+
+    /* Add to taskset on evloop thread */
+    cev->get_executor(remote_addr).executeSync(
+        [=]() {
+            cev->get_taskset(remote_addr).add(
+                remote_qp_notify_chunk_recv_rpc(qnc)
+            );
+        }
     );
 }

@@ -32,6 +32,7 @@ void set_remote_params(const char* remote_addr, CapnpEvloopThread * evloop, QPNo
                        uint32_t local_ring_rkey, uint32_t local_control_rkey, uint32_t control_qpn, uint32_t control_local_psn);
 
 
+void remote_qp_notify_chunk_recv(const char* remote_addr, CapnpEvloopThread *cev, QPNotificationClient *qnc);
 
 #ifdef __cplusplus
 }

@@ -1,4 +1,4 @@
-#pragma once
+/*#pragma once
 
 #include "cvmrdma_objects.h"
 
@@ -20,4 +20,4 @@ struct start_args {
 void *start_control_server(void *args);
 void *control_server_send_acks(void *args);
 void *control_server_receive_acks(void *args);
-
+*/

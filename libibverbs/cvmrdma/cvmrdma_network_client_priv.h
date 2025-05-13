@@ -8,6 +8,7 @@
 #ifdef __cplusplus
 
 /* C++ API */
+kj::Promise<void> remote_qp_notify_chunk_recv_rpc(QPNotificationClient * qnc);
 
 kj::Promise<void> set_remote_params_rpc(QPNotificationClient * qnc, uint64_t const * tx_key, uint32_t local_ring_rkey, uint32_t local_control_rkey, uint32_t control_qpn, uint32_t control_local_psn);
 

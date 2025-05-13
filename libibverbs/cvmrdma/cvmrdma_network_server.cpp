@@ -45,6 +45,21 @@ m_remote_params_lock_ptr{remote_params_lock_ptr},
 m_remote_params_set_cv_ptr{remote_params_set_cv_ptr}
 { }
 
+static int recv_counter = 0;
+
+kj::Promise<void> QpNotificationChannel::notifyChunkRecv(NotifyChunkRecvContext context)
+{
+    TIMING("chunk_acked");
+    recv_counter++;
+    DEBUG("FFF [NS] notifyChunkRecv: %d\n", recv_counter);
+    pthread_mutex_lock(m_send_lines_lock_ptr);
+    (*m_send_lines_full_ptr) = (*m_send_lines_full_ptr) - 1;
+    pthread_mutex_unlock(m_send_lines_lock_ptr);
+
+    pthread_cond_signal(m_send_lines_avail_cv_ptr);
+
+    return kj::READY_NOW;
+}
 
 
 kj::Promise<void> QpNotificationChannel::setRemoteParams(SetRemoteParamsContext context)

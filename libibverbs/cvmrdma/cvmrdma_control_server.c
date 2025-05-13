@@ -1,4 +1,4 @@
-#include "cvmrdma_control_server.h"
+/*#include "cvmrdma_control_server.h"
 
 #include <pthread.h>
 #include <infiniband/verbs.h>
@@ -45,9 +45,9 @@ void *start_control_server(void *args) {
 
 	control_qp_attr_mask |= IBV_QP_AV | IBV_QP_PATH_MTU | IBV_QP_DEST_QPN | IBV_QP_RQ_PSN;
 
-	control_qp_attrs.max_dest_rd_atomic = 1; /* ??? */
-	control_qp_attrs.min_rnr_timer = 12;     /* ??? */
-	control_qp_attrs.timeout = 21;           /* ??? */
+	control_qp_attrs.max_dest_rd_atomic = 1;
+	control_qp_attrs.min_rnr_timer = 12;   
+	control_qp_attrs.timeout = 21;          
 
 	control_qp_attr_mask |= IBV_QP_MAX_DEST_RD_ATOMIC | IBV_QP_MIN_RNR_TIMER;
 
@@ -77,9 +77,9 @@ void *start_control_server(void *args) {
 	control_qp_attrs = (struct ibv_qp_attr) {
 		.qp_state = IBV_QPS_RTS,
 		.sq_psn = 0,
-	};
+	};*/
 	/* SQ PSN is remote's RQ PSN */
-	control_qp_attrs.sq_psn = control_sq_psn;
+	/*control_qp_attrs.sq_psn = control_sq_psn;
 	control_qp_attr_mask |= IBV_QP_SQ_PSN;
 
 	control_qp_attrs.timeout = 14;
@@ -210,9 +210,9 @@ void *control_server_receive_acks(void *args)
 		if (wc.opcode == IBV_WC_RDMA_WRITE) {
 			DEBUG("[CS 0x%x] Send ACK completed\n", qp->control_qp->qp_num);
 			continue;
-		} else if (wc.opcode == IBV_WC_RECV_RDMA_WITH_IMM) {
+		} else if (wc.opcode == IBV_WC_RECV_RDMA_WITH_IMM) {*/
             /* immediately refuel the recv queue */
-            {
+            /*{
                 struct ibv_recv_wr recv_wr[1] = {0};
                 struct ibv_recv_wr * bad_wr = NULL;
                 err = prov_ops.post_recv(qp->control_qp, recv_wr, &bad_wr);
@@ -246,4 +246,4 @@ void *control_server_receive_acks(void *args)
 			exit(1);
 		}
 	}
-}
+}*/
