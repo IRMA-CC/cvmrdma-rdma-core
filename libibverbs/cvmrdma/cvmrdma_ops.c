@@ -1398,9 +1398,9 @@ static struct ibv_mr *cvmrdma_reg_mr(struct ibv_pd *ibpd, void *addr, size_t len
 	return &mr->user_mr.ibv_mr;
 }
 
-/*int cvmrdma_destroy_qp(struct ibv_qp *ibqp)
+int cvmrdma_destroy_qp(struct ibv_qp *ibqp)
 {
-	struct cvmrdma_qp * qp = (struct cvmrdma_qp *)ibqp;
+	/*struct cvmrdma_qp * qp = (struct cvmrdma_qp *)ibqp;
 	void* t_ret;
 	int ret = pthread_cancel(qp->control_server_send_acks_thread);
 	if(ret)
@@ -1433,11 +1433,13 @@ static struct ibv_mr *cvmrdma_reg_mr(struct ibv_pd *ibpd, void *addr, size_t len
 	}
 
 	DEBUG("Successfully joined control_server_send_acks_thread and control_server_receive_acks_thread: %ld %ld\n", (long)qp->control_server_send_acks_thread, (long)qp->control_server_receive_acks_thread);
-
+	*/
 	// TODO(@ANONYMIZED): This should likely do more cleanup
 
+	DEBUG("Dummy destroy QP\n");
+
 	return 0;
-}*/
+}
 
 static struct ibv_srq *cvmrdma_create_srq(struct ibv_pd *ibpd, struct ibv_srq_init_attr *attr)
 {
@@ -1518,7 +1520,7 @@ struct verbs_context_ops cvmrdma_ops = {
     // .dealloc_pd = cvmrdma_dealloc_pd,
     // .dereg_mr = cvmrdma_dereg_mr,
     // .destroy_cq = cvmrdma_destroy_cq,
-    // .destroy_qp = cvmrdma_destroy_qp,
+    .destroy_qp = cvmrdma_destroy_qp,
     // .free_context = cvmrdma_free_context,
     .modify_qp = cvmrdma_modify_qp,
     .poll_cq = cvmrdma_poll_cq,
