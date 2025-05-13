@@ -1427,6 +1427,10 @@ int cvmrdma_destroy_qp(struct ibv_qp *ibqp)
 	*/
 	// TODO(@ANONYMIZED): This should likely do more cleanup
 
+	// by commenting out the above, the server shutsdown too fast, resulting in an error on the client.
+	// TODO: find a way to shutdown the server cleanly
+	usleep(100000);
+
 	DEBUG("Dummy destroy QP\n");
 
 	return 0;
