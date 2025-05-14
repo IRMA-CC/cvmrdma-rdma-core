@@ -1006,7 +1006,6 @@ static int post_send_do_bounce(struct cvmrdma_qp * qp, struct ibv_send_wr *wrs, 
 					notif.op = this_op;
 					notif.rkey = rkey;
 					notif.imm = this_imm;
-					memcpy(notif.payload_nonce, chunk_info->nonce, cvmrdma_aead_NPUBBYTES);
 					notif.chunk_offt = offt % cvmrdma_chunk_bytes;
 					notif.chunk_len = true_payload_bytes;
 					notif.last_chunk = last_chunk;
@@ -1019,7 +1018,6 @@ static int post_send_do_bounce(struct cvmrdma_qp * qp, struct ibv_send_wr *wrs, 
 					notif.op = this_op;
 					notif.rkey = 0;
 					notif.imm = this_imm;
-					memcpy(notif.payload_nonce, chunk_info->nonce, cvmrdma_aead_NPUBBYTES);
 					notif.chunk_offt = offt % cvmrdma_chunk_bytes;
 					notif.chunk_len = true_payload_bytes;
 					notif.last_chunk = last_chunk;

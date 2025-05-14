@@ -276,7 +276,6 @@ static int cq_server_loop_once(struct cvmrdma_context * ctxt, struct ibv_cq * pr
 
             unsigned long long payload_clen = notif.payload_len + cvmrdma_ABYTES(aead);
 
-            // DEBUG("[CQ] notif.op %d notif.payload_nonce %lx %lx\n", notif.op, notif.payload_nonce[0], notif.payload_nonce[1]);
             DEBUG("[CQ] notif.chunk_offt 0x%"PRIx64" and notif.chunk_len %zu\n", notif.chunk_offt, notif.chunk_len);
             DEBUG("[CQ] clen %llu\n", payload_clen);
 
@@ -337,12 +336,6 @@ static int cq_server_loop_once(struct cvmrdma_context * ctxt, struct ibv_cq * pr
             pthread_mutex_unlock(&qp->receive_nonce_lock);
             DEBUG("[CQ] got nonce %lx %lx %lx\n", nonce[0], nonce[1], nonce[2]);
 
-            if (memcmp(notif.payload_nonce, nonce, cvmrdma_aead_NPUBBYTES) == 0) {
-                DEBUG("[CQ] nonce matches\n");
-            } else {
-                fprintf(stderr, "nonce mismatch: %lx %lx %lx\n", notif.payload_nonce[0], notif.payload_nonce[1], notif.payload_nonce[2]);
-                exit(1);
-            }
 
             unsigned long long payload_mlen = cvmrdma_chunk_bytes;
             err = cvmrdma_decrypt(
@@ -442,7 +435,7 @@ static int cq_server_loop_once(struct cvmrdma_context * ctxt, struct ibv_cq * pr
                     fprintf(stderr, "[CQ] ioctl-UFFDIO_WRITEPROTECT: %d\n", errno);
                     exit(1);
                 }
-                memcpy(chunk_info->nonce, notif.payload_nonce, cvmrdma_aead_NPUBBYTES);
+                memcpy(chunk_info->nonce, nonce, cvmrdma_aead_NPUBBYTES);
                 atomic_store(&chunk_info->cached, true);
                 pthread_mutex_unlock(&chunk_info->lock);
 
