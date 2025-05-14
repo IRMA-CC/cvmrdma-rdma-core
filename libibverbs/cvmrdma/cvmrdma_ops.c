@@ -893,9 +893,6 @@ static int post_send_do_bounce(struct cvmrdma_qp * qp, struct ibv_send_wr *wrs, 
 
 			/* If this is the last chunk, we'll need to notify that it's a WC generating chunk (if op != WRITE) */
 			size_t chunks_num = DIVIDE_ROUND_UP(cur_sge->length + ((cur_sge->addr - cur_mr->hca_va) % cvmrdma_chunk_bytes), cvmrdma_chunk_bytes);
-			
-			
-
 			bool last_chunk = chunks_in_wr + 1 == chunks_num;
 
 			DEBUG("[SEND QPN %x] rkey: 0x%x, lkey: 0x%x, remote_addr: 0x%lx, dlid %x, lid %x, op: 0x%x, ctxt: %p\n", 
@@ -914,14 +911,6 @@ static int post_send_do_bounce(struct cvmrdma_qp * qp, struct ibv_send_wr *wrs, 
 				((unsigned char *)cur_sge->addr)[12], ((unsigned char *)cur_sge->addr)[13], ((unsigned char *)cur_sge->addr)[14], ((unsigned char *)cur_sge->addr)[15],
 				((unsigned char *)cur_sge->addr)[16], ((unsigned char *)cur_sge->addr)[17]
 			);
-
-			/* Prepare the two nonces: for notif and for payload */
-			uint64_t * qp_nonce = qp->tx_nonce;
-
-			uint64_t nonce_metadata[cvmrdma_aead_NPUB_WORDS];
-			memcpy(nonce_metadata, qp_nonce, cvmrdma_aead_NPUBBYTES);
-			/* and increment nonce */
-			qp_nonce[0] += 1;
 
 
 			/* offt in MR*/
@@ -991,7 +980,12 @@ static int post_send_do_bounce(struct cvmrdma_qp * qp, struct ibv_send_wr *wrs, 
 
 			unsigned char * slot = cur_mr->provider_va + (chunk_idx * cvmrdma_ring_slot_bytes(ctxt->aead));
 
-			remote_notify_nonce(ctxt->remote_addr, ctxt->network_evloop, qp->remote_qnc, chunk_info->nonce);
+			// generate new metadata nonce for each metadata 
+			uint64_t nonce_metadata[cvmrdma_aead_NPUB_WORDS];
+			randombytes_buf(nonce_metadata, cvmrdma_aead_NPUBBYTES);
+
+			// send the nonce metadata to the remote
+			remote_notify_nonce(ctxt->remote_addr, ctxt->network_evloop, qp->remote_qnc, nonce_metadata);
 
 			/***** NOTIFY ******/
 			TIMING("chunk_notify");
@@ -1006,6 +1000,7 @@ static int post_send_do_bounce(struct cvmrdma_qp * qp, struct ibv_send_wr *wrs, 
 					notif.op = this_op;
 					notif.rkey = rkey;
 					notif.imm = this_imm;
+					memcpy(notif.payload_nonce, chunk_info->nonce, cvmrdma_aead_NPUBBYTES);
 					notif.chunk_offt = offt % cvmrdma_chunk_bytes;
 					notif.chunk_len = true_payload_bytes;
 					notif.last_chunk = last_chunk;
@@ -1018,6 +1013,7 @@ static int post_send_do_bounce(struct cvmrdma_qp * qp, struct ibv_send_wr *wrs, 
 					notif.op = this_op;
 					notif.rkey = 0;
 					notif.imm = this_imm;
+					memcpy(notif.payload_nonce, chunk_info->nonce, cvmrdma_aead_NPUBBYTES);
 					notif.chunk_offt = offt % cvmrdma_chunk_bytes;
 					notif.chunk_len = true_payload_bytes;
 					notif.last_chunk = last_chunk;

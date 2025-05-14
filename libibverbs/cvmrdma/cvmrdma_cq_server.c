@@ -188,15 +188,6 @@ static int cq_server_loop_once(struct cvmrdma_context * ctxt, struct ibv_cq * pr
                Based on the header, we decide where to copy the encrypted payload
             */
 
-			/* Get notif nonce */
-			uint64_t * qp_nonce = qp->rx_nonce;
-
-			uint64_t nonce_metadata[cvmrdma_aead_NPUB_WORDS];
-			memcpy(nonce_metadata, qp_nonce, cvmrdma_aead_NPUBBYTES);
-			
-			/* and increment nonce */
-			qp_nonce[0] += 1;
-
             struct cq_server_notification notif = {0};
 
             unsigned char * notif_start = slot;
@@ -206,6 +197,18 @@ static int cq_server_loop_once(struct cvmrdma_context * ctxt, struct ibv_cq * pr
                 fprintf(stderr, "Failed to decrypt: chunk too short\n");
                 exit(1);
             }
+
+            uint64_t nonce_metadata[cvmrdma_aead_NPUB_WORDS];
+            DEBUG("[CQ] waiting for nonce\n");
+            pthread_mutex_lock(&qp->receive_nonce_lock);
+            while (!qp->nonce_set) {
+                pthread_cond_wait(&qp->receive_nonce_cv, &qp->receive_nonce_lock);
+            }
+            memcpy(&nonce_metadata, qp->nonce, cvmrdma_aead_NPUBBYTES);
+            memset(qp->nonce, 0, cvmrdma_aead_NPUBBYTES);
+            qp->nonce_set = false;
+            pthread_mutex_unlock(&qp->receive_nonce_lock);
+            DEBUG("[CQ] got nonce %lx %lx %lx\n", nonce_metadata[0], nonce_metadata[1], nonce_metadata[2]);
 
             unsigned long long notif_mlen = sizeof(notif);
             err = cvmrdma_decrypt(
@@ -324,26 +327,13 @@ static int cq_server_loop_once(struct cvmrdma_context * ctxt, struct ibv_cq * pr
                 }
             }
 
-            uint64_t nonce[cvmrdma_aead_NPUB_WORDS];
-            DEBUG("[CQ] waiting for nonce %lx\n", nonce);
-            pthread_mutex_lock(&qp->receive_nonce_lock);
-            while (!qp->nonce_set) {  
-                pthread_cond_wait(&qp->receive_nonce_cv, &qp->receive_nonce_lock);
-            }
-            memcpy(&nonce, qp->nonce, cvmrdma_aead_NPUBBYTES);
-            memset(qp->nonce, 0, cvmrdma_aead_NPUBBYTES);
-            qp->nonce_set = false;
-            pthread_mutex_unlock(&qp->receive_nonce_lock);
-            DEBUG("[CQ] got nonce %lx %lx %lx\n", nonce[0], nonce[1], nonce[2]);
-
-
             unsigned long long payload_mlen = cvmrdma_chunk_bytes;
             err = cvmrdma_decrypt(
                 decrypted, &payload_mlen,
                 NULL,
                 payload_start, payload_clen,
                 NULL, 0,
-                (unsigned char const *)nonce,
+                (unsigned char const *)notif.payload_nonce,
                 (unsigned char const *)shared_key,
                 aead
             );
@@ -435,7 +425,7 @@ static int cq_server_loop_once(struct cvmrdma_context * ctxt, struct ibv_cq * pr
                     fprintf(stderr, "[CQ] ioctl-UFFDIO_WRITEPROTECT: %d\n", errno);
                     exit(1);
                 }
-                memcpy(chunk_info->nonce, nonce, cvmrdma_aead_NPUBBYTES);
+                memcpy(chunk_info->nonce, notif.payload_nonce, cvmrdma_aead_NPUBBYTES);
                 atomic_store(&chunk_info->cached, true);
                 pthread_mutex_unlock(&chunk_info->lock);
 
