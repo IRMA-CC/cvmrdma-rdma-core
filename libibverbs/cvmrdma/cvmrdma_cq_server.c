@@ -325,13 +325,32 @@ static int cq_server_loop_once(struct cvmrdma_context * ctxt, struct ibv_cq * pr
                 }
             }
 
+            uint64_t nonce[cvmrdma_aead_NPUB_WORDS];
+            DEBUG("[CQ] waiting for nonce %lx\n", nonce);
+            pthread_mutex_lock(&qp->receive_nonce_lock);
+            while (!qp->nonce_set) {  
+                pthread_cond_wait(&qp->receive_nonce_cv, &qp->receive_nonce_lock);
+            }
+            memcpy(&nonce, qp->nonce, cvmrdma_aead_NPUBBYTES);
+            memset(qp->nonce, 0, cvmrdma_aead_NPUBBYTES);
+            qp->nonce_set = false;
+            pthread_mutex_unlock(&qp->receive_nonce_lock);
+            DEBUG("[CQ] got nonce %lx %lx %lx\n", nonce[0], nonce[1], nonce[2]);
+
+            if (memcmp(notif.payload_nonce, nonce, cvmrdma_aead_NPUBBYTES) == 0) {
+                DEBUG("[CQ] nonce matches\n");
+            } else {
+                fprintf(stderr, "nonce mismatch: %lx %lx %lx\n", notif.payload_nonce[0], notif.payload_nonce[1], notif.payload_nonce[2]);
+                exit(1);
+            }
+
             unsigned long long payload_mlen = cvmrdma_chunk_bytes;
             err = cvmrdma_decrypt(
                 decrypted, &payload_mlen,
                 NULL,
                 payload_start, payload_clen,
                 NULL, 0,
-                (unsigned char const *)notif.payload_nonce,
+                (unsigned char const *)nonce,
                 (unsigned char const *)shared_key,
                 aead
             );

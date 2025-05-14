@@ -236,7 +236,8 @@ struct cvmrdma_qp {
 
 	pthread_mutex_t receive_nonce_lock;
 	pthread_cond_t receive_nonce_cv;
-	uint64_t nonce;
+	uint64_t nonce[cvmrdma_aead_NPUB_WORDS];
+	bool nonce_set;
 };
 
 struct cvmrdma_srq {

@@ -199,7 +199,8 @@ static int attach_qp_to_cq_manager(struct cvmrdma_context * ctxt, struct cvmrdma
 		&qp->remote_params_set_cv,
 		&qp->receive_nonce_lock,
 		&qp->receive_nonce_cv,
-		&qp->nonce
+		qp->nonce,
+		&qp->nonce_set
 	);
 
 	return 0;
@@ -520,7 +521,8 @@ static struct ibv_qp *cvmrdma_create_qp(struct ibv_pd * ibpd,
 
 	pthread_mutex_init(&qp->receive_nonce_lock, NULL);
 	pthread_cond_init(&qp->receive_nonce_cv, NULL);
-	qp->nonce = 0;
+	memset(qp->nonce, 0, cvmrdma_aead_NPUBBYTES);
+	qp->nonce_set = false;
 
 
 	err = pthread_create(&qp->send_server_thread, NULL, &cvmrdma_do_bounce_loop, (void *)qp);
@@ -989,7 +991,7 @@ static int post_send_do_bounce(struct cvmrdma_qp * qp, struct ibv_send_wr *wrs, 
 
 			unsigned char * slot = cur_mr->provider_va + (chunk_idx * cvmrdma_ring_slot_bytes(ctxt->aead));
 
-			notify_nonce(ctxt->remote_addr, ctxt->network_evloop, qp->remote_qnc, chunk_info->nonce[0]);
+			remote_notify_nonce(ctxt->remote_addr, ctxt->network_evloop, qp->remote_qnc, chunk_info->nonce);
 
 			/***** NOTIFY ******/
 			TIMING("chunk_notify");
