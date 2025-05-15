@@ -148,9 +148,6 @@ struct cvmrdma_qp {
 
 	/* Capability of the remote QP to notify on WRITEs */
 	QPNotificationClient *remote_qnc;
-	/* Transmission key Generate the tx key, and receive the rx key */
-	uint64_t tx_key[cvmrdma_aead_KEY_WORDS];
-	uint64_t tx_nonce[cvmrdma_aead_NPUB_WORDS];
 
 	/* This thread consumes entries in the wr_queue.
 	 * Note that the order of WRs is preserved.	
@@ -196,7 +193,6 @@ struct cvmrdma_qp {
 	//pthread_t control_server_receive_acks_thread;
 
 	/* Remote params */
-	uint64_t rx_key[cvmrdma_aead_KEY_WORDS];
 	uint64_t rx_nonce[cvmrdma_aead_NPUB_WORDS];
 	uint32_t remote_ring_rkey;
 	uint32_t remote_control_rkey;

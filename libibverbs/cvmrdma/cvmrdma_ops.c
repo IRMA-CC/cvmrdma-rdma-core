@@ -189,7 +189,6 @@ static int attach_qp_to_cq_manager(struct cvmrdma_context * ctxt, struct cvmrdma
 		&qp->send_lines_full,
 		&qp->send_lines_full_lock,
 		&qp->send_lines_avail,
-		qp->rx_key,
 		&qp->remote_ring_rkey,
 		&qp->remote_control_rkey,
 		&qp->dest_control_qp_num,
@@ -513,7 +512,6 @@ static struct ibv_qp *cvmrdma_create_qp(struct ibv_pd * ibpd,
 	   in modify_qp. We'll also get the rkey to its ring */
 	qp->remote_qnc = NULL;
 	qp->remote_ring_rkey = 0;
-	memset(qp->rx_key, 0, sizeof(qp->rx_key));
 	memset(qp->rx_nonce, 0, cvmrdma_aead_NPUBBYTES);
 	qp->remote_params_set = false;
 	pthread_mutex_init(&qp->remote_params_lock, NULL);
@@ -531,10 +529,6 @@ static struct ibv_qp *cvmrdma_create_qp(struct ibv_pd * ibpd,
 		fprintf(stderr, "Error creating cvmrdma_cq_wait_completion_event thread: %d\n", err);
 		exit(1);
 	}
-
-	/* Generate a random tx key */
-	randombytes_buf(qp->tx_key, cvmrdma_aead_KEYBYTES);
-	memset(qp->tx_nonce, 0, cvmrdma_aead_NPUBBYTES);
 
 	return &qp->user_qp.qp;
 
@@ -672,13 +666,13 @@ static int cvmrdma_modify_qp(struct ibv_qp *ibqp, struct ibv_qp_attr *attr,
 					qp->remote_qnc = get_qp_notification_client(
 						ctxt->local_addr, ctxt->network_evloop, ctxt->local_network_client_cap, dest_qpn 
 					);
-					set_remote_params(ctxt->local_addr,  ctxt->network_evloop, qp->remote_qnc, qp->tx_key, 
+					set_remote_params(ctxt->local_addr,  ctxt->network_evloop, qp->remote_qnc,
 									  qp->ringbuf_mr->rkey, qp->control_buf_mr->rkey, control_qp->qp_num, qp->control_local_psn);
 				} else {
 					qp->remote_qnc = get_qp_notification_client(
 						ctxt->remote_addr, ctxt->network_evloop, ctxt->remote_network_client_cap, dest_qpn 
 					);
-					set_remote_params(ctxt->remote_addr, ctxt->network_evloop, qp->remote_qnc, qp->tx_key, 
+					set_remote_params(ctxt->remote_addr, ctxt->network_evloop, qp->remote_qnc,
 									  qp->ringbuf_mr->rkey, qp->control_buf_mr->rkey, control_qp->qp_num, qp->control_local_psn);
 				}
 
@@ -850,7 +844,6 @@ static int post_send_do_bounce(struct cvmrdma_qp * qp, struct ibv_send_wr *wrs, 
 		   - post send
 		
 		*/
-		uint64_t const * tx_key = qp->tx_key;
 		uint64_t const * shared_key = qp->shared_key;
 
 		struct ibv_sge * sgl = this_wr->sg_list;
@@ -1027,7 +1020,7 @@ static int post_send_do_bounce(struct cvmrdma_qp * qp, struct ibv_send_wr *wrs, 
 					NULL, 0,
 					0,
 					(unsigned char *)nonce_metadata,
-					(unsigned char const *)tx_key,
+					(unsigned char const *)shared_key,
 					aead
 				);
 				if(err)

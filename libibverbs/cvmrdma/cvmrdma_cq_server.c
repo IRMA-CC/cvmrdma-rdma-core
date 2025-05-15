@@ -165,8 +165,6 @@ static int cq_server_loop_once(struct cvmrdma_context * ctxt, struct ibv_cq * pr
             pthread_mutex_unlock(&qp->remote_params_lock);
             DEBUG("remote params set for QPN %x\n", qpn);
             assert(qp->remote_params_set);
-            assert(qp->rx_key[0] || qp->rx_key[1] || qp->rx_key[2]);
-            uint64_t const * rx_key = qp->rx_key;
             uint64_t const * shared_key = qp->shared_key;
 
             unsigned char * ringbuf_in = (unsigned char *)qp->ringbuf_va;
@@ -217,13 +215,13 @@ static int cq_server_loop_once(struct cvmrdma_context * ctxt, struct ibv_cq * pr
                 notif_start, notif_clen,
                 NULL, 0,
                 (unsigned char const *)nonce_metadata,
-                (unsigned char const *)rx_key,
+                (unsigned char const *)shared_key,
                 aead
             );
             if(err)
             {
                 fprintf(stderr, "WARN: Failed to decrypt bounce buffer for notif with key %lx %lx and nonce %lx %lx notif_start[0] %x %x %x %x notif_start %p notif_clen %llu\n", 
-                    rx_key[0], rx_key[1], nonce_metadata[0], nonce_metadata[1], notif_start[0], notif_start[1], notif_start[2], notif_start[3], notif_start, notif_clen);
+                    shared_key[0], shared_key[1], nonce_metadata[0], nonce_metadata[1], notif_start[0], notif_start[1], notif_start[2], notif_start[3], notif_start, notif_clen);
                 exit(1);
             }
 

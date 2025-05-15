@@ -29,7 +29,6 @@ public:
         int * send_lines_full_ptr,
         pthread_mutex_t * send_lines_lock_ptr,
         pthread_cond_t * send_lines_avail_ptr,
-        uint64_t * rx_key_ptr,
         uint32_t * remote_ring_rkey_ptr,
         uint32_t * remote_control_rkey_ptr,
         uint32_t * control_qpn_ptr,
@@ -52,13 +51,12 @@ public:
         return m_qpn;
     }
 
-    void set_qp_remote_params(uint64_t const * rx_key, uint32_t ring_rkey, uint32_t control_rkey, uint32_t control_qpn, uint32_t control_remote_psn)
+    void set_qp_remote_params(uint32_t ring_rkey, uint32_t control_rkey, uint32_t control_qpn, uint32_t control_remote_psn)
     {
-        DEBUG("[NS] setting rx_key and ring rkey %" PRIx32 " and control rkey %" PRIx32 " on QNC for local QPN 0x%" PRIx32 ", control QPN 0x%" PRIx32 ", control local PSN 0x%" PRIx32 ", control remote PSN 0x%" PRIx32 "\n",
+        DEBUG("[NS] setting ring rkey %" PRIx32 " and control rkey %" PRIx32 " on QNC for local QPN 0x%" PRIx32 ", control QPN 0x%" PRIx32 ", control local PSN 0x%" PRIx32 ", control remote PSN 0x%" PRIx32 "\n",
             ring_rkey, control_rkey, m_qpn, control_qpn, control_remote_psn);
 
         pthread_mutex_lock(m_remote_params_lock_ptr);
-        memcpy(m_rx_key_ptr, rx_key, cvmrdma_aead_KEYBYTES);
         *m_remote_ring_rkey_ptr = ring_rkey;
         *m_remote_control_rkey_ptr = control_rkey;
         *m_control_qpn_ptr = control_qpn;
@@ -88,7 +86,6 @@ public:
 private:
     uint32_t m_qpn = 0;
 
-    uint64_t * m_rx_key_ptr = nullptr;
     uint32_t * m_remote_ring_rkey_ptr = nullptr; 
     uint32_t * m_remote_control_rkey_ptr = nullptr; 
     uint32_t * m_control_qpn_ptr = nullptr;
@@ -118,7 +115,6 @@ public:
         int * send_lines_full_ptr,
         pthread_mutex_t * send_lines_lock_ptr,
         pthread_cond_t * send_lines_avail_ptr,
-        uint64_t * rx_key_ptr,
         uint32_t * remote_ring_rkey_ptr,
         uint32_t * remote_control_rkey_ptr,
         uint32_t * control_qpn_ptr,
@@ -148,7 +144,6 @@ void cvmrdma_server_register_qp(CVMRDMAServer * cs,
     int * send_lines_full_ptr,
     pthread_mutex_t * send_lines_lock_ptr,
     pthread_cond_t * send_lines_avail_ptr,
-    uint64_t * rx_key_ptr,
     uint32_t * remote_ring_rkey_ptr,
     uint32_t * remote_control_rkey_ptr,
     uint32_t * control_qpn_ptr,

@@ -19,8 +19,7 @@ interface CVMRDMA {
             localRingRkey :UInt32,
             localControlRkey :UInt32,
             controlQPN :UInt32,
-            controlLocalPSN :UInt32,
-            txKey0 :UInt64, txKey1 :UInt64, txKey2 :UInt64, txKey3 :UInt64
+            controlLocalPSN :UInt32
         ) -> ();
     }
 
