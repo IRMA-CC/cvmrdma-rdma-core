@@ -8,6 +8,7 @@
 
 #include "bounce_metadata.h"
 #include "recv_metadata.h"
+#include "nonce_queue.h"
 
 #ifdef __cplusplus
 #include "cvmrdma.capnp.h"
@@ -38,7 +39,7 @@ public:
         pthread_cond_t * remote_params_set_cv_ptr,
         pthread_mutex_t * receive_nonce_lock,
         pthread_cond_t * receive_nonce_cv_ptr,
-        uint64_t * nonce_ptr,
+        NonceQueue ** nonce_queue,
         bool * nonce_set_ptr
     );
     
@@ -70,12 +71,7 @@ public:
     void notify_nonce(uint64_t * nonce)
     {
         pthread_mutex_lock(m_receive_nonce_lock);
-        if (*m_nonce_set_ptr)
-        {
-            fprintf(stderr, "Nonce already set, not setting again\n");
-            exit(1);
-        }
-        memcpy(m_nonce_ptr, nonce, cvmrdma_aead_NPUBBYTES);
+        qp_nonce_queue_push(*m_nonce_queue, nonce[0], nonce[1], nonce[2]);
         *m_nonce_set_ptr = true;
         pthread_mutex_unlock(m_receive_nonce_lock);
         DEBUG("[NS] Sending nonce signal %" PRIx64 " 0x%" PRIx64 " 0x%" PRIx64 "\n",
@@ -95,7 +91,7 @@ private:
 	pthread_cond_t * m_remote_params_set_cv_ptr = nullptr;
     pthread_mutex_t * m_receive_nonce_lock = nullptr;
     pthread_cond_t * m_receive_nonce_cv_ptr = nullptr;
-    uint64_t * m_nonce_ptr = nullptr;
+    NonceQueue ** m_nonce_queue = nullptr;
     bool * m_nonce_set_ptr = nullptr;
 
     /* Counter in the original qp tracking the number of lines full in the remote recv ring / the locl send ring */
@@ -124,7 +120,7 @@ public:
         pthread_cond_t * remote_params_set_cv_ptr,
         pthread_mutex_t * receive_nonce_lock,
         pthread_cond_t * receive_nonce_cv_ptr,
-        uint64_t * nonce_ptr,
+        NonceQueue ** nonce_queue,
         bool * nonce_set_ptr
     );
     void qp_notification_channel_destroy(QpNotificationChannel * pnc);
@@ -153,7 +149,7 @@ void cvmrdma_server_register_qp(CVMRDMAServer * cs,
     pthread_cond_t * remote_params_set_cv_ptr,
     pthread_mutex_t * receive_nonce_lock,
     pthread_cond_t * receive_nonce_cv_ptr,
-    uint64_t * nonce_ptr,
+    NonceQueue ** nonce_queue,
     bool * nonce_set_ptr
 );
 

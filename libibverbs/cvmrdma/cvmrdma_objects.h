@@ -15,6 +15,7 @@
 #include "qp_metadata_manager.h"
 #include "wc_queue.h"
 #include "wr_queue.h"
+#include "nonce_queue.h"
 
 
 struct cvmrdma_pd {
@@ -232,7 +233,7 @@ struct cvmrdma_qp {
 
 	pthread_mutex_t receive_nonce_lock;
 	pthread_cond_t receive_nonce_cv;
-	uint64_t nonce[cvmrdma_aead_NPUB_WORDS];
+	NonceQueue *nonce_queue;
 	bool nonce_set;
 };
 

@@ -13,6 +13,7 @@
 #include <sodium.h>
 
 #include "recv_metadata.h"
+#include "nonce_queue.h"
 #include "debug.h"
 
 static capnp::CapabilityServerSet<CVMRDMA::QpNotificationChannel> qnc_capset;
@@ -31,7 +32,7 @@ QpNotificationChannel::QpNotificationChannel(
     pthread_cond_t * remote_params_set_cv_ptr,
     pthread_mutex_t * receive_nonce_lock,
     pthread_cond_t * receive_nonce_cv_ptr,
-    uint64_t * nonce_ptr,
+    NonceQueue ** nonce_queue,
     bool * nonce_set_ptr
 )
 : m_qpn{qpn},
@@ -47,7 +48,7 @@ m_remote_params_lock_ptr{remote_params_lock_ptr},
 m_remote_params_set_cv_ptr{remote_params_set_cv_ptr},
 m_receive_nonce_lock{receive_nonce_lock},
 m_receive_nonce_cv_ptr{receive_nonce_cv_ptr},
-m_nonce_ptr{nonce_ptr},
+m_nonce_queue{nonce_queue},
 m_nonce_set_ptr{nonce_set_ptr}
 { }
 
@@ -138,12 +139,12 @@ void CVMRDMAServer::qp_notification_channel_create(
     pthread_cond_t * remote_params_set_cv_ptr,
     pthread_mutex_t * receive_nonce_lock,
     pthread_cond_t * receive_nonce_cv_ptr,
-    uint64_t * nonce_ptr,
+    NonceQueue ** nonce_queue,
     bool * nonce_set_ptr
 )
 {
     auto qnc_server = kj::heap<QpNotificationChannel>(local_qpn, send_lines_full_ptr, send_lines_lock_ptr, send_lines_avail_ptr,
-        remote_ring_rkey_ptr, remote_control_rkey_ptr, control_qpn_ptr, control_remote_psn_ptr, remote_params_set_ptr, remote_params_lock_ptr, remote_params_set_cv_ptr, receive_nonce_lock, receive_nonce_cv_ptr, nonce_ptr, nonce_set_ptr);
+        remote_ring_rkey_ptr, remote_control_rkey_ptr, control_qpn_ptr, control_remote_psn_ptr, remote_params_set_ptr, remote_params_lock_ptr, remote_params_set_cv_ptr, receive_nonce_lock, receive_nonce_cv_ptr, nonce_queue, nonce_set_ptr);
     DEBUG("[NS] Register fresh notification channel for qpn 0x%" PRIx32 "\n", local_qpn);
 
     auto qnc_client = qnc_capset.add(std::move(qnc_server));
@@ -181,11 +182,11 @@ void cvmrdma_server_register_qp(CVMRDMAServer * cs,
     pthread_cond_t * remote_params_set_cv_ptr,
     pthread_mutex_t * receive_nonce_lock,
     pthread_cond_t * receive_nonce_cv_ptr,
-    uint64_t * nonce_ptr,
+    NonceQueue ** nonce_queue,
     bool * nonce_set_ptr
 )
 {
     assert(cs != nullptr);
     cs->qp_notification_channel_create(local_qpn, send_lines_full_ptr, send_lines_lock_ptr, send_lines_avail_ptr,
-        remote_ring_rkey_ptr, remote_control_rkey_ptr, control_qpn_ptr, control_remote_psn_ptr, remote_params_set_ptr, remote_params_lock_ptr, remote_params_set_cv_ptr, receive_nonce_lock, receive_nonce_cv_ptr, nonce_ptr, nonce_set_ptr);
+        remote_ring_rkey_ptr, remote_control_rkey_ptr, control_qpn_ptr, control_remote_psn_ptr, remote_params_set_ptr, remote_params_lock_ptr, remote_params_set_cv_ptr, receive_nonce_lock, receive_nonce_cv_ptr, nonce_queue, nonce_set_ptr);
 }

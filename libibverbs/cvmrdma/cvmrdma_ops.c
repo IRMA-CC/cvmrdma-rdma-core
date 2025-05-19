@@ -37,6 +37,7 @@
 #include "wr_queue.h"
 #include "dma_heap.h"
 #include "cvmrdma_cache.h"
+#include "nonce_queue.h"
 
 #include "debug.h"
 
@@ -198,7 +199,7 @@ static int attach_qp_to_cq_manager(struct cvmrdma_context * ctxt, struct cvmrdma
 		&qp->remote_params_set_cv,
 		&qp->receive_nonce_lock,
 		&qp->receive_nonce_cv,
-		qp->nonce,
+		&qp->nonce_queue,
 		&qp->nonce_set
 	);
 
@@ -519,9 +520,8 @@ static struct ibv_qp *cvmrdma_create_qp(struct ibv_pd * ibpd,
 
 	pthread_mutex_init(&qp->receive_nonce_lock, NULL);
 	pthread_cond_init(&qp->receive_nonce_cv, NULL);
-	memset(qp->nonce, 0, cvmrdma_aead_NPUBBYTES);
 	qp->nonce_set = false;
-
+	qp->nonce_queue = alloc_qp_nonce_queue();
 
 	err = pthread_create(&qp->send_server_thread, NULL, &cvmrdma_do_bounce_loop, (void *)qp);
 	if (err)

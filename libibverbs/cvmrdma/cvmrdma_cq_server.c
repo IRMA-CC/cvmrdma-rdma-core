@@ -202,9 +202,13 @@ static int cq_server_loop_once(struct cvmrdma_context * ctxt, struct ibv_cq * pr
             while (!qp->nonce_set) {
                 pthread_cond_wait(&qp->receive_nonce_cv, &qp->receive_nonce_lock);
             }
-            memcpy(&nonce_metadata, qp->nonce, cvmrdma_aead_NPUBBYTES);
-            memset(qp->nonce, 0, cvmrdma_aead_NPUBBYTES);
-            qp->nonce_set = false;
+            struct nonce_t * nonce = qp_nonce_queue_front(qp->nonce_queue);
+            memcpy(&nonce_metadata, nonce, cvmrdma_aead_NPUBBYTES);
+            qp_nonce_queue_pop(qp->nonce_queue);
+            DEBUG("[CQ] Consuming nonce %lx %lx %lx\n", nonce_metadata[0], nonce_metadata[1], nonce_metadata[2]);
+            if (qp_nonce_queue_size(qp->nonce_queue) <= 0) {
+                qp->nonce_set = false;
+            }
             pthread_mutex_unlock(&qp->receive_nonce_lock);
             DEBUG("[CQ] got nonce %lx %lx %lx\n", nonce_metadata[0], nonce_metadata[1], nonce_metadata[2]);
 
