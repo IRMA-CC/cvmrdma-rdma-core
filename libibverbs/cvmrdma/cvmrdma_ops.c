@@ -879,6 +879,14 @@ static int post_send_do_bounce(struct cvmrdma_qp * qp, struct ibv_send_wr *wrs, 
 
 		while(cur_sge_idx < nsge)
 		{
+			// generate new metadata nonce for each metadata 
+			uint64_t nonce_metadata[cvmrdma_aead_NPUB_WORDS];
+			randombytes_buf(nonce_metadata, cvmrdma_aead_NPUBBYTES);
+
+			// send the nonce metadata to the remote
+			remote_notify_nonce(ctxt->remote_addr, ctxt->network_evloop, qp->remote_qnc, nonce_metadata);
+
+
 			struct ibv_sge * cur_sge = &sgl[cur_sge_idx];
 
 			struct cvmrdma_mr * cur_mr = get_bounce_metadata_for_lkey(pd->bounce_metadata, cur_sge->lkey);
@@ -972,13 +980,6 @@ static int post_send_do_bounce(struct cvmrdma_qp * qp, struct ibv_send_wr *wrs, 
 			}
 
 			unsigned char * slot = cur_mr->provider_va + (chunk_idx * cvmrdma_ring_slot_bytes(ctxt->aead));
-
-			// generate new metadata nonce for each metadata 
-			uint64_t nonce_metadata[cvmrdma_aead_NPUB_WORDS];
-			randombytes_buf(nonce_metadata, cvmrdma_aead_NPUBBYTES);
-
-			// send the nonce metadata to the remote
-			remote_notify_nonce(ctxt->remote_addr, ctxt->network_evloop, qp->remote_qnc, nonce_metadata);
 
 			/***** NOTIFY ******/
 			TIMING("chunk_notify");
@@ -1547,7 +1548,7 @@ CapnpEvloopThread * evloop_server = NULL;
 CVMRDMAServer * tcp_server = NULL;
 
 bool cvmrdma_disable_cache = false;
-uint64_t cvmrdma_chunk_bytes = 32 * 4096;
+uint64_t cvmrdma_chunk_bytes = 2048 * 4096;
 static struct verbs_context *cvmrdma_alloc_context(struct ibv_device *ibdev,
 						  int cmd_fd,
 						  void *private_data)
