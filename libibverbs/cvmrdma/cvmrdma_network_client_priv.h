@@ -14,7 +14,7 @@ kj::Promise<void> set_remote_params_rpc(QPNotificationClient * qnc, uint32_t loc
 
 kj::Promise<void> notify_nonce_rpc(QPNotificationClient * qnc, uint64_t * nonce);
 
-kj::Promise<void> remote_qp_notify_read_rpc(QPNotificationClient * qnc, uint64_t addr, uint64_t size);
+kj::Promise<void> remote_qp_notify_read_rpc(QPNotificationClient * qnc, uint64_t addr, uint32_t size);
 
 QPNotificationClient register_qp_with_remote_qp_rpc(CVMRDMAClient * client, uint32_t remote_qpn);
 

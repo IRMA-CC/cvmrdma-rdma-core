@@ -231,6 +231,8 @@ static int cq_server_loop_once(struct cvmrdma_context * ctxt, struct ibv_cq * pr
 
             enum ibv_wr_opcode wr_op = notif.op;
             bool is_write = (wr_op == IBV_WR_RDMA_WRITE) || (wr_op == IBV_WR_RDMA_WRITE_WITH_IMM);
+            bool is_send = (wr_op == IBV_WR_SEND) || (wr_op == IBV_WR_RDMA_WRITE_WITH_IMM);
+            bool is_read = (wr_op == IBV_WR_RDMA_READ_INTERNAL);
 
             // Decrypt directly to destination !
             bool bypass_scatter = false;
@@ -255,12 +257,18 @@ static int cq_server_loop_once(struct cvmrdma_context * ctxt, struct ibv_cq * pr
                     bypass_scatter = true;
                 }
             }
-            else
+            else if (is_send || is_read)
             {
                 /* The operation is a SEND: we can only bypass the scatter if the next chunk fits
                     in the current sge */
 
-                struct recv_metadata_entry * recv_info = qp_recv_metadata_front(qp->recv_metadata);
+                struct recv_metadata_entry * recv_info = NULL;
+                if (is_send) {
+                    recv_info = qp_recv_metadata_front(qp->recv_metadata);
+                } else if (is_read) {
+                    recv_info = qp_read_metadata_front(qp->read_metadata);
+                }
+                
                 struct ibv_sge * rcv_sgl = recv_info->sgl;
                 struct ibv_sge * cur_sge = &rcv_sgl[qp->cur_sge_idx];
 
@@ -277,6 +285,9 @@ static int cq_server_loop_once(struct cvmrdma_context * ctxt, struct ibv_cq * pr
                     decrypted = mr_addr + offt;
                     bypass_scatter = true;
                 }
+            } else {
+                fprintf(stderr, "PROTOCOL ERROR: unexpected op %d in CQ server\n", wr_op);
+                exit(1);
             }
 
             unsigned long long payload_clen = notif.payload_len + cvmrdma_ABYTES(aead);
@@ -364,9 +375,15 @@ static int cq_server_loop_once(struct cvmrdma_context * ctxt, struct ibv_cq * pr
                     DEBUG("[CQ] WRITE: writing with notif.chunk_offt 0x%"PRIx64" and notif.chunk_len %zu to dest %p for notif.hca_addr %p\n", 
                           notif.chunk_offt, notif.chunk_len, dest, (void *)notif.hca_addr);
                     memcpy(dest, decrypted + notif.chunk_offt, notif.chunk_len);
-                } else {
+                } else if (is_send || is_read) {
                     /* The operation is a SEND: use the next chunk on the current recv request */
-                    struct recv_metadata_entry * recv_info = qp_recv_metadata_front(qp->recv_metadata);
+
+                    struct recv_metadata_entry * recv_info = NULL;
+                    if (is_send) {
+                        recv_info = qp_recv_metadata_front(qp->recv_metadata);
+                    } else if (is_read) {
+                        recv_info = qp_read_metadata_front(qp->read_metadata);
+                    }
                     struct ibv_sge * rcv_sgl = recv_info->sgl;
                     int rcv_nsge = recv_info->nsge;
                     
@@ -416,6 +433,10 @@ static int cq_server_loop_once(struct cvmrdma_context * ctxt, struct ibv_cq * pr
             }
             else
             {
+                // write should never enter this section
+                assert(is_write == false);
+
+
                 struct uffdio_writeprotect uffdio_wp = {
                     .range = {
                         .start = (unsigned long) decrypted,
@@ -433,7 +454,14 @@ static int cq_server_loop_once(struct cvmrdma_context * ctxt, struct ibv_cq * pr
 
 
                 /* Record in the QP the number of bytes written during the decrypt (directly to dest) */
-                struct recv_metadata_entry * recv_info = qp_recv_metadata_front(qp->recv_metadata);
+                struct recv_metadata_entry * recv_info = NULL;
+                if (is_send) {
+                    recv_info = qp_recv_metadata_front(qp->recv_metadata);
+                } else if (is_read) {
+                    recv_info = qp_read_metadata_front(qp->read_metadata);
+                }
+
+
                 struct ibv_sge * rcv_sgl = recv_info->sgl;
                 struct ibv_sge * cur_sge = &rcv_sgl[qp->cur_sge_idx];
 
@@ -460,8 +488,47 @@ static int cq_server_loop_once(struct cvmrdma_context * ctxt, struct ibv_cq * pr
                     /* Do not consume an RR, do not emit a WC. But restore the byte counter */
                     qp->wr_bytes_rcved = 0;
                 }
+                else if (wr_op == IBV_WR_RDMA_READ_INTERNAL)
+                {
+                    // get and pop the read entry, because we handeled it
+                    // this entry was needed so the client nows where to place the data when it arrives
+                    // from the server
+                    struct recv_metadata_entry * recv_info = qp_read_metadata_front(qp->read_metadata);
+                    uint64_t recv_wrid = recv_info->wrid;
+                    qp_read_metadata_pop(qp->read_metadata);
+                    qp->cur_sge_idx = 0;
+                    qp->cur_offt_in_sge = 0;
+
+                    // pop the send entry, because we need to notify the client
+                    // that the read was successful and the data is now available
+                    struct send_metadata_entry * send_info = qp_send_metadata_front(qp->send_metadata);
+                    qp_send_metadata_pop(qp->send_metadata);
+
+                    assert(recv_info->wrid = send_info->wrid);
+                    assert(qp->wr_bytes_rcved == send_info->bytes);
+
+                    struct ibv_wc send_wc = {
+                        .byte_len = qp->wr_bytes_rcved,
+                        .wc_flags = 0,
+                        .opcode = IBV_WC_RDMA_READ,
+                        .qp_num = qpn,
+                        .status = IBV_WC_SUCCESS,
+                        .wr_id = recv_wrid
+                    };
+
+                    if(send_info->send_signaled || qp->user_sq_sig_all) {
+                        struct cvmrdma_cq * scq = (struct cvmrdma_cq *)qp->user_qp.qp.send_cq;
+                        wcq_push(scq->wc_queue, &send_wc);
+                    }
+
+                    // Do not write into the fd file as below, because this is a notification
+                    // on the scq not on the rcq (we do not notify that a recv happend, because this is a read)
+
+                    qp->wr_bytes_rcved = 0;
+                } 
                 else
                 {
+                
                     /* SEND(_WITH_IMM) and WRITE_WITH_IMM consume an RR: recover its wrid and move to the next one */
                     struct cvmrdma_cq * rcq = (struct cvmrdma_cq *)qp->user_qp.qp.recv_cq;
 

@@ -317,7 +317,7 @@ void remote_notify_nonce(const char* remote_addr, CapnpEvloopThread *cev, QPNoti
     );
 }
 
-void remote_qp_notify_read(const char * remote_addr, CapnpEvloopThread *cev, QPNotificationClient *qnc, uint64_t addr, uint64_t size){
+void remote_qp_notify_read(const char * remote_addr, CapnpEvloopThread *cev, QPNotificationClient *qnc, uint64_t addr, uint32_t size){
     DEBUG("remote_qp_notify_read\n");
 
     /* Add to taskset on evloop thread */

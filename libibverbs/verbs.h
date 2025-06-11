@@ -1116,6 +1116,7 @@ enum ibv_wr_opcode {
 	IBV_WR_DRIVER1,
 	IBV_WR_FLUSH = 14,
 	IBV_WR_ATOMIC_WRITE = 15,
+	IBV_WR_RDMA_READ_INTERNAL,
 };
 
 const char *ibv_wr_opcode_str(enum ibv_wr_opcode opcode);

@@ -33,6 +33,7 @@
 #include "cvmrdma_network_evloop_priv.h"
 #include "cvmrdma_control_server.h"
 #include "recv_metadata.h"
+#include "read_metadata.h"
 #include "wc_queue.h"
 #include "wr_queue.h"
 #include "dma_heap.h"
@@ -200,7 +201,8 @@ static int attach_qp_to_cq_manager(struct cvmrdma_context * ctxt, struct cvmrdma
 		&qp->receive_nonce_lock,
 		&qp->receive_nonce_cv,
 		&qp->nonce_queue,
-		&qp->nonce_set
+		&qp->nonce_set,
+		&qp->wr_queue
 	);
 
 	return 0;
@@ -415,13 +417,21 @@ static struct ibv_qp *cvmrdma_create_qp(struct ibv_pd * ibpd,
 	qp->send_metadata = send_metadata;
 	qp->wr_chunks_sent = 0;
 
+	QpReadMetadata * read_metadata = alloc_qp_read_metadata();
+	if(! read_metadata)
+	{
+		fprintf(stderr, "Failed to allocated read metadata storage.\n");
+		goto free_send_metadata;
+	}
+	qp->read_metadata = read_metadata;
+
 
 	/* Allocate the bounce regions and ring buffer for this QP */
 	void * bounce_private_mem = mmap(0, cvmrdma_priv_bounce_total_bytes(ctxt->aead), PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
 	if (bounce_private_mem == MAP_FAILED) {
 		err = errno;
 		fprintf(stderr, "Failed to mmap bounce buffer %d\n", err);
-		goto free_send_metadata;
+		goto free_read_metadata;
 	}
 	qp->bounce_private_mem = bounce_private_mem;
 
@@ -537,6 +547,8 @@ dereg_ring_mr:
 	close(dmabuf_fd);
 free_bounce_private:
 	munmap(bounce_private_mem, cvmrdma_priv_bounce_total_bytes(ctxt->aead));
+free_read_metadata:
+	free_qp_read_metadata(read_metadata);
 free_send_metadata:
 	free_qp_send_metadata(send_metadata);
 free_recv_metadata:
@@ -823,11 +835,14 @@ static int post_send_do_bounce(struct cvmrdma_qp * qp, struct ibv_send_wr *wrs, 
 
 		bool is_send = (this_op == IBV_WR_SEND) || (this_op == IBV_WR_SEND_WITH_IMM);
 		bool is_write = (this_op == IBV_WR_RDMA_WRITE) || (this_op == IBV_WR_RDMA_WRITE_WITH_IMM);
-		bool is_read = (this_op == IBV_WR_RDMA_READ);
+		// this is the read send by the user. This read needs to be send over the remote qp, so the server can perform a write to the client
+		bool is_read = (this_op == IBV_WR_RDMA_READ); 
+		// this is an interal read performed by the server, to write data from the server to the client, emulating a read.
+		bool is_read_internal = (this_op == IBV_WR_RDMA_READ_INTERNAL);
 
-		if(! (is_send || is_write || is_read))
+		if(! (is_send || is_write || is_read || is_read_internal))
 		{
-			fprintf(stderr, "ERROR: unsupported infiniband operation\n");
+			fprintf(stderr, "ERROR: unsupported infiniband operation %d\n", this_op);
 			exit(1);
 		}
 
@@ -879,6 +894,7 @@ static int post_send_do_bounce(struct cvmrdma_qp * qp, struct ibv_send_wr *wrs, 
 		qp_send_metadata_push(qp->send_metadata, this_wr->wr_id, this_op, total_bytes, total_chunks, write_for_read, send_signaled);
 
 		if (is_read){
+			qp_read_metadata_push(qp->read_metadata, this_wr->wr_id, sgl, nsge);
 			remote_qp_notify_read(ctxt->remote_addr, ctxt->network_evloop, qp->remote_qnc, remote_addr, total_bytes);
 			continue;
 		}
@@ -1006,7 +1022,7 @@ static int post_send_do_bounce(struct cvmrdma_qp * qp, struct ibv_send_wr *wrs, 
 					notif.last_chunk = last_chunk;
 					notif.payload_len = send_len;
 				}
-				else
+				else // if send or read-internal
 				{
 					/* All these chunks will be written to the same RR, until last_chunk is reached */
 					notif.hca_addr = 0;
@@ -1183,6 +1199,11 @@ static int cvmrdma_post_send(struct ibv_qp *ibqp, struct ibv_send_wr *wr,
 	// Just push the WRs here and handle them asynchronously in cvmrdma_do_bounce_loop.
 	for(struct ibv_send_wr * this_wr = wr ; this_wr != NULL ; this_wr = this_wr->next)
 	{
+		if (this_wr->opcode == IBV_WR_RDMA_READ_INTERNAL) {
+			fprintf(stderr, "ERROR: RDMA_READ_INTERNAL not allowed to be used externally\n");
+			return EINVAL;
+		}
+
 		wrq_push(qp->wr_queue, this_wr);
 	}
 

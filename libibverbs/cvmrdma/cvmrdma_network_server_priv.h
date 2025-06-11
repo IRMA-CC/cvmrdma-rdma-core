@@ -15,6 +15,7 @@
 
 #include "ThreadsafeMap.hpp"
 #include "crypto.h"
+#include "wr_queue.h"
 
 #include "debug.h"
 
@@ -40,12 +41,14 @@ public:
         pthread_mutex_t * receive_nonce_lock,
         pthread_cond_t * receive_nonce_cv_ptr,
         NonceQueue ** nonce_queue,
-        bool * nonce_set_ptr
+        bool * nonce_set_ptr,
+        WRQueue ** wr_queue_ptr
     );
     
     kj::Promise<void> notifyChunkRecv(NotifyChunkRecvContext context) override;
     kj::Promise<void> setRemoteParams(SetRemoteParamsContext context) override;
     kj::Promise<void> notifyNonce(NotifyNonceContext context) override;
+    kj::Promise<void> notifyRead(NotifyReadContext context) override;
     
     uint32_t get_qpn()
     {
@@ -79,8 +82,28 @@ public:
         pthread_cond_signal(m_receive_nonce_cv_ptr);
     }
 
-    void noitfy_read(uint64_t addr, uint64_t size)
+    void notify_read(uint64_t addr, uint32_t size)
     {
+        // when a client requests a read, the server submits a read internal WR to its own QP
+        // the internal read WR acts like a write, sending the data to the client
+
+        // TODO, actually use correct lkey for the read, not 0
+
+        struct ibv_send_wr send_wrs[1] = {0};
+        struct ibv_sge send_sgl[1] = {{.addr = (uint64_t) addr, .length = size, .lkey = 0}};
+
+        // we don't send a SIGNALED flag, because this wr is internal and on the server side we don't
+        // expect a work completion for it
+        send_wrs[0].opcode = IBV_WR_RDMA_READ_INTERNAL;
+        send_wrs[0].num_sge = 1;
+        send_wrs[0].imm_data = 0;
+        // wr_id is not used in this case, but we set it to 0 for consistency        
+        send_wrs[0].wr_id = 0;
+        send_wrs[0].sg_list = send_sgl;
+        send_wrs[0].next = NULL;
+
+        wrq_push(*m_wr_queue_ptr, send_wrs);
+
         DEBUG("[NS] Notify read at addr 0x%" PRIx64 " size 0x%" PRIx64 "\n", addr, size);
         // This is a no-op in the server, the client will handle this.
     }
@@ -99,6 +122,8 @@ private:
     pthread_cond_t * m_receive_nonce_cv_ptr = nullptr;
     NonceQueue ** m_nonce_queue = nullptr;
     bool * m_nonce_set_ptr = nullptr;
+
+    WRQueue ** m_wr_queue_ptr = nullptr;
 
     /* Counter in the original qp tracking the number of lines full in the remote recv ring / the locl send ring */
     int * m_send_lines_full_ptr = nullptr;
@@ -127,7 +152,9 @@ public:
         pthread_mutex_t * receive_nonce_lock,
         pthread_cond_t * receive_nonce_cv_ptr,
         NonceQueue ** nonce_queue,
-        bool * nonce_set_ptr
+        bool * nonce_set_ptr,
+
+        WRQueue ** wr_queue_ptr
     );
     void qp_notification_channel_destroy(QpNotificationChannel * pnc);
 
@@ -156,7 +183,9 @@ void cvmrdma_server_register_qp(CVMRDMAServer * cs,
     pthread_mutex_t * receive_nonce_lock,
     pthread_cond_t * receive_nonce_cv_ptr,
     NonceQueue ** nonce_queue,
-    bool * nonce_set_ptr
+    bool * nonce_set_ptr,
+
+    WRQueue ** wr_queue_ptr
 );
 
 #ifdef __cplusplus

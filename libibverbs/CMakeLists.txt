@@ -32,6 +32,7 @@ publish_internal_headers(infiniband/cvmrdma
   cvmrdma/cvmrdma_ops.h
   cvmrdma/qp_metadata_manager.h
   cvmrdma/recv_metadata.h
+  cvmrdma/read_metadata.h
   cvmrdma/nonce_queue.h
   cvmrdma/send_metadata.h
   cvmrdma/taskset_wrapper.h
@@ -96,6 +97,7 @@ rdma_library(ibverbs "${CMAKE_CURRENT_BINARY_DIR}/libibverbs.map"
   cvmrdma/cvmrdma_ops.c
   cvmrdma/qp_metadata_manager.cpp
   cvmrdma/recv_metadata.cpp
+  cvmrdma/read_metadata.cpp
   cvmrdma/nonce_queue.cpp
   cvmrdma/send_metadata.cpp
   cvmrdma/taskset_wrapper.cpp

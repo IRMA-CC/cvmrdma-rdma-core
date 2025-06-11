@@ -6,7 +6,7 @@ interface CVMRDMA {
 
         notifyRead @3 (
             addr: UInt64,
-            size: UInt64
+            size: UInt32
         ) -> ();
 
         notifyNonce @2 (
