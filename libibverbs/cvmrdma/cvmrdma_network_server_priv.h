@@ -79,6 +79,12 @@ public:
         pthread_cond_signal(m_receive_nonce_cv_ptr);
     }
 
+    void noitfy_read(uint64_t addr, uint64_t size)
+    {
+        DEBUG("[NS] Notify read at addr 0x%" PRIx64 " size 0x%" PRIx64 "\n", addr, size);
+        // This is a no-op in the server, the client will handle this.
+    }
+
 private:
     uint32_t m_qpn = 0;
 

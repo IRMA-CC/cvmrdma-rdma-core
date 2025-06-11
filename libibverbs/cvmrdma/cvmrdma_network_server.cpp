@@ -105,6 +105,19 @@ kj::Promise<void> QpNotificationChannel::notifyNonce(NotifyNonceContext context)
     return kj::READY_NOW;
 }
 
+kj::Promise<void> QpNotificationChannel::notifyRead(NotifyReadContext context)
+{
+    auto p = context.getParams();
+    uint64_t addr = p.getAddr();
+    uint64_t size = p.getSize();
+
+    DEBUG("[NS] Notify read at addr 0x%" PRIx64 " size 0x%" PRIx64 "\n", addr, size);
+
+    this->noitfy_read(addr, size);
+
+    return kj::READY_NOW;
+}
+
 
 kj::Promise<void> CVMRDMAServer::registerQpWithRemoteQp(RegisterQpWithRemoteQpContext context)
 {

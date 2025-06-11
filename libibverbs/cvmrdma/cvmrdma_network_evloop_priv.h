@@ -34,6 +34,7 @@ void set_remote_params(const char* remote_addr, CapnpEvloopThread * evloop, QPNo
 
 void remote_qp_notify_chunk_recv(const char* remote_addr, CapnpEvloopThread *cev, QPNotificationClient *qnc);
 void remote_notify_nonce(const char* remote_addr, CapnpEvloopThread *cev, QPNotificationClient *qnc, uint64_t * nonce);
+void remote_qp_notify_read(const char * remote_addr, CapnpEvloopThread *cev, QPNotificationClient *qnc, uint64_t addr, uint64_t size);
 
 #ifdef __cplusplus
 }

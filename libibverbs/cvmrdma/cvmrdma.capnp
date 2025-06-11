@@ -4,6 +4,11 @@ interface CVMRDMA {
 
     interface QpNotificationChannel {
 
+        notifyRead @3 (
+            addr: UInt64,
+            size: UInt64
+        ) -> ();
+
         notifyNonce @2 (
             nonce0: UInt64,
             nonce1: UInt64,

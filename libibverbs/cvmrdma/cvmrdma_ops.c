@@ -823,8 +823,9 @@ static int post_send_do_bounce(struct cvmrdma_qp * qp, struct ibv_send_wr *wrs, 
 
 		bool is_send = (this_op == IBV_WR_SEND) || (this_op == IBV_WR_SEND_WITH_IMM);
 		bool is_write = (this_op == IBV_WR_RDMA_WRITE) || (this_op == IBV_WR_RDMA_WRITE_WITH_IMM);
+		bool is_read = (this_op == IBV_WR_RDMA_READ);
 
-		if(! (is_send || is_write))
+		if(! (is_send || is_write || is_read))
 		{
 			fprintf(stderr, "ERROR: unsupported infiniband operation\n");
 			exit(1);
@@ -876,6 +877,11 @@ static int post_send_do_bounce(struct cvmrdma_qp * qp, struct ibv_send_wr *wrs, 
 		   This means that each chunk has to send EXACTLY payload_bytes, even if the tag ends up
 		   being shorter (bc of the AEAD choice) */
 		qp_send_metadata_push(qp->send_metadata, this_wr->wr_id, this_op, total_bytes, total_chunks, write_for_read, send_signaled);
+
+		if (is_read){
+			remote_qp_notify_read(ctxt->remote_addr, ctxt->network_evloop, qp->remote_qnc, remote_addr, total_bytes);
+			continue;
+		}
 
 		while(cur_sge_idx < nsge)
 		{
