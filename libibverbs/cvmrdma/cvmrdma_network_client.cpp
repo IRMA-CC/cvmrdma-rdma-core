@@ -59,12 +59,13 @@ QPNotificationClient register_qp_with_remote_qp_rpc(CVMRDMAClient * client, uint
     return req.send().getQnc();
 }
 
-kj::Promise<void> remote_qp_notify_read_rpc(QPNotificationClient * qnc, uint64_t addr, uint32_t size)
+kj::Promise<void> remote_qp_notify_read_rpc(QPNotificationClient * qnc, uint64_t addr, uint32_t size, uint32_t rkey)
 {
     auto req = qnc->notifyReadRequest();
 
     req.setAddr(addr);
     req.setSize(size);
+    req.setLkey(rkey);
 
     DEBUG("[NC] Notify read: addr 0x%" PRIx64 ", size 0x%" PRIx64 "\n", addr, size);
 

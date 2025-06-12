@@ -895,7 +895,7 @@ static int post_send_do_bounce(struct cvmrdma_qp * qp, struct ibv_send_wr *wrs, 
 
 		if (is_read){
 			qp_read_metadata_push(qp->read_metadata, this_wr->wr_id, sgl, nsge);
-			remote_qp_notify_read(ctxt->remote_addr, ctxt->network_evloop, qp->remote_qnc, remote_addr, total_bytes);
+			remote_qp_notify_read(ctxt->remote_addr, ctxt->network_evloop, qp->remote_qnc, remote_addr, total_bytes, rkey);
 			continue;
 		}
 

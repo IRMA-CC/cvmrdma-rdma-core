@@ -82,7 +82,7 @@ public:
         pthread_cond_signal(m_receive_nonce_cv_ptr);
     }
 
-    void notify_read(uint64_t addr, uint32_t size)
+    void notify_read(uint64_t addr, uint32_t size, uint32_t lkey)
     {
         // when a client requests a read, the server submits a read internal WR to its own QP
         // the internal read WR acts like a write, sending the data to the client
@@ -90,7 +90,7 @@ public:
         // TODO, actually use correct lkey for the read, not 0
 
         struct ibv_send_wr send_wrs[1] = {0};
-        struct ibv_sge send_sgl[1] = {{.addr = (uint64_t) addr, .length = size, .lkey = 0}};
+        struct ibv_sge send_sgl[1] = {{.addr = (uint64_t) addr, .length = size, .lkey = lkey}};
 
         // we don't send a SIGNALED flag, because this wr is internal and on the server side we don't
         // expect a work completion for it

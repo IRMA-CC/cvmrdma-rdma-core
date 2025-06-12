@@ -113,10 +113,11 @@ kj::Promise<void> QpNotificationChannel::notifyRead(NotifyReadContext context)
     auto p = context.getParams();
     uint64_t addr = p.getAddr();
     uint32_t size = p.getSize();
+    uint32_t lkey = p.getLkey();
 
     DEBUG("[NS] Notify read at addr 0x%" PRIx64 " size 0x%" PRIx64 "\n", addr, size);
 
-    this->notify_read(addr, size);
+    this->notify_read(addr, size, lkey);
 
     return kj::READY_NOW;
 }
