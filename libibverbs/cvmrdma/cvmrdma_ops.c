@@ -619,6 +619,7 @@ static int cvmrdma_modify_qp(struct ibv_qp *ibqp, struct ibv_qp_attr *attr,
 		qp->dlid = attr->ah_attr.dlid;
 		srand48(time(NULL));
 		qp->control_local_psn = lrand48() & 0xffffff;
+		qp->is_loopback = is_local;
 
 		/* Start by connecting to the server if not already connected */
 		if(! ctxt->remote_network_client_connection && !is_local) {
@@ -884,7 +885,11 @@ static int post_send_do_bounce(struct cvmrdma_qp * qp, struct ibv_send_wr *wrs, 
 			randombytes_buf(nonce_metadata, cvmrdma_aead_NPUBBYTES);
 
 			// send the nonce metadata to the remote
-			remote_notify_nonce(ctxt->remote_addr, ctxt->network_evloop, qp->remote_qnc, nonce_metadata);
+			if (qp->is_loopback) {
+				remote_notify_nonce(ctxt->local_addr, ctxt->network_evloop, qp->remote_qnc, nonce_metadata);
+			} else {
+				remote_notify_nonce(ctxt->remote_addr, ctxt->network_evloop, qp->remote_qnc, nonce_metadata);
+			}
 
 
 			struct ibv_sge * cur_sge = &sgl[cur_sge_idx];

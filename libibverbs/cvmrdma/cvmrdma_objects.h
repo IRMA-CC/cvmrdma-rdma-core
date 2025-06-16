@@ -235,6 +235,8 @@ struct cvmrdma_qp {
 	pthread_cond_t receive_nonce_cv;
 	NonceQueue *nonce_queue;
 	bool nonce_set;
+
+	bool is_loopback;
 };
 
 struct cvmrdma_srq {
