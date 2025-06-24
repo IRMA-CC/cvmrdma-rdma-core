@@ -1,31 +1,31 @@
 #pragma once
 
-#include <stdint.h>
+#include <infiniband/verbs.h>
 
-struct nonce_t {
-    uint64_t nonce[3];
+struct nonce_entry
+{
+    uint64_t nonce[3]; // 3 x 64 bits
 };
 
-#ifdef __cplusplus
-#include <deque>
 
-struct NonceQueue {
-    std::deque<struct nonce_t> queue;
+#ifdef __cplusplus
+#include "ThreadsafeQueue.hpp"
+
+struct QpNonce {
+    ThreadsafeQueue<struct nonce_entry> queue;
 };
 
 extern "C" {
 #endif
 
-typedef struct NonceQueue NonceQueue;
+typedef struct QpNonce QpNonce;
 
-NonceQueue * alloc_qp_nonce_queue(void);
-void free_qp_nonce_queue(NonceQueue * nonce_queue);
+QpNonce * alloc_qp_nonce_queue(void);
+void free_qp_nonce_queue(QpNonce * nonce_queue);
 
-void qp_nonce_queue_push(NonceQueue * nonce_queue, uint64_t nonce0, uint64_t nonce1, uint64_t nonce2);
-struct nonce_t * qp_nonce_queue_front(NonceQueue * nonce_queue);
-void qp_nonce_queue_pop(NonceQueue * nonce_queue);
-
-int qp_nonce_queue_size(NonceQueue * nonce_queue);
+void qp_nonce_queue_push(QpNonce * nonce_queue, struct nonce_entry * entry);
+struct nonce_entry * qp_nonce_queue_front(QpNonce * nonce_queue);
+void qp_nonce_queue_pop(QpNonce * nonce_queue);
 
 #ifdef __cplusplus
 }

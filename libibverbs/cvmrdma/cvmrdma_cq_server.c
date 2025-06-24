@@ -22,6 +22,7 @@
 #include "cvmrdma.h"
 #include "cvmrdma_objects.h"
 #include "cvmrdma_network_evloop_priv.h"
+#include "chunk_queue.h"
 
 #define CQ_SERVER_NUM_WCS 16
 static int cq_server_loop_once(struct cvmrdma_context * ctxt, struct ibv_cq * prov_cq)
@@ -93,6 +94,13 @@ static int cq_server_loop_once(struct cvmrdma_context * ctxt, struct ibv_cq * pr
 
             DEBUG("[CQ] send op %d, wrid: 0x%lx done, chunks sent %zu send_info->nchunks %zu\n", op, this_wc->wr_id, qp->wr_chunks_sent, send_info->nchunks);
         
+            // when we get a work completiion for a send, we unlock the transit lock
+            // this indicates that the chunk is no longer in transit can be modified again.
+            struct chunk_entry * entry = qp_chunk_queue_front(qp->chunk_queue);
+            struct cvmrdma_mr * cur_mr = get_bounce_metadata_for_lkey(pd->bounce_metadata, entry->lkey);
+            struct chunk_tracking_info* chunk_info = &cur_mr->chunk_tracking[entry->chunk_idx];
+            pthread_mutex_unlock(&chunk_info->in_transit_lock);
+            
             if(send_info->nchunks == qp->wr_chunks_sent)
             {
                 uint64_t wrid = send_info->wrid;
@@ -173,6 +181,8 @@ static int cq_server_loop_once(struct cvmrdma_context * ctxt, struct ibv_cq * pr
 
             int this_recv_slot_id = qp->next_recv_slot;
             unsigned char * slot = ringbuf_in + this_recv_slot_id * cvmrdma_ring_slot_bytes(aead);
+            DEBUG("[CQ] processing recv slot %d with addr %p (ringslot bytes: 0x%x)\n", 
+                this_recv_slot_id, slot, cvmrdma_ring_slot_bytes(aead));
 
             /* And update the slot idx */
             qp->next_recv_slot = (this_recv_slot_id + 1) % CVMRDMA_RING_ENTRIES;
@@ -198,18 +208,9 @@ static int cq_server_loop_once(struct cvmrdma_context * ctxt, struct ibv_cq * pr
 
             uint64_t nonce_metadata[cvmrdma_aead_NPUB_WORDS];
             DEBUG("[CQ] waiting for nonce\n");
-            pthread_mutex_lock(&qp->receive_nonce_lock);
-            while (!qp->nonce_set) {
-                pthread_cond_wait(&qp->receive_nonce_cv, &qp->receive_nonce_lock);
-            }
-            struct nonce_t * nonce = qp_nonce_queue_front(qp->nonce_queue);
-            memcpy(&nonce_metadata, nonce, cvmrdma_aead_NPUBBYTES);
+            struct nonce_entry * nonce_entry = qp_nonce_queue_front(qp->nonce_queue);
+            memcpy(&nonce_metadata, nonce_entry->nonce, cvmrdma_aead_NPUBBYTES);
             qp_nonce_queue_pop(qp->nonce_queue);
-            DEBUG("[CQ] Consuming nonce %lx %lx %lx\n", nonce_metadata[0], nonce_metadata[1], nonce_metadata[2]);
-            if (qp_nonce_queue_size(qp->nonce_queue) <= 0) {
-                qp->nonce_set = false;
-            }
-            pthread_mutex_unlock(&qp->receive_nonce_lock);
             DEBUG("[CQ] got nonce %lx %lx %lx\n", nonce_metadata[0], nonce_metadata[1], nonce_metadata[2]);
 
             unsigned long long notif_mlen = sizeof(notif);
@@ -224,10 +225,20 @@ static int cq_server_loop_once(struct cvmrdma_context * ctxt, struct ibv_cq * pr
             );
             if(err)
             {
-                fprintf(stderr, "WARN: Failed to decrypt bounce buffer for notif with key %lx %lx and nonce %lx %lx notif_start[0] %x %x %x %x notif_start %p notif_clen %llu\n", 
-                    shared_key[0], shared_key[1], nonce_metadata[0], nonce_metadata[1], notif_start[0], notif_start[1], notif_start[2], notif_start[3], notif_start, notif_clen);
-                exit(1);
+                DEBUG("WARN for WC %d: Failed to decrypt bounce buffer for notif with key %lx %lx and nonce %lx %lx %lx notif_start[0] %x %x %x %x notif_start %p notif_clen %llu\n", 
+                    this_wc->wr_id, shared_key[0], shared_key[1], nonce_metadata[0], nonce_metadata[1], nonce_metadata[2], notif_start[0], notif_start[1], notif_start[2], notif_start[3], notif_start, notif_clen);
+                DEBUG("notif immediate data %d, opcode %d, wc_length %d\n", notif.imm, this_wc->opcode, wc_length);
+                    exit(1);
+            } else {
+                DEBUG("SUCC for WC %d: Decrypted notif with key %lx %lx and nonce %lx %lx %lx\n", 
+                    this_wc->wr_id, shared_key[0], shared_key[1], nonce_metadata[0], nonce_metadata[1], nonce_metadata[2]);
+                DEBUG("notif contents: %x %x %x %x %x %x %x %x %x %x \n", 
+                    notif_start[0], notif_start[1], notif_start[2], notif_start[3],
+                    notif_start[4], notif_start[5], notif_start[6], notif_start[7],
+                    notif_start[8], notif_start[9]);
+                DEBUG("notif immediate data %d, opcode %d, wc_length %d\n", notif.imm, this_wc->opcode, wc_length);
             }
+            
 
             enum ibv_wr_opcode wr_op = notif.op;
             bool is_write = (wr_op == IBV_WR_RDMA_WRITE) || (wr_op == IBV_WR_RDMA_WRITE_WITH_IMM);

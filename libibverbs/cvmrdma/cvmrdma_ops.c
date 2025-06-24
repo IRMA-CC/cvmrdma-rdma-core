@@ -38,6 +38,7 @@
 #include "dma_heap.h"
 #include "cvmrdma_cache.h"
 #include "nonce_queue.h"
+#include "chunk_queue.h"
 
 #include "debug.h"
 
@@ -319,9 +320,9 @@ static struct ibv_qp *cvmrdma_create_qp(struct ibv_pd * ibpd,
 
 	/* Don't keep the user set QP capacity */
 	attr_ex.cap.max_recv_sge = 30;
-	attr_ex.cap.max_recv_wr = 4096;
+	attr_ex.cap.max_recv_wr = CVMRDMA_RING_ENTRIES;
 	attr_ex.cap.max_send_sge = 30;
-	attr_ex.cap.max_send_wr = 4096;
+	attr_ex.cap.max_send_wr = CVMRDMA_RING_ENTRIES;
 	attr_ex.cap.max_inline_data = 0; /* we're not using inline */
 
 	attr_ex.pd = pd->provider_pd;
@@ -357,9 +358,9 @@ static struct ibv_qp *cvmrdma_create_qp(struct ibv_pd * ibpd,
 	control_attr_ex.qp_type = IBV_QPT_RC;
 
 	control_attr_ex.cap.max_recv_sge = 16;
-	control_attr_ex.cap.max_recv_wr = 4096;
+	control_attr_ex.cap.max_recv_wr = CVMRDMA_RING_ENTRIES;
 	control_attr_ex.cap.max_send_sge = 16;
-	control_attr_ex.cap.max_send_wr = 4096;
+	control_attr_ex.cap.max_send_wr = CVMRDMA_RING_ENTRIES;
 	control_attr_ex.cap.max_inline_data = 0; /* we're not using inline */
 
 	control_attr_ex.pd = pd->provider_pd;
@@ -415,13 +416,20 @@ static struct ibv_qp *cvmrdma_create_qp(struct ibv_pd * ibpd,
 	qp->send_metadata = send_metadata;
 	qp->wr_chunks_sent = 0;
 
+	QpChunk * chunk_queue = alloc_qp_chunk_queue();
+	if (! chunk_queue)
+	{
+		fprintf(stderr, "Failed to allocated chunk queue storage.\n");
+		goto free_send_metadata;
+	}
+	qp->chunk_queue = chunk_queue;
 
 	/* Allocate the bounce regions and ring buffer for this QP */
 	void * bounce_private_mem = mmap(0, cvmrdma_priv_bounce_total_bytes(ctxt->aead), PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
 	if (bounce_private_mem == MAP_FAILED) {
 		err = errno;
 		fprintf(stderr, "Failed to mmap bounce buffer %d\n", err);
-		goto free_send_metadata;
+		goto free_chunk_queue;
 	}
 	qp->bounce_private_mem = bounce_private_mem;
 
@@ -537,6 +545,8 @@ dereg_ring_mr:
 	close(dmabuf_fd);
 free_bounce_private:
 	munmap(bounce_private_mem, cvmrdma_priv_bounce_total_bytes(ctxt->aead));
+free_chunk_queue:
+	free_qp_chunk_queue(qp->chunk_queue);
 free_send_metadata:
 	free_qp_send_metadata(send_metadata);
 free_recv_metadata:
@@ -688,7 +698,7 @@ static int cvmrdma_modify_qp(struct ibv_qp *ibqp, struct ibv_qp_attr *attr,
 		/* Prepare all the slots: need one RR per WRITE_WITH_IMM. Can only post recv  
 			after RTR state */
 		struct ibv_recv_wr recv_wr[1] = {0};
-		for(int i = 0 ; i < 4096 ; i++)
+		for(int i = 0 ; i < CVMRDMA_RING_ENTRIES ; i++)
 		{
 			struct ibv_recv_wr * bad_wr = NULL;
 			ret = ctxt->prov_ops.post_recv(prov_qp, recv_wr, &bad_wr);
@@ -697,7 +707,7 @@ static int cvmrdma_modify_qp(struct ibv_qp *ibqp, struct ibv_qp_attr *attr,
 				fprintf(stderr, "Failed to post recv initial RR for ring slots (%d)\n", ret);
 				exit(1);
 			}
-	}
+		}
 
 		/* Before we can receive anything, we need to wait for the remote to send us its rx key.
 			Note that it also sets the ring_rkey, needed later for send */
@@ -986,6 +996,19 @@ static int post_send_do_bounce(struct cvmrdma_qp * qp, struct ibv_send_wr *wrs, 
 
 			unsigned char * slot = cur_mr->provider_va + (chunk_idx * cvmrdma_ring_slot_bytes(ctxt->aead));
 
+			// we need to track if a chunk is currently being sent.
+			// Otherwise a subsequent send of the same chunk could overwrite the metadata of the previous send.
+			// This would result in a decrpytion error on the recivers side, because the nonce would not match the metadata.
+			// Before modifying the chunk we therefore need to acquire the lock.
+			// Furthermore, the chunk idx is saved in the chunk queue, so that the CQ server can
+			// unlock the chunk lock once the chunk is sent.
+			struct chunk_entry entry = {
+				.chunk_idx = chunk_idx,
+				.lkey = cur_sge->lkey,
+			};
+			qp_chunk_queue_push(qp->chunk_queue, &entry);
+			pthread_mutex_lock(&chunk_info->in_transit_lock);
+
 			/***** NOTIFY ******/
 			TIMING("chunk_notify");
 			unsigned long long notif_clen;
@@ -1066,6 +1089,12 @@ static int post_send_do_bounce(struct cvmrdma_qp * qp, struct ibv_send_wr *wrs, 
 				exit(1);
 			}
 
+			size_t wp_len = send_len;
+#ifdef ROUND_TO_PAGE_SIZE
+			// Round up to the nearest page size because otherwise the ioctl will fail
+			size_t page_size = sysconf(_SC_PAGESIZE);
+			wp_len = ((send_len + page_size - 1) / page_size) * page_size;
+#endif
 			// We should be fine with only marking it the user_mr data _after_ the encryption
 			// since writes during the encryption above are writes when the send completion 
 			// was not issued to the user program.
@@ -1075,12 +1104,12 @@ static int post_send_do_bounce(struct cvmrdma_qp * qp, struct ibv_send_wr *wrs, 
 				struct uffdio_writeprotect uffdio_wp = {
 					.range = {
 						.start = (unsigned long) ptxt,
-						.len = send_len,
+						.len = wp_len,
 					},
 					.mode = UFFDIO_WRITEPROTECT_MODE_WP,
 				};
 				if (ioctl(uffd, UFFDIO_WRITEPROTECT, &uffdio_wp) == -1) {
-					fprintf(stderr, "Failed to write protect the memory region; addr %p, last_chunk %d, send_len %lu\n", ptxt, last_chunk, send_len);
+					fprintf(stderr, "Failed to write protect the memory region; addr %p, last_chunk %d, send_len %lu\n", ptxt, last_chunk, wp_len);
 					exit(1);
 				}
 				atomic_store(&chunk_info->cached, true);
@@ -1315,6 +1344,7 @@ static struct ibv_mr *cvmrdma_reg_mr(struct ibv_pd *ibpd, void *addr, size_t len
 	for (uint64_t i = 0; i < num_chunks; i++)
 	{
 		pthread_mutex_init(&mr->chunk_tracking[i].lock, NULL);
+		pthread_mutex_init(&mr->chunk_tracking[i].in_transit_lock, NULL);
 	}
 
 
@@ -1336,18 +1366,24 @@ static struct ibv_mr *cvmrdma_reg_mr(struct ibv_pd *ibpd, void *addr, size_t len
 			exit(1);
 		}
 
+		size_t reg_len = length;
+#ifdef ROUND_TO_PAGE_SIZE
+		// Round up to the nearest page size because otherwise the ioctl will fail
+		size_t page_size = sysconf(_SC_PAGESIZE);
+		reg_len = ((length + page_size - 1) / page_size) * page_size;
+#endif
 		/* Register the memory range of the mapping we just created for
 		handling by the userfaultfd object. */
 		struct uffdio_register uffdio_register = {
 			.range = {
 				.start = (unsigned long) addr,
-				.len = length,
+				.len = reg_len,
 			},
 			.mode = UFFDIO_REGISTER_MODE_WP | UFFDIO_REGISTER_MODE_MISSING,
 			//.mode = UFFDIO_REGISTER_MODE_WP,
 		};
 		if (ioctl(uffd, UFFDIO_REGISTER, &uffdio_register) == -1) {
-			fprintf(stderr, "Failed to ioctl-UFFDIO_REGISTER %d with addr %p and len %lu\n", errno, addr, length);
+			fprintf(stderr, "Failed to ioctl-UFFDIO_REGISTER %d with addr %p and len %lu\n", errno, addr, reg_len);
 			exit(1);
 		}
 

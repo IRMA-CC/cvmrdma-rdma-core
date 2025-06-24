@@ -39,7 +39,7 @@ public:
         pthread_cond_t * remote_params_set_cv_ptr,
         pthread_mutex_t * receive_nonce_lock,
         pthread_cond_t * receive_nonce_cv_ptr,
-        NonceQueue ** nonce_queue,
+        QpNonce ** nonce_queue,
         bool * nonce_set_ptr
     );
     
@@ -70,13 +70,11 @@ public:
 
     void notify_nonce(uint64_t * nonce)
     {
-        pthread_mutex_lock(m_receive_nonce_lock);
-        qp_nonce_queue_push(*m_nonce_queue, nonce[0], nonce[1], nonce[2]);
-        *m_nonce_set_ptr = true;
-        pthread_mutex_unlock(m_receive_nonce_lock);
+        struct nonce_entry entry = {0};
+        memcpy(entry.nonce, nonce, sizeof(entry.nonce));
+        qp_nonce_queue_push(*m_nonce_queue, &entry);
         DEBUG("[NS] Sending nonce signal %" PRIx64 " 0x%" PRIx64 " 0x%" PRIx64 "\n",
             nonce[0], nonce[1], nonce[2]);
-        pthread_cond_signal(m_receive_nonce_cv_ptr);
     }
 
 private:
@@ -91,7 +89,7 @@ private:
 	pthread_cond_t * m_remote_params_set_cv_ptr = nullptr;
     pthread_mutex_t * m_receive_nonce_lock = nullptr;
     pthread_cond_t * m_receive_nonce_cv_ptr = nullptr;
-    NonceQueue ** m_nonce_queue = nullptr;
+    QpNonce ** m_nonce_queue = nullptr;
     bool * m_nonce_set_ptr = nullptr;
 
     /* Counter in the original qp tracking the number of lines full in the remote recv ring / the locl send ring */
@@ -120,7 +118,7 @@ public:
         pthread_cond_t * remote_params_set_cv_ptr,
         pthread_mutex_t * receive_nonce_lock,
         pthread_cond_t * receive_nonce_cv_ptr,
-        NonceQueue ** nonce_queue,
+        QpNonce ** nonce_queue,
         bool * nonce_set_ptr
     );
     void qp_notification_channel_destroy(QpNotificationChannel * pnc);
@@ -149,7 +147,7 @@ void cvmrdma_server_register_qp(CVMRDMAServer * cs,
     pthread_cond_t * remote_params_set_cv_ptr,
     pthread_mutex_t * receive_nonce_lock,
     pthread_cond_t * receive_nonce_cv_ptr,
-    NonceQueue ** nonce_queue,
+    QpNonce ** nonce_queue,
     bool * nonce_set_ptr
 );
 

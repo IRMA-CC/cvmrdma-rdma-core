@@ -11,6 +11,13 @@
 #include "cvmrdma.h"
 #include "debug.h"
 
+#ifdef ROUND_TO_PAGE_SIZE
+
+#include <sys/mman.h>
+#include <unistd.h>
+
+#endif
+
 
 void* fault_handler_thread(void* arg) {
     struct fault_handler_thread_args* targs;                  /* userfaultfd file descriptor */
@@ -79,10 +86,19 @@ void* fault_handler_thread(void* arg) {
 
         // make all pages of the chunk as writable
         uint64_t alinged_start = msg.arg.pagefault.address - (offt % cvmrdma_chunk_bytes);
+
+        size_t wp_len = (alinged_start - (uint64_t)user_mr->addr) + cvmrdma_chunk_bytes > user_mr->length ? user_mr->length - (alinged_start - (uint64_t)user_mr->addr) : cvmrdma_chunk_bytes;
+
+#ifdef ROUND_TO_PAGE_SIZE
+        // Round up to the nearest page size because otherwise the ioctl will fail
+        size_t page_size = sysconf(_SC_PAGESIZE);
+        wp_len = ((wp_len + page_size - 1) / page_size) * page_size;
+#endif
+
         struct uffdio_writeprotect uffdio_wp = {
             .range = {
                 .start = alinged_start,
-                .len = (alinged_start - (uint64_t)user_mr->addr) + cvmrdma_chunk_bytes  > user_mr->length ? user_mr->length - (alinged_start - (uint64_t)user_mr->addr) : cvmrdma_chunk_bytes,
+                .len = wp_len
             },
             .mode = 0,
         };

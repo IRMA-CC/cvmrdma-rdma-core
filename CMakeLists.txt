@@ -474,6 +474,7 @@ if(DUMMY_SYSTEM_HEAP)
   add_compile_definitions(DUMMY_SYSTEM_HEAP)
 endif()
 
+add_compile_definitions(ROUND_TO_PAGE_SIZE)
 
 #-------------------------
 # Find libraries

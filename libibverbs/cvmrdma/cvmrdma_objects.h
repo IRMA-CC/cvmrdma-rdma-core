@@ -8,6 +8,7 @@
 #include "crypto.h"
 #include "recv_metadata.h"
 #include "send_metadata.h"
+#include "chunk_queue.h"
 #include "cvmrdma_network_client.h"
 #include "cvmrdma_network_server.h"
 #include "cvmrdma_network_evloop.h"
@@ -214,6 +215,7 @@ struct cvmrdma_qp {
 	/* Save number of chunks of future sends in FIFO. When this many chunks are sent, report to
 	   user. */
 	QpSendMetadata *send_metadata;
+	QpChunk *chunk_queue;
 
 	/* Save ibv_send_wr during ibv_post_send in order to handle the WRs async as 
 	 * usually from the library. The user program can only be sure that the WR is 
@@ -233,7 +235,7 @@ struct cvmrdma_qp {
 
 	pthread_mutex_t receive_nonce_lock;
 	pthread_cond_t receive_nonce_cv;
-	NonceQueue *nonce_queue;
+	QpNonce *nonce_queue;
 	bool nonce_set;
 
 	bool is_loopback;
@@ -258,6 +260,7 @@ struct chunk_tracking_info {
 	/* If the chink is not dirty this is true */
 	_Atomic bool cached; // 1 byte
 	pthread_mutex_t lock;
+	pthread_mutex_t in_transit_lock;
 };
 
 extern bool cvmrdma_disable_cache;
