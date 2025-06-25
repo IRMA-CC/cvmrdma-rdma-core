@@ -100,6 +100,7 @@ static int cq_server_loop_once(struct cvmrdma_context * ctxt, struct ibv_cq * pr
             struct cvmrdma_mr * cur_mr = get_bounce_metadata_for_lkey(pd->bounce_metadata, entry->lkey);
             struct chunk_tracking_info* chunk_info = &cur_mr->chunk_tracking[entry->chunk_idx];
             pthread_mutex_unlock(&chunk_info->in_transit_lock);
+            qp_chunk_queue_pop(qp->chunk_queue);
             
             if(send_info->nchunks == qp->wr_chunks_sent)
             {
