@@ -541,9 +541,9 @@ static int cq_server_loop_once(struct cvmrdma_context * ctxt, struct ibv_cq * pr
 
             DEBUG("FFF [CQ] notifying remote that chunk %zu is free\n", this_recv_slot_id);
             if (qp->is_loopback) {
-                remote_qp_notify_chunk_recv(ctxt->local_addr, ctxt->network_evloop, qp->remote_qnc);
+                remote_qp_notify_chunk_recv(qp->local_addr, ctxt->network_evloop, qp->remote_qnc);
             } else {
-                remote_qp_notify_chunk_recv(ctxt->remote_addr, ctxt->network_evloop, qp->remote_qnc);
+                remote_qp_notify_chunk_recv(qp->remote_addr, ctxt->network_evloop, qp->remote_qnc);
             }
             
 

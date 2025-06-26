@@ -46,18 +46,18 @@ struct cvmrdma_context {
 	CapnpEvloopThread *network_evloop;
 	CVMRDMAServer *network_server;
 
-	RPCClientSession *local_network_client_connection;
+	/*RPCClientSession *local_network_client_connection;
 	CVMRDMAClient *local_network_client_cap;
 	RPCClientSession *remote_network_client_connection;
-	CVMRDMAClient *remote_network_client_cap;
+	CVMRDMAClient *remote_network_client_cap;*/
 
 	/* Metadata manager maps QPNs to QPs
 	   This is shared between all CQ servers.
 	*/
 	QPMetadataManager * qp_metadata_manager;
 
-	char const *local_addr;
-	char const *remote_addr;
+	/*char const *local_addr;
+	char const *remote_addr;*/
 
 	/* dma heap to allocate the public buffers on */
 	int dma_heap;
@@ -239,6 +239,14 @@ struct cvmrdma_qp {
 	bool nonce_set;
 
 	bool is_loopback;
+
+	RPCClientSession *local_network_client_connection;
+	CVMRDMAClient *local_network_client_cap;
+	RPCClientSession *remote_network_client_connection;
+	CVMRDMAClient *remote_network_client_cap;
+
+	char const *local_addr;
+	char const *remote_addr;
 };
 
 struct cvmrdma_srq {
