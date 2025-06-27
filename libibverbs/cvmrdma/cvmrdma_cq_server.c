@@ -186,7 +186,7 @@ static int cq_server_loop_once(struct cvmrdma_context * ctxt, struct ibv_cq * pr
                 this_recv_slot_id, slot, cvmrdma_ring_slot_bytes(aead));
 
             /* And update the slot idx */
-            qp->next_recv_slot = (this_recv_slot_id + 1) % CVMRDMA_RING_ENTRIES;
+            qp->next_recv_slot = (this_recv_slot_id + 1) % cvmrdma_ring_entries;
 
 
             TIMING("cds_t0");
@@ -549,7 +549,7 @@ static int cq_server_loop_once(struct cvmrdma_context * ctxt, struct ibv_cq * pr
 
 
             /*pthread_mutex_lock(&qp->received_lines_lock);
-            if ( ++qp->received_lines >= CVMRDMA_ACK_THRESHOLD)
+            if ( ++qp->received_lines >= cvmrdma_ack_threshold)
             {
                 pthread_cond_signal(&qp->recv_lines_ack);
             }

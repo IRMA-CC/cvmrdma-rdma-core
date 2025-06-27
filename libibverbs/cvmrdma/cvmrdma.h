@@ -24,6 +24,8 @@ struct cq_server_notification
 
 // Defined in cvmrdma_ops.c
 extern uint64_t cvmrdma_chunk_bytes;
+extern uint64_t cvmrdma_ring_entries;
+extern uint64_t cvmrdma_ack_threshold;
 
 static inline uint64_t cvmrdma_ring_slot_bytes(enum sodium_crypto_aead aead)
 {
@@ -38,10 +40,10 @@ static inline uint64_t cvmrdma_header_bytes(enum sodium_crypto_aead aead)
 	return sizeof(struct cq_server_notification) + cvmrdma_ABYTES(aead);
 }
 
-#define CVMRDMA_RING_ENTRIES 64
+// #define CVMRDMA_RING_ENTRIES 64
 
 // This must be smaller than the max_recv_wr/max_send_wr for control_ibqp in cvmrdma_create_qp.
-#define CVMRDMA_ACK_THRESHOLD DIVIDE_ROUND_UP(CVMRDMA_RING_ENTRIES, 2)
+//#define CVMRDMA_ACK_THRESHOLD DIVIDE_ROUND_UP(CVMRDMA_RING_ENTRIES, 2)
 
 enum cvmrdma_priv_chunk_id {
 	CVMRDMA_PRIV_CHUNK_SG_OUT,

@@ -65,7 +65,7 @@ static char * lookup_ip_by_lid(uint64_t lid)
 			}
 			strncpy(ip, file_ip, ip_len);
 			ip[ip_len] = '\0'; // Null-terminate the string
-			fprintf(stderr, "Found IP for LID %d: %s\n", lid, ip);
+			DEBUG(stderr, "Found IP for LID %d: %s\n", lid, ip);
 			return ip;
         }
     }
@@ -246,6 +246,7 @@ static struct ibv_mr * alloc_public_mr(struct cvmrdma_context * ctxt, struct cvm
 	int dma_buf;
 
 #ifndef DUMMY_SYSTEM_HEAP
+	DEBUG("Using dma-buf for public MR\n");
 	dma_buf = alloc_dma_buf(ctxt->dma_heap, size);
 	if(dma_buf < 0)
 	{
@@ -353,9 +354,9 @@ static struct ibv_qp *cvmrdma_create_qp(struct ibv_pd * ibpd,
 
 	/* Don't keep the user set QP capacity */
 	attr_ex.cap.max_recv_sge = 30;
-	attr_ex.cap.max_recv_wr = CVMRDMA_RING_ENTRIES;
+	attr_ex.cap.max_recv_wr = 4096;
 	attr_ex.cap.max_send_sge = 30;
-	attr_ex.cap.max_send_wr = CVMRDMA_RING_ENTRIES;
+	attr_ex.cap.max_send_wr = 4096;
 	attr_ex.cap.max_inline_data = 0; /* we're not using inline */
 
 	attr_ex.pd = pd->provider_pd;
@@ -391,9 +392,9 @@ static struct ibv_qp *cvmrdma_create_qp(struct ibv_pd * ibpd,
 	control_attr_ex.qp_type = IBV_QPT_RC;
 
 	control_attr_ex.cap.max_recv_sge = 16;
-	control_attr_ex.cap.max_recv_wr = CVMRDMA_RING_ENTRIES;
+	control_attr_ex.cap.max_recv_wr = 4096;
 	control_attr_ex.cap.max_send_sge = 16;
-	control_attr_ex.cap.max_send_wr = CVMRDMA_RING_ENTRIES;
+	control_attr_ex.cap.max_send_wr = 4096;
 	control_attr_ex.cap.max_inline_data = 0; /* we're not using inline */
 
 	control_attr_ex.pd = pd->provider_pd;
@@ -458,6 +459,7 @@ static struct ibv_qp *cvmrdma_create_qp(struct ibv_pd * ibpd,
 	qp->chunk_queue = chunk_queue;
 
 	/* Allocate the bounce regions and ring buffer for this QP */
+	DEBUG("Allocating bounce regions with size %zu for QP %" PRIx32 "\n",  (uint64_t) cvmrdma_priv_bounce_total_bytes(ctxt->aead) / (1024*1024), ibqp->qp_num);
 	void * bounce_private_mem = mmap(0, cvmrdma_priv_bounce_total_bytes(ctxt->aead), PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
 	if (bounce_private_mem == MAP_FAILED) {
 		err = errno;
@@ -468,10 +470,11 @@ static struct ibv_qp *cvmrdma_create_qp(struct ibv_pd * ibpd,
 
 
     /* To perform the bounce, we'll need to read and write the ring buffers */
-	size_t all_rings_bytes = cvmrdma_ring_slot_bytes(ctxt->aead) * CVMRDMA_RING_ENTRIES;
+	size_t all_rings_bytes = cvmrdma_ring_slot_bytes(ctxt->aead) * cvmrdma_ring_entries;
 
 	int dmabuf_fd = -1;
 	void * ringbuf_va = NULL;
+	DEBUG("Allocating ring buffer with size %zu for QP %" PRIx32 "\n",  (uint64_t) all_rings_bytes / (1024*1024), ibqp->qp_num);
 	struct ibv_mr * ringbuf_mr = alloc_public_mr(ctxt, pd, all_rings_bytes, &dmabuf_fd, &ringbuf_va);
     if(! ringbuf_mr)
     {
@@ -496,6 +499,7 @@ static struct ibv_qp *cvmrdma_create_qp(struct ibv_pd * ibpd,
 
 	int control_dmabuf_fd = -1;
 	void * control_buf_va = NULL;
+	DEBUG("Allocating control buffer with size %zu for QP %" PRIx32 "\n",  (uint64_t)control_rings_bytes / (1024*1024), ibqp->qp_num);
 	struct ibv_mr * control_buf_mr = alloc_public_mr(ctxt, pd, control_rings_bytes, &control_dmabuf_fd, &control_buf_va);
     if(! control_buf_mr)
     {
@@ -579,8 +583,7 @@ static struct ibv_qp *cvmrdma_create_qp(struct ibv_pd * ibpd,
 	}
 
 	qp->local_addr = calloc(1, 20);
-	sprintf(qp->local_addr, "127.0.0.1:%s", local_bind_addr + 2);	
-	fprintf(stderr, "[CVMRDMA] Local address is %s\n", qp->local_addr);
+	sprintf(qp->local_addr, "127.0.0.1:%s", local_bind_addr + 2);
 
 	qp->remote_addr = NULL;
 	qp->local_network_client_connection = NULL;
@@ -676,9 +679,9 @@ static int cvmrdma_modify_qp(struct ibv_qp *ibqp, struct ibv_qp_attr *attr,
 		assert(ret == 0);
 		DEBUG("[MODIFY_QP] attr->dest_qp_num 0x%" PRIx32 "\n", attr->dest_qp_num);
 		qp->lid = port_attr.lid;
-		fprintf(stderr, "[MODIFY_QP] local lid %d\n", qp->lid);
+		DEBUG(stderr, "[MODIFY_QP] local lid %d\n", qp->lid);
 		qp->dlid = attr->ah_attr.dlid;
-		fprintf(stderr, "[MODIFY_QP] remote lid %d\n", qp->dlid);
+		DEBUG(stderr, "[MODIFY_QP] remote lid %d\n", qp->dlid);
 		srand48(time(NULL));
 		qp->control_local_psn = lrand48() & 0xffffff;
 		qp->is_loopback = is_local;
@@ -692,7 +695,6 @@ static int cvmrdma_modify_qp(struct ibv_qp *ibqp, struct ibv_qp_attr *attr,
 		/* Open a session to the remote using the same event loop */
 		/* Only connect to the remote's RPC server when we know that the server is up */
 		qp->remote_addr = remote_addr;
-		fprintf(stderr, "Remote's IP is %s\n", remote_addr);
 
 		/* Start by connecting to the server if not already connected */
 		if(! qp->remote_network_client_connection && !is_local) {
@@ -706,8 +708,6 @@ static int cvmrdma_modify_qp(struct ibv_qp *ibqp, struct ibv_qp_attr *attr,
 		} else {
 			DEBUG("[MODIFY_QP] Already connected to the server\n");
 		}
-
-		fprintf(stderr, "Setup control QP\n");
 
 		/*
 			Setup control qp
@@ -763,7 +763,7 @@ static int cvmrdma_modify_qp(struct ibv_qp *ibqp, struct ibv_qp_attr *attr,
 		/* Prepare all the slots: need one RR per WRITE_WITH_IMM. Can only post recv  
 			after RTR state */
 		struct ibv_recv_wr recv_wr[1] = {0};
-		for(int i = 0 ; i < CVMRDMA_RING_ENTRIES ; i++)
+		for(int i = 0 ; i < 4096 ; i++)
 		{
 			struct ibv_recv_wr * bad_wr = NULL;
 			ret = ctxt->prov_ops.post_recv(prov_qp, recv_wr, &bad_wr);
@@ -1027,7 +1027,7 @@ static int post_send_do_bounce(struct cvmrdma_qp * qp, struct ibv_send_wr *wrs, 
 				/* LOCK */
 				pthread_mutex_lock(&qp->send_lines_full_lock);
 
-				while(qp->send_lines_full >= CVMRDMA_RING_ENTRIES)
+				while(qp->send_lines_full >= cvmrdma_ring_entries)
 				{
 					TIMING("wait_free_sendlines!");
 					pthread_cond_wait(&qp->send_lines_avail, &qp->send_lines_full_lock);
@@ -1035,7 +1035,7 @@ static int post_send_do_bounce(struct cvmrdma_qp * qp, struct ibv_send_wr *wrs, 
 
 				slot_id = qp->next_send_slot;
 
-				qp->next_send_slot = (slot_id + 1) % CVMRDMA_RING_ENTRIES;
+				qp->next_send_slot = (slot_id + 1) % cvmrdma_ring_entries;
 				
 				qp->send_lines_full++;
 				DEBUG("[SEND QPN %x] slot_id %d\n", qp->user_qp.qp.qp_num, slot_id);
@@ -1191,7 +1191,7 @@ skip_payload_encryption:
 			/****** POST SEND WWI ******/
 			/* Synchronize the ring buffer with the remote copy using a WWI.
 			   Rings MR are 0-indexed. The send ring starts at 0, the recv 
-			   ring starts at CVMRDMA_RING_ENTRIES * CVMRDMA_CHUNK_SIZE.
+			   ring starts at cvmrdma_ring_entries * CVMRDMA_CHUNK_SIZE.
 			*/
 			uint32_t local_provider_lkey = cur_mr->provider_mr->lkey;
 			uint32_t remote_ring_rkey = qp->remote_ring_rkey;
@@ -1245,7 +1245,7 @@ skip_payload_encryption:
 			chunks_in_wr++;
 
 			/* try to dequeue some SEND WC from the CQ (if no other thread is polling the CQ) */
-			if(qp->send_lines_full >= DIVIDE_ROUND_UP(CVMRDMA_ACK_THRESHOLD, 200))
+			if(qp->send_lines_full >= DIVIDE_ROUND_UP(cvmrdma_ack_threshold, 200))
 			{
 				err = cvmrdma_cq_server_run_once_if_idle_send(ctxt, qp->provider_cq, NULL);
 				if(err < 0)
@@ -1386,6 +1386,7 @@ static struct ibv_mr *cvmrdma_reg_mr(struct ibv_pd *ibpd, void *addr, size_t len
 
 	int dmabuf_fd = -1;
 	void * provider_va = NULL;
+	DEBUG("[MR] Allocating provider MR with size %lu\n", (uint64_t) provider_mr_size / (1024*1024));
 	struct ibv_mr * provider_mr = alloc_public_mr(ctxt, pd, provider_mr_size, &dmabuf_fd, &provider_va);
     if(! provider_mr)
     {
@@ -1532,8 +1533,6 @@ int cvmrdma_destroy_qp(struct ibv_qp *ibqp)
 	*/
 	// TODO(@ANONYMIZED): This should likely do more cleanup
 
-	free(qp->remote_addr);
-
 	// by commenting out the above, the server shutsdown too fast, resulting in an error on the client.
 	// TODO: find a way to shutdown the server cleanly
 	usleep(100000);
@@ -1657,6 +1656,9 @@ CVMRDMAServer * tcp_server = NULL;
 
 bool cvmrdma_disable_cache = false;
 uint64_t cvmrdma_chunk_bytes = 2048 * 4096;
+uint64_t cvmrdma_ring_entries = 64;
+uint64_t cvmrdma_ack_threshold = DIVIDE_ROUND_UP(64, 2);
+// it should always hold (cvmrdma_chunk_bytes * cvmrdma_ring_entires) < 64 * 2048 * 4096 = 536870912 bytes = 512 MiB
 static struct verbs_context *cvmrdma_alloc_context(struct ibv_device *ibdev,
 						  int cmd_fd,
 						  void *private_data)
@@ -1724,6 +1726,12 @@ static struct verbs_context *cvmrdma_alloc_context(struct ibv_device *ibdev,
 			fprintf(stderr, "ERROR: CVMRDMA_CHUNK_BYTES must be a positive integer\n");
 			goto err;
 		}
+
+		// the size of our ring buffer is limited to 512 MiB
+		// we need to claculate how many entries we can fit into the ring buffer depending on the chunk size
+		cvmrdma_ring_entries = 536870912 / (cvmrdma_chunk_bytes);
+		fprintf(stderr, "CVMRDMA_CHUNK_BYTES set to %lu, ring entries set to %lu\n", cvmrdma_chunk_bytes, cvmrdma_ring_entries);
+		cvmrdma_ack_threshold = DIVIDE_ROUND_UP(cvmrdma_ring_entries, 2);
 	} 
 
 
@@ -1754,7 +1762,6 @@ static struct verbs_context *cvmrdma_alloc_context(struct ibv_device *ibdev,
 	bool first = atomic_compare_exchange_strong(&tcp_server_running, &expected, true);
 	if(first)
 	{
-		fprintf(stderr, "Start IP based server on %s\n", local_bind_addr);
 		/* Start a new thread with a capnp event loop running the RPC server */
 		cvmrdma_ctx->network_evloop = create_capnp_event_loop(local_bind_addr, &cvmrdma_ctx->network_server);
 		
@@ -1777,7 +1784,6 @@ static struct verbs_context *cvmrdma_alloc_context(struct ibv_device *ibdev,
 		cvmrdma_ctx->network_evloop = evloop_server;
 		cvmrdma_ctx->network_server = tcp_server;
 	}
-	fprintf(stderr, "CVMRDMA server is running on %s\n", local_bind_addr);
 
 	// TODO: qp_metadata_manager_destroy(server->qp_metadata_manager); when destroying the context
 	cvmrdma_ctx->qp_metadata_manager = qp_metadata_manager_alloc();
