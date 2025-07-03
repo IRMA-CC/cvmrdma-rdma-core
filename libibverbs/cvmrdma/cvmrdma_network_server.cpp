@@ -34,7 +34,7 @@ QpNotificationChannel::QpNotificationChannel(
     pthread_cond_t * receive_nonce_cv_ptr,
 
     QpNonce ** nonce_queue,
-    bool * nonce_set_ptr
+    bool * nonce_set_ptr,
 
     WRQueue ** wr_queue_ptr
 )
@@ -158,7 +158,7 @@ void CVMRDMAServer::qp_notification_channel_create(
     pthread_mutex_t * receive_nonce_lock,
     pthread_cond_t * receive_nonce_cv_ptr,
     QpNonce ** nonce_queue,
-    bool * nonce_set_ptr
+    bool * nonce_set_ptr,
     WRQueue ** wr_queue_ptr
 )
 {
@@ -202,7 +202,7 @@ void cvmrdma_server_register_qp(CVMRDMAServer * cs,
     pthread_mutex_t * receive_nonce_lock,
     pthread_cond_t * receive_nonce_cv_ptr,
     QpNonce ** nonce_queue,
-    bool * nonce_set_ptr
+    bool * nonce_set_ptr,
     WRQueue ** wr_queue_ptr
 )
 {
