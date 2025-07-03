@@ -100,6 +100,7 @@ static int cq_server_loop_once(struct cvmrdma_context * ctxt, struct ibv_cq * pr
             struct cvmrdma_mr * cur_mr = get_bounce_metadata_for_lkey(pd->bounce_metadata, entry->lkey);
             struct chunk_tracking_info* chunk_info = &cur_mr->chunk_tracking[entry->chunk_idx];
             pthread_mutex_unlock(&chunk_info->in_transit_lock);
+            DEBUG("[CQ] send op %d, wrid: 0x%lx done, unlocked chunk lock for chunk %lu\n", op, this_wc->wr_id, entry->chunk_idx);
             qp_chunk_queue_pop(qp->chunk_queue);
             
             if(send_info->nchunks == qp->wr_chunks_sent)
@@ -328,6 +329,22 @@ static int cq_server_loop_once(struct cvmrdma_context * ctxt, struct ibv_cq * pr
                 assert(offt % cvmrdma_chunk_bytes == 0);
                 DEBUG("[CQ] chunk_idx %zu to chunk cache\n", chunk_idx);
                 pthread_mutex_lock(&chunk_info->lock);
+
+                while (pthread_mutex_trylock(&chunk_info->in_transit_lock) != 0) {
+                    struct cvmrdma_qp * transit_qp = chunk_info->qp_which_holds_transit_lock;
+                    
+                    // Directly poll the CQ to process completions
+                    err = cvmrdma_cq_server_run_once_if_idle_send(ctxt, transit_qp->provider_cq, NULL);
+                    if(err < 0) {
+                        fprintf(stderr, "Polling the CQ failed %d\n", err);
+                        exit(1);
+                    }
+				
+                    // Brief yield to prevent busy waiting
+                    sched_yield();
+                }
+                chunk_info->qp_which_holds_transit_lock = qp;
+
                 payload_start = cur_mr->provider_va + chunk_idx * cvmrdma_ring_slot_bytes(ctxt->aead) +  cvmrdma_header_bytes(ctxt->aead);
 
                 memcpy(payload_start, slot + header_bytes, cvmrdma_ring_slot_bytes(ctxt->aead) - cvmrdma_header_bytes(ctxt->aead));
@@ -463,6 +480,7 @@ static int cq_server_loop_once(struct cvmrdma_context * ctxt, struct ibv_cq * pr
                 memcpy(chunk_info->nonce, notif.payload_nonce, cvmrdma_aead_NPUBBYTES);
                 atomic_store(&chunk_info->cached, true);
                 pthread_mutex_unlock(&chunk_info->lock);
+                pthread_mutex_unlock(&chunk_info->in_transit_lock);
 
 
                 /* Record in the QP the number of bytes written during the decrypt (directly to dest) */

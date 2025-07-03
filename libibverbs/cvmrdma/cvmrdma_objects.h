@@ -272,6 +272,7 @@ struct chunk_tracking_info {
 	_Atomic bool cached; // 1 byte
 	pthread_mutex_t lock;
 	pthread_mutex_t in_transit_lock;
+	struct cvmrdma_qp * qp_which_holds_transit_lock;
 };
 
 extern bool cvmrdma_disable_cache;

@@ -557,7 +557,7 @@ static struct ibv_qp *cvmrdma_create_qp(struct ibv_pd * ibpd,
 	// Since the actual application is likely to not poll the cq all the time,
 	// we need another trigger to wake up the cq server.
 	if(c_cq->provider_comp_channel != NULL) {
-		err = pthread_create(&c_cq->provider_comp_channel_thread, NULL, &cvmrdma_cq_wait_completion_event, (void *)c_cq);
+	err = pthread_create(&c_cq->provider_comp_channel_thread, NULL, &cvmrdma_cq_wait_completion_event, (void *)c_cq);
 		if (err)
 		{
 			fprintf(stderr, "Error creating cvmrdma_cq_wait_completion_event thread: %d\n", err);
@@ -1101,8 +1101,24 @@ static int post_send_do_bounce(struct cvmrdma_qp * qp, struct ibv_send_wr *wrs, 
 				.chunk_idx = chunk_idx,
 				.lkey = cur_sge->lkey,
 			};
+
 			qp_chunk_queue_push(qp->chunk_queue, &entry);
-			pthread_mutex_lock(&chunk_info->in_transit_lock);
+			DEBUG("[SEND QPN %x] Waiting for chunk lock for chunk %lu\n", qp->user_qp.qp.qp_num, chunk_idx);
+			while (pthread_mutex_trylock(&chunk_info->in_transit_lock) != 0) {
+				struct cvmrdma_qp * transit_qp = chunk_info->qp_which_holds_transit_lock;
+				
+				// Directly poll the CQ to process completions
+				err = cvmrdma_cq_server_run_once_if_idle_send(ctxt, transit_qp->provider_cq, NULL);
+				if(err < 0) {
+					fprintf(stderr, "Polling the CQ failed %d\n", err);
+					exit(1);
+				}
+				
+				// Brief yield to prevent busy waiting
+				sched_yield();
+			}
+			chunk_info->qp_which_holds_transit_lock = qp;
+			DEBUG("[SEND QPN %x] Acquired chunk lock for chunk %lu\n", qp->user_qp.qp.qp_num, chunk_idx);
 
 			/***** NOTIFY ******/
 			TIMING("chunk_notify");
@@ -1273,6 +1289,21 @@ skip_payload_encryption:
 
 			bytes_sent += true_payload_bytes;
 			chunks_in_wr++;
+
+
+			/*if (is_read_internal){
+				while (pthread_mutex_trylock(&chunk_info->in_transit_lock) != 0)
+				{
+					err = cvmrdma_cq_server_run_once_if_idle_send(ctxt, qp->provider_cq, NULL);
+					if(err < 0)
+					{
+						fprintf(stderr, "Polling the CQ after a post_send failed %d\n", err);
+						exit(1);
+					}
+				}
+				pthread_mutex_unlock(&chunk_info->in_transit_lock);
+			}*/
+			
 
 			/* try to dequeue some SEND WC from the CQ (if no other thread is polling the CQ) */
 			if(qp->send_lines_full >= DIVIDE_ROUND_UP(cvmrdma_ack_threshold, 200))
