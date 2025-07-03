@@ -886,7 +886,8 @@ static int post_send_do_bounce(struct cvmrdma_qp * qp, struct ibv_send_wr *wrs, 
 	struct ibv_qp_ex * prov_qpx = ibv_qp_to_qp_ex(prov_qp);
 
 
-	for(struct ibv_send_wr * this_wr = wrs ; this_wr != NULL ; this_wr = this_wr->next)
+	//for(struct ibv_send_wr * this_wr = wrs ; this_wr != NULL ; this_wr = this_wr->next)
+	struct ibv_send_wr * this_wr = wrs;
 	{
 		enum ibv_wr_opcode this_op = this_wr->opcode;
 		uint32_t this_imm = this_wr->imm_data;
@@ -1656,8 +1657,8 @@ CVMRDMAServer * tcp_server = NULL;
 
 bool cvmrdma_disable_cache = false;
 uint64_t cvmrdma_chunk_bytes = 2048 * 4096;
-uint64_t cvmrdma_ring_entries = 64;
-uint64_t cvmrdma_ack_threshold = DIVIDE_ROUND_UP(64, 2);
+uint64_t cvmrdma_ring_entries = 4;
+uint64_t cvmrdma_ack_threshold = DIVIDE_ROUND_UP(4, 2);
 // it should always hold (cvmrdma_chunk_bytes * cvmrdma_ring_entires) < 64 * 2048 * 4096 = 536870912 bytes = 512 MiB
 static struct verbs_context *cvmrdma_alloc_context(struct ibv_device *ibdev,
 						  int cmd_fd,
@@ -1729,7 +1730,7 @@ static struct verbs_context *cvmrdma_alloc_context(struct ibv_device *ibdev,
 
 		// the size of our ring buffer is limited to 512 MiB
 		// we need to claculate how many entries we can fit into the ring buffer depending on the chunk size
-		cvmrdma_ring_entries = 536870912 / (cvmrdma_chunk_bytes);
+		cvmrdma_ring_entries = CVMRDMA_RING_BUFFER_SIZE / (cvmrdma_chunk_bytes);
 		fprintf(stderr, "CVMRDMA_CHUNK_BYTES set to %lu, ring entries set to %lu\n", cvmrdma_chunk_bytes, cvmrdma_ring_entries);
 		cvmrdma_ack_threshold = DIVIDE_ROUND_UP(cvmrdma_ring_entries, 2);
 	} 
