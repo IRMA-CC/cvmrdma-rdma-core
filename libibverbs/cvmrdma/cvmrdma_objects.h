@@ -7,6 +7,7 @@
 
 #include "crypto.h"
 #include "recv_metadata.h"
+#include "read_metadata.h"
 #include "send_metadata.h"
 #include "chunk_queue.h"
 #include "cvmrdma_network_client.h"
@@ -208,6 +209,8 @@ struct cvmrdma_qp {
 	QpRecvMetadata *recv_metadata;
 	int cur_sge_idx;
 	size_t cur_offt_in_sge;
+
+	QpReadMetadata *read_metadata;
 
 	/* Count the number of bytes recvd in this WR, to report in the WC */
 	size_t wr_bytes_rcved;
