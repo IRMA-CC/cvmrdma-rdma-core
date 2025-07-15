@@ -86,7 +86,6 @@ void* fault_handler_thread(void* arg) {
 
         // make all pages of the chunk as writable
         uint64_t alinged_start = msg.arg.pagefault.address - (offt % cvmrdma_chunk_bytes);
-
         size_t wp_len = (alinged_start - (uint64_t)user_mr->addr) + cvmrdma_chunk_bytes > user_mr->length ? user_mr->length - (alinged_start - (uint64_t)user_mr->addr) : cvmrdma_chunk_bytes;
 
 #ifdef ROUND_TO_PAGE_SIZE
@@ -94,6 +93,7 @@ void* fault_handler_thread(void* arg) {
         size_t page_size = sysconf(_SC_PAGESIZE);
         wp_len = ((wp_len + page_size - 1) / page_size) * page_size;
 #endif
+
 
         struct uffdio_writeprotect uffdio_wp = {
             .range = {
@@ -104,6 +104,7 @@ void* fault_handler_thread(void* arg) {
         };
         DEBUG("[CACHE] start = %llx; len = %llx\n", uffdio_wp.range.start, uffdio_wp.range.len);
         DEBUG("[CACHE] alinged_start = %llx; user_mr->length = %x user_mr->addr = %llx\n", alinged_start, user_mr->length, (uint64_t)user_mr->addr);
+        
         if (ioctl(uffd, UFFDIO_WRITEPROTECT, &uffdio_wp) == -1) {
             fprintf(stderr, "[CACHE] ioctl-UFFDIO_WRITEPROTECT: %d\n", errno);
             exit(1);

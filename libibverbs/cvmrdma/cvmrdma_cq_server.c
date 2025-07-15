@@ -360,7 +360,7 @@ static int cq_server_loop_once(struct cvmrdma_context * ctxt, struct ibv_cq * pr
                     payload_start[12], payload_start[13], payload_start[14], payload_start[15],
                     payload_start[16], payload_start[17]);
 
-                /*struct uffdio_writeprotect uffdio_wp = {
+                struct uffdio_writeprotect uffdio_wp = {
                     .range = {
                         .start = decrypted,
                         .len = cvmrdma_chunk_bytes,
@@ -370,7 +370,7 @@ static int cq_server_loop_once(struct cvmrdma_context * ctxt, struct ibv_cq * pr
                 if (ioctl(cur_mr->uffd, UFFDIO_WRITEPROTECT, &uffdio_wp) == -1) {
                     fprintf(stderr, "[CACHE] ioctl-UFFDIO_WRITEPROTECT: %d\n", errno);
                     exit(1);
-                }*/
+                }
             }
 
             unsigned long long payload_mlen = cvmrdma_chunk_bytes;
