@@ -265,7 +265,9 @@ static int cq_server_loop_once(struct cvmrdma_context * ctxt, struct ibv_cq * pr
                 offt = hca_addr - cur_mr->hca_va;
                 dest = (unsigned char *)cur_mr->user_mr.ibv_mr.addr + offt;
 
-                if(notif.chunk_len == cvmrdma_chunk_bytes){
+                // the chunk offset needs to be 0, otherwise the encrypted chunk
+                // saved will not match the state of the chunk in the user memory region
+                if(notif.chunk_len == cvmrdma_chunk_bytes && notif.chunk_offt == 0){
                     decrypted = dest;
                     bypass_scatter = true;
                 }
@@ -288,8 +290,10 @@ static int cq_server_loop_once(struct cvmrdma_context * ctxt, struct ibv_cq * pr
                 cur_mr = get_bounce_metadata_for_lkey(pd->bounce_metadata, cur_sge->lkey);
                 assert(cur_mr);
 
+                // the chunk offset needs to be 0, otherwise the encrypted chunk
+                // saved will not match the state of the chunk in the user memory region
                 if(notif.chunk_len == cvmrdma_chunk_bytes 
-                    && qp->cur_offt_in_sge + notif.chunk_len <= cur_sge->length)
+                    && qp->cur_offt_in_sge + notif.chunk_len <= cur_sge->length && notif.chunk_offt == 0)
                 {
                     /* can write directly to dest! */
                     unsigned char * mr_addr = cur_mr->user_mr.ibv_mr.addr;
@@ -356,7 +360,7 @@ static int cq_server_loop_once(struct cvmrdma_context * ctxt, struct ibv_cq * pr
                     payload_start[12], payload_start[13], payload_start[14], payload_start[15],
                     payload_start[16], payload_start[17]);
 
-                struct uffdio_writeprotect uffdio_wp = {
+                /*struct uffdio_writeprotect uffdio_wp = {
                     .range = {
                         .start = decrypted,
                         .len = cvmrdma_chunk_bytes,
@@ -366,7 +370,7 @@ static int cq_server_loop_once(struct cvmrdma_context * ctxt, struct ibv_cq * pr
                 if (ioctl(cur_mr->uffd, UFFDIO_WRITEPROTECT, &uffdio_wp) == -1) {
                     fprintf(stderr, "[CACHE] ioctl-UFFDIO_WRITEPROTECT: %d\n", errno);
                     exit(1);
-                }
+                }*/
             }
 
             unsigned long long payload_mlen = cvmrdma_chunk_bytes;
@@ -460,11 +464,8 @@ static int cq_server_loop_once(struct cvmrdma_context * ctxt, struct ibv_cq * pr
                     }
                 }
             }
-            else
+            else // bypass scatter
             {
-                // write should never enter this section
-                assert(is_write == false);
-
 
                 struct uffdio_writeprotect uffdio_wp = {
                     .range = {
@@ -477,29 +478,33 @@ static int cq_server_loop_once(struct cvmrdma_context * ctxt, struct ibv_cq * pr
                     fprintf(stderr, "[CQ] ioctl-UFFDIO_WRITEPROTECT: %d\n", errno);
                     exit(1);
                 }
+
                 memcpy(chunk_info->nonce, notif.payload_nonce, cvmrdma_aead_NPUBBYTES);
                 atomic_store(&chunk_info->cached, true);
                 pthread_mutex_unlock(&chunk_info->lock);
                 pthread_mutex_unlock(&chunk_info->in_transit_lock);
 
-
-                /* Record in the QP the number of bytes written during the decrypt (directly to dest) */
-                struct recv_metadata_entry * recv_info = NULL;
-                if (is_send) {
-                    recv_info = qp_recv_metadata_front(qp->recv_metadata);
-                } else if (is_read) {
-                    recv_info = qp_read_metadata_front(qp->read_metadata);
-                }
+                if (is_send || is_read) {
 
 
-                struct ibv_sge * rcv_sgl = recv_info->sgl;
-                struct ibv_sge * cur_sge = &rcv_sgl[qp->cur_sge_idx];
+                    /* Record in the QP the number of bytes written during the decrypt (directly to dest) */
+                    struct recv_metadata_entry * recv_info = NULL;
+                    if (is_send) {
+                        recv_info = qp_recv_metadata_front(qp->recv_metadata);
+                    } else if (is_read) {
+                        recv_info = qp_read_metadata_front(qp->read_metadata);
+                    }
 
-                qp->cur_offt_in_sge += notif.chunk_len;
-                if(qp->cur_offt_in_sge >= cur_sge->length)
-                {
-                    qp->cur_offt_in_sge = 0;
-                    qp->cur_sge_idx++;
+
+                    struct ibv_sge * rcv_sgl = recv_info->sgl;
+                    struct ibv_sge * cur_sge = &rcv_sgl[qp->cur_sge_idx];
+
+                    qp->cur_offt_in_sge += notif.chunk_len;
+                    if(qp->cur_offt_in_sge >= cur_sge->length)
+                    {
+                        qp->cur_offt_in_sge = 0;
+                        qp->cur_sge_idx++;
+                    }
                 }
             }
 
