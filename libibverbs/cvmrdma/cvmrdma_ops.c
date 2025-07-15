@@ -1701,6 +1701,24 @@ static int find_in_array(char const ** array, size_t entries, char const * str)
 	return -1;
 }
 
+static void print_process_name_debug() {
+    char proc_name[256] = {0};
+    FILE *f = fopen("/proc/self/comm", "r");
+    if (f) {
+        if (fgets(proc_name, sizeof(proc_name), f)) {
+            // Remove trailing newline
+            size_t len = strlen(proc_name);
+            if (len > 0 && proc_name[len - 1] == '\n') {
+                proc_name[len - 1] = '\0';
+            }
+            DEBUG("Process name: %s\n", proc_name);
+        }
+        fclose(f);
+    } else {
+        DEBUG("Could not read process name\n");
+    }
+}
+
 _Atomic bool tcp_server_running = false;
 CapnpEvloopThread * evloop_server = NULL;
 CVMRDMAServer * tcp_server = NULL;
@@ -1808,6 +1826,7 @@ static struct verbs_context *cvmrdma_alloc_context(struct ibv_device *ibdev,
 	verbs_set_ops(prov_verbs_context, &verbs_dummy_ops);
 	verbs_set_ops(prov_verbs_context, &cvmrdma_ops);
 
+	print_process_name_debug();
 
 	bool expected = false;
 	bool first = atomic_compare_exchange_strong(&tcp_server_running, &expected, true);
@@ -1815,7 +1834,6 @@ static struct verbs_context *cvmrdma_alloc_context(struct ibv_device *ibdev,
 	{
 		/* Start a new thread with a capnp event loop running the RPC server */
 		cvmrdma_ctx->network_evloop = create_capnp_event_loop(local_bind_addr, &cvmrdma_ctx->network_server);
-		
 		
 		// wait for server to be up
 		DEBUG("Waiting for server to be up\n");
