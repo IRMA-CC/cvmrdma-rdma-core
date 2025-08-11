@@ -987,7 +987,11 @@ static int post_send_do_bounce(struct cvmrdma_qp * qp, struct ibv_send_wr *wrs, 
 		{
 			// generate new metadata nonce for each metadata 
 			uint64_t nonce_metadata[cvmrdma_aead_NPUB_WORDS];
+#ifndef CVMRDMA_DISABLE_TRANSIT_LOCK
 			randombytes_buf(nonce_metadata, cvmrdma_aead_NPUBBYTES);
+#else 
+			memset(nonce_metadata, 0, cvmrdma_aead_NPUBBYTES);
+#endif
 
 			// send the nonce metadata to the remote
 			if (qp->is_loopback) {
@@ -1085,7 +1089,11 @@ static int post_send_do_bounce(struct cvmrdma_qp * qp, struct ibv_send_wr *wrs, 
 			if(!cached) {
 				/* generate new payload nonce */
 				DEBUG("[SEND QPN %x] Generating new nonce for chunk %lu\n", qp->user_qp.qp.qp_num, chunk_idx);
+#ifndef CVMRDMA_DISABLE_TRANSIT_LOCK
 				randombytes_buf(chunk_info->nonce, cvmrdma_aead_NPUBBYTES);
+#else 
+				memset(chunk_info->nonce, 0, cvmrdma_aead_NPUBBYTES);
+#endif
 				DEBUG("[SEND QPN %x] nonce %lx %lx\n", qp->user_qp.qp.qp_num, chunk_info->nonce[0], chunk_info->nonce[1]);
 			}
 
@@ -1104,6 +1112,8 @@ static int post_send_do_bounce(struct cvmrdma_qp * qp, struct ibv_send_wr *wrs, 
 
 			qp_chunk_queue_push(qp->chunk_queue, &entry);
 			DEBUG("[SEND QPN %x] Waiting for chunk lock for chunk %lu\n", qp->user_qp.qp.qp_num, chunk_idx);
+
+#ifndef CVMRDMA_DISABLE_TRANSIT_LOCK
 			while (pthread_mutex_trylock(&chunk_info->in_transit_lock) != 0) {
 				struct cvmrdma_qp * transit_qp = chunk_info->qp_which_holds_transit_lock;
 				
@@ -1118,6 +1128,7 @@ static int post_send_do_bounce(struct cvmrdma_qp * qp, struct ibv_send_wr *wrs, 
 				sched_yield();
 			}
 			chunk_info->qp_which_holds_transit_lock = qp;
+#endif
 			DEBUG("[SEND QPN %x] Acquired chunk lock for chunk %lu\n", qp->user_qp.qp.qp_num, chunk_idx);
 
 			/***** NOTIFY ******/

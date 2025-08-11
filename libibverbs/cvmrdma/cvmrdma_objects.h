@@ -19,6 +19,10 @@
 #include "wr_queue.h"
 #include "nonce_queue.h"
 
+// enabling this will disable the transit lock
+// WARNING: This will very likely lead to decryption errors, so this is for testing only!
+//#define CVMRDMA_DISABLE_TRANSIT_LOCK 0
+
 
 struct cvmrdma_pd {
 	struct ibv_pd user_pd;
@@ -271,6 +275,7 @@ struct chunk_tracking_info {
 	/* If the chink is not dirty this is true */
 	_Atomic bool cached; // 1 byte
 	pthread_mutex_t lock;
+
 	pthread_mutex_t in_transit_lock;
 	struct cvmrdma_qp * qp_which_holds_transit_lock;
 };

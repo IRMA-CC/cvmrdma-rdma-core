@@ -98,8 +98,10 @@ static int cq_server_loop_once(struct cvmrdma_context * ctxt, struct ibv_cq * pr
             // this indicates that the chunk is no longer in transit can be modified again.
             struct chunk_entry * entry = qp_chunk_queue_front(qp->chunk_queue);
             struct cvmrdma_mr * cur_mr = get_bounce_metadata_for_lkey(pd->bounce_metadata, entry->lkey);
+#ifndef CVMRDMA_DISABLE_TRANSIT_LOCK
             struct chunk_tracking_info* chunk_info = &cur_mr->chunk_tracking[entry->chunk_idx];
             pthread_mutex_unlock(&chunk_info->in_transit_lock);
+#endif
             DEBUG("[CQ] send op %d, wrid: 0x%lx done, unlocked chunk lock for chunk %lu\n", op, this_wc->wr_id, entry->chunk_idx);
             qp_chunk_queue_pop(qp->chunk_queue);
             
@@ -227,7 +229,7 @@ static int cq_server_loop_once(struct cvmrdma_context * ctxt, struct ibv_cq * pr
             );
             if(err)
             {
-                DEBUG("WARN for WC %d: Failed to decrypt bounce buffer for notif with key %lx %lx and nonce %lx %lx %lx notif_start[0] %x %x %x %x notif_start %p notif_clen %llu\n", 
+                fprintf(stderr, "WARN for WC %d: Failed to decrypt bounce buffer for notif with key %lx %lx and nonce %lx %lx %lx notif_start[0] %x %x %x %x notif_start %p notif_clen %llu\n", 
                     this_wc->wr_id, shared_key[0], shared_key[1], nonce_metadata[0], nonce_metadata[1], nonce_metadata[2], notif_start[0], notif_start[1], notif_start[2], notif_start[3], notif_start, notif_clen);
                 DEBUG("notif immediate data %d, opcode %d, wc_length %d\n", notif.imm, this_wc->opcode, wc_length);
                     exit(1);
@@ -334,6 +336,7 @@ static int cq_server_loop_once(struct cvmrdma_context * ctxt, struct ibv_cq * pr
                 DEBUG("[CQ] chunk_idx %zu to chunk cache\n", chunk_idx);
                 pthread_mutex_lock(&chunk_info->lock);
 
+#ifndef CVMRDMA_DISABLE_TRANSIT_LOCK
                 while (pthread_mutex_trylock(&chunk_info->in_transit_lock) != 0) {
                     struct cvmrdma_qp * transit_qp = chunk_info->qp_which_holds_transit_lock;
                     
@@ -348,7 +351,7 @@ static int cq_server_loop_once(struct cvmrdma_context * ctxt, struct ibv_cq * pr
                     sched_yield();
                 }
                 chunk_info->qp_which_holds_transit_lock = qp;
-
+#endif
                 payload_start = cur_mr->provider_va + chunk_idx * cvmrdma_ring_slot_bytes(ctxt->aead) +  cvmrdma_header_bytes(ctxt->aead);
 
                 memcpy(payload_start, slot + header_bytes, cvmrdma_ring_slot_bytes(ctxt->aead) - cvmrdma_header_bytes(ctxt->aead));
@@ -482,7 +485,9 @@ static int cq_server_loop_once(struct cvmrdma_context * ctxt, struct ibv_cq * pr
                 memcpy(chunk_info->nonce, notif.payload_nonce, cvmrdma_aead_NPUBBYTES);
                 atomic_store(&chunk_info->cached, true);
                 pthread_mutex_unlock(&chunk_info->lock);
+#ifndef CVMRDMA_DISABLE_TRANSIT_LOCK
                 pthread_mutex_unlock(&chunk_info->in_transit_lock);
+#endif
 
                 if (is_send || is_read) {
 
