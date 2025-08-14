@@ -18,19 +18,15 @@ kj::Promise<void> remote_qp_notify_chunk_recv_rpc(QPNotificationClient * qnc)
 }
 
 
-kj::Promise<void> set_remote_params_rpc(QPNotificationClient * qnc, uint32_t local_ring_rkey, 
-                                        uint32_t local_control_rkey, uint32_t control_qpn, uint32_t control_local_psn)
+kj::Promise<void> set_remote_params_rpc(QPNotificationClient * qnc, uint32_t local_ring_rkey)
 {
     auto req = qnc->setRemoteParamsRequest();
 
     req.setLocalRingRkey(local_ring_rkey);
-    req.setLocalControlRkey(local_control_rkey);
 
-    req.setControlQPN(control_qpn);
-    req.setControlLocalPSN(control_local_psn);
+    DEBUG("[NC] Setting remote params for remote: ring rkey 0x%" PRIx32 "\n",
+        local_ring_rkey);
 
-    DEBUG("[NC] Setting remote params for remote: ring rkey 0x%" PRIx32 ", control rkey 0x%" PRIx32 ", control qpn 0x%" PRIx32 ", control local psn 0x%" PRIx32 "\n",
-        local_ring_rkey, local_control_rkey, control_qpn, control_local_psn);
 
     return req.send().ignoreResult();
 }

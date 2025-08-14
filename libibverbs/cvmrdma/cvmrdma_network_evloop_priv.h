@@ -29,7 +29,7 @@ void destroy_cvmrdma_client(const char* remote_addr, CapnpEvloopThread * evloop,
 /* Get a capability to a given remote QP */
 QPNotificationClient * get_qp_notification_client(const char* remote_addr, CapnpEvloopThread * evloop, CVMRDMAClient * client, uint32_t remote_qpn);
 void set_remote_params(const char* remote_addr, CapnpEvloopThread * evloop, QPNotificationClient *qnc, 
-                       uint32_t local_ring_rkey, uint32_t local_control_rkey, uint32_t control_qpn, uint32_t control_local_psn);
+                       uint32_t local_ring_rkey);
 
 
 void remote_qp_notify_chunk_recv(const char* remote_addr, CapnpEvloopThread *cev, QPNotificationClient *qnc);

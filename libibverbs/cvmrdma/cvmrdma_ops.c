@@ -31,7 +31,6 @@
 #include "cvmrdma_network_client_priv.h"
 #include "cvmrdma_network_server_priv.h"
 #include "cvmrdma_network_evloop_priv.h"
-#include "cvmrdma_control_server.h"
 #include "recv_metadata.h"
 #include "read_metadata.h"
 #include "wc_queue.h"
@@ -226,9 +225,6 @@ static int attach_qp_to_cq_manager(struct cvmrdma_context * ctxt, struct cvmrdma
 		&qp->send_lines_full_lock,
 		&qp->send_lines_avail,
 		&qp->remote_ring_rkey,
-		&qp->remote_control_rkey,
-		&qp->dest_control_qp_num,
-		&qp->control_remote_psn,
 		&qp->remote_params_set,
 		&qp->remote_params_lock,
 		&qp->remote_params_set_cv,
@@ -374,43 +370,6 @@ static struct ibv_qp *cvmrdma_create_qp(struct ibv_pd * ibpd,
 	qp->provider_qp = ibqp;
 	qp->provider_cq = c_cq;
 
-	/* Create the control Completion Queue */
-	struct ibv_cq * control_ibcq = ctxt->prov_ops.create_cq(prov_ctxt, 16384, NULL, 0);
-	if(! control_ibcq)
-	{
-		fprintf(stderr, "failed to create backend CQ for the control CQ\n");
-		exit(1);
-	}
-	/* see ibv_create_cq */
-	verbs_init_cq(control_ibcq, prov_ctxt, NULL, NULL);
-	qp->control_cq = control_ibcq;
-
-	/* Create the control Queue Pair */
-	struct ibv_qp_init_attr_ex control_attr_ex = {0};
-	control_attr_ex.sq_sig_all = 1;
-	control_attr_ex.send_cq = qp->control_cq;
-	control_attr_ex.recv_cq = qp->control_cq;
-
-	control_attr_ex.qp_type = IBV_QPT_RC;
-
-	control_attr_ex.cap.max_recv_sge = 16;
-	control_attr_ex.cap.max_recv_wr = 4096;
-	control_attr_ex.cap.max_send_sge = 16;
-	control_attr_ex.cap.max_send_wr = 4096;
-	control_attr_ex.cap.max_inline_data = 0; /* we're not using inline */
-
-	control_attr_ex.pd = pd->provider_pd;
-	control_attr_ex.send_ops_flags = IBV_QP_EX_WITH_RDMA_WRITE_WITH_IMM;
-	control_attr_ex.comp_mask = IBV_QP_INIT_ATTR_PD | IBV_QP_INIT_ATTR_SEND_OPS_FLAGS;
-
-    struct ibv_qp * control_ibqp = ctxt->prov_ops.create_qp_ex(prov_ctxt, &control_attr_ex);
-    if(! control_ibqp)
-    {
-        goto err;
-    }
-
-	qp->control_qp = control_ibqp;
-
 	/* Initialize user visible fields */
 	qp->user_qp.qp.context = prov_ctxt;
 	qp->user_qp.qp.qp_context = attr->qp_context;
@@ -503,23 +462,6 @@ static struct ibv_qp *cvmrdma_create_qp(struct ibv_pd * ibpd,
 	qp->send_lines_full = 0;
 
 	qp->user_sq_sig_all = attr->sq_sig_all;
-
-	// probably also not needed when sending over ip
-	/* Allocate rungbuffer where the other side writes the ACKs to*/
-	size_t control_rings_bytes = PAGE_SIZE;
-
-	int control_dmabuf_fd = -1;
-	void * control_buf_va = NULL;
-	DEBUG("Allocating control buffer with size %zu for QP %" PRIx32 "\n",  (uint64_t)control_rings_bytes / (1024*1024), ibqp->qp_num);
-	struct ibv_mr * control_buf_mr = alloc_public_mr(ctxt, pd, control_rings_bytes, &control_dmabuf_fd, &control_buf_va);
-    if(! control_buf_mr)
-    {
-        goto free_bounce_private;
-    }
-
-	qp->control_buf_mr = control_buf_mr;
-	qp->control_buf_va = control_buf_va;
-
 
 	/* Initialize the mutex */
 	err = pthread_mutex_init(&qp->send_lines_full_lock, NULL);
@@ -632,7 +574,6 @@ static int cvmrdma_modify_qp(struct ibv_qp *ibqp, struct ibv_qp_attr *attr,
 {
 	struct cvmrdma_qp * qp = (struct cvmrdma_qp *)ibqp;
 	struct ibv_qp * prov_qp = qp->provider_qp;
-	struct ibv_qp * control_qp = qp->control_qp;
 
     struct cvmrdma_context * ctxt = cvmrdma_get_ctx(qp->user_qp.qp.context);
     int ret = 0;
@@ -645,37 +586,6 @@ static int cvmrdma_modify_qp(struct ibv_qp *ibqp, struct ibv_qp_attr *attr,
 
 	/* Update the state on the user-visible qp fields */
 	qp->user_qp.qp.state = prov_qp->state;
-
-
-	/* control QP to INIT*/
-	if((attr_mask & IBV_QP_STATE) && (attr->qp_state == IBV_QPS_INIT)){
-		if (control_qp->state != IBV_QPS_RESET)
-		{
-			fprintf(stderr, "control QP to init is not in RESET state!\n");
-			goto err;
-		}
-
-
-		assert(attr_mask & IBV_QP_PORT);
-		uint8_t myport = attr->port_num;
-		DEBUG("control QP to INIT on port %d\n", myport);
-
-		int qp_attr_mask = IBV_QP_STATE | IBV_QP_PKEY_INDEX | IBV_QP_PORT;
-		struct ibv_qp_attr control_qp_attrs = {
-			.qp_state = IBV_QPS_INIT,
-			.pkey_index = 0,
-			.port_num = myport,
-		};
-		control_qp_attrs.qp_access_flags = IBV_ACCESS_REMOTE_READ | IBV_ACCESS_REMOTE_WRITE;
-		qp_attr_mask |= IBV_QP_ACCESS_FLAGS;
-
-		ret = ctxt->prov_ops.modify_qp(control_qp, &control_qp_attrs, qp_attr_mask);
-		if(ret)
-		{
-			fprintf(stderr, "Failed to modify control QP to INIT\n");
-			goto err;
-		}
-	}
 
 	/* The RPC object need to be connected to send, but this is not required for receive (the RPC server
 	   is already running). However, since the user passes the QPN in the INIT->RTR transition,
@@ -696,7 +606,6 @@ static int cvmrdma_modify_qp(struct ibv_qp *ibqp, struct ibv_qp_attr *attr,
 		qp->dlid = attr->ah_attr.dlid;
 		DEBUG(stderr, "[MODIFY_QP] remote lid %d\n", qp->dlid);
 		srand48(time(NULL));
-		qp->control_local_psn = lrand48() & 0xffffff;
 		qp->is_loopback = is_local;
 
 		char * remote_addr = lookup_ip_by_lid(qp->dlid);
@@ -722,23 +631,6 @@ static int cvmrdma_modify_qp(struct ibv_qp *ibqp, struct ibv_qp_attr *attr,
 			DEBUG("[MODIFY_QP] Already connected to the server\n");
 		}
 
-		/*
-			Setup control qp
-		*/
-		/*struct start_args * start_args = calloc(1, sizeof(struct start_args));
-		struct ibv_ah_attr * ah_attr = calloc(1, sizeof(struct ibv_ah_attr));
-		start_args->ctxt = ctxt;
-		start_args->qp = qp;
-		memcpy(ah_attr, &attr->ah_attr, sizeof(struct ibv_ah_attr));
-		start_args->ah_attr = ah_attr;
-		pthread_t control_start_thread;
-		ret = pthread_create(&control_start_thread, NULL, start_control_server, start_args);
-		if(ret)
-		{
-			fprintf(stderr, "Failed to start control server thread\n");
-			exit(1);
-		}*/
-
 
 		switch(ibqp->qp_type)
 		{
@@ -756,13 +648,13 @@ static int cvmrdma_modify_qp(struct ibv_qp *ibqp, struct ibv_qp_attr *attr,
 						qp->local_addr, ctxt->network_evloop, qp->local_network_client_cap, dest_qpn 
 					);
 					set_remote_params(qp->local_addr,  ctxt->network_evloop, qp->remote_qnc,
-									  qp->ringbuf_mr->rkey, qp->control_buf_mr->rkey, control_qp->qp_num, qp->control_local_psn);
+									  qp->ringbuf_mr->rkey);
 				} else {
 					qp->remote_qnc = get_qp_notification_client(
 						qp->remote_addr, ctxt->network_evloop, qp->remote_network_client_cap, dest_qpn 
 					);
 					set_remote_params(qp->remote_addr, ctxt->network_evloop, qp->remote_qnc,
-									  qp->ringbuf_mr->rkey, qp->control_buf_mr->rkey, control_qp->qp_num, qp->control_local_psn);
+									  qp->ringbuf_mr->rkey);
 				}
 
 				break;
@@ -1560,42 +1452,6 @@ static struct ibv_mr *cvmrdma_reg_mr(struct ibv_pd *ibpd, void *addr, size_t len
 int cvmrdma_destroy_qp(struct ibv_qp *ibqp)
 {
 	struct cvmrdma_qp * qp = (struct cvmrdma_qp *)ibqp;
-	/*void* t_ret;
-	int ret = pthread_cancel(qp->control_server_send_acks_thread);
-	if(ret)
-	{
-		fprintf(stderr, "Failed to cancel control_server_send_acks_thread\n");
-	}
-	ret = pthread_join(qp->control_server_send_acks_thread, &t_ret);
-	if(ret)
-	{
-		fprintf(stderr, "Failed to join control_server_send_acks_thread\n");
-	}
-	if (t_ret != PTHREAD_CANCELED)
-	{
-		fprintf(stderr, "control_server_send_acks_thread was not canceled\n");
-	}
-
-	ret = pthread_cancel(qp->control_server_receive_acks_thread);
-	if(ret)
-	{
-		fprintf(stderr, "Failed to cancel control_server_receive_acks_thread\n");
-	}
-	ret = pthread_join(qp->control_server_receive_acks_thread, &t_ret);
-	if(ret)
-	{
-		fprintf(stderr, "Failed to join control_server_receive_acks_thread\n");
-	}
-	if (t_ret != PTHREAD_CANCELED)
-	{
-		fprintf(stderr, "control_server_receive_acks_thread was not canceled\n");
-	}
-
-	DEBUG("Successfully joined control_server_send_acks_thread and control_server_receive_acks_thread: %ld %ld\n", (long)qp->control_server_send_acks_thread, (long)qp->control_server_receive_acks_thread);
-	*/
-	// TODO(@ANONYMIZED): This should likely do more cleanup
-
-	// by commenting out the above, the server shutsdown too fast, resulting in an error on the client.
 	// TODO: find a way to shutdown the server cleanly
 	usleep(100000);
 

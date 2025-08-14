@@ -139,13 +139,6 @@ struct cvmrdma_qp {
 	/* Note: multiple cvmrdma_qps can point to the same provider_cq */
 	struct cvmrdma_cq *provider_cq;
 
-	/* Second control channel hidden from the user */
-	struct ibv_qp *control_qp;
-	struct ibv_cq *control_cq;
-	uint32_t dest_control_qp_num;
-	uint32_t control_remote_psn;
-	uint32_t control_local_psn;
-
 	/* Key shared between all endpoints used to encrypt payloads.
 	   In contrast, the tx_key and rx_key are unique to the endpoints
 	   and are used to encrypt the nonce for the payload. The nonce for this
@@ -192,17 +185,12 @@ struct cvmrdma_qp {
 	/* qp specific counter of all send messages*/
 	_Atomic uint64_t cvmrdma_qp_send_wr_id;
 
-	/* Ringbuffer where ACKs are written to */
-	struct ibv_mr *control_buf_mr;
-	void *control_buf_va;
-
 	//pthread_t control_server_send_acks_thread;
 	//pthread_t control_server_receive_acks_thread;
 
 	/* Remote params */
 	uint64_t rx_nonce[cvmrdma_aead_NPUB_WORDS];
 	uint32_t remote_ring_rkey;
-	uint32_t remote_control_rkey;
 	bool remote_params_set;
 	pthread_mutex_t remote_params_lock;
 	pthread_cond_t remote_params_set_cv;
@@ -260,10 +248,6 @@ struct cvmrdma_srq {
 	struct verbs_srq user_srq;
 
 	QpRecvMetadata *recv_metadata;
-};
-
-struct control_metadata {
-	uint64_t ack_revc_lines;
 };
 
 /* Keep track of the nonce used to encrypt a certain payload chunk

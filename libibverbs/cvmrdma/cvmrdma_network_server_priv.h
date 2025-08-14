@@ -32,9 +32,6 @@ public:
         pthread_mutex_t * send_lines_lock_ptr,
         pthread_cond_t * send_lines_avail_ptr,
         uint32_t * remote_ring_rkey_ptr,
-        uint32_t * remote_control_rkey_ptr,
-        uint32_t * control_qpn_ptr,
-        uint32_t * control_remote_psn_ptr,
         bool * remote_params_set_ptr,
         pthread_mutex_t *  remote_params_lock_ptr,
         pthread_cond_t * remote_params_set_cv_ptr,
@@ -55,16 +52,13 @@ public:
         return m_qpn;
     }
 
-    void set_qp_remote_params(uint32_t ring_rkey, uint32_t control_rkey, uint32_t control_qpn, uint32_t control_remote_psn)
+    void set_qp_remote_params(uint32_t ring_rkey)
     {
-        DEBUG("[NS] setting ring rkey %" PRIx32 " and control rkey %" PRIx32 " on QNC for local QPN 0x%" PRIx32 ", control QPN 0x%" PRIx32 ", control local PSN 0x%" PRIx32 ", control remote PSN 0x%" PRIx32 "\n",
-            ring_rkey, control_rkey, m_qpn, control_qpn, control_remote_psn);
+        DEBUG("[NS] setting ring rkey %" PRIx32 " on QNC for local QPN 0x%" PRIx32 "\n",
+            ring_rkey, m_qpn);
 
         pthread_mutex_lock(m_remote_params_lock_ptr);
         *m_remote_ring_rkey_ptr = ring_rkey;
-        *m_remote_control_rkey_ptr = control_rkey;
-        *m_control_qpn_ptr = control_qpn;
-        *m_control_remote_psn_ptr = control_remote_psn;
         *m_remote_params_set_ptr = true;
         pthread_mutex_unlock(m_remote_params_lock_ptr);
 
@@ -110,9 +104,6 @@ private:
     uint32_t m_qpn = 0;
 
     uint32_t * m_remote_ring_rkey_ptr = nullptr; 
-    uint32_t * m_remote_control_rkey_ptr = nullptr; 
-    uint32_t * m_control_qpn_ptr = nullptr;
-    uint32_t * m_control_remote_psn_ptr = nullptr;
 	bool * m_remote_params_set_ptr = nullptr;
 	pthread_mutex_t * m_remote_params_lock_ptr = nullptr;
 	pthread_cond_t * m_remote_params_set_cv_ptr = nullptr;
@@ -141,9 +132,6 @@ public:
         pthread_mutex_t * send_lines_lock_ptr,
         pthread_cond_t * send_lines_avail_ptr,
         uint32_t * remote_ring_rkey_ptr,
-        uint32_t * remote_control_rkey_ptr,
-        uint32_t * control_qpn_ptr,
-        uint32_t * control_remote_psn_ptr,
         bool * remote_params_set_ptr,
         pthread_mutex_t *  remote_params_lock_ptr,
         pthread_cond_t * remote_params_set_cv_ptr,
@@ -172,9 +160,6 @@ void cvmrdma_server_register_qp(CVMRDMAServer * cs,
     pthread_mutex_t * send_lines_lock_ptr,
     pthread_cond_t * send_lines_avail_ptr,
     uint32_t * remote_ring_rkey_ptr,
-    uint32_t * remote_control_rkey_ptr,
-    uint32_t * control_qpn_ptr,
-    uint32_t * control_remote_psn_ptr,
     bool * remote_params_set_ptr,
     pthread_mutex_t *  remote_params_lock_ptr,
     pthread_cond_t * remote_params_set_cv_ptr,

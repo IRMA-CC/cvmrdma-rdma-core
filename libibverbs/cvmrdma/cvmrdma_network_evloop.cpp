@@ -275,17 +275,14 @@ QPNotificationClient * get_qp_notification_client(const char* remote_addr, Capnp
 
 
 void set_remote_params(const char* remote_addr, CapnpEvloopThread * evloop, QPNotificationClient *qnc, 
-                       uint32_t local_ring_rkey, uint32_t local_control_rkey, uint32_t control_qpn, uint32_t control_local_psn)
+                       uint32_t local_ring_rkey)
 {
     assert(evloop);
     assert(qnc);
     assert(local_ring_rkey != 0);
-    assert(local_control_rkey != 0);
-    assert(control_qpn != 0);
-    assert(control_local_psn != 0);
     DEBUG("[NE] Setting remote params for remote_addr %s\n", remote_addr);
     evloop->get_executor(remote_addr).executeSync(
-        [=]() { return set_remote_params_rpc(qnc, local_ring_rkey, local_control_rkey, control_qpn, control_local_psn); }
+        [=]() { return set_remote_params_rpc(qnc, local_ring_rkey); }
     );
 }
 
