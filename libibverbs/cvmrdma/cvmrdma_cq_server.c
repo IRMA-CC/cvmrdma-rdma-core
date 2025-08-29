@@ -94,18 +94,25 @@ static int cq_server_loop_once(struct cvmrdma_context * ctxt, struct ibv_cq * pr
 
             DEBUG("[CQ] send op %d, wrid: 0x%lx done, chunks sent %zu send_info->nchunks %zu\n", op, this_wc->wr_id, qp->wr_chunks_sent, send_info->nchunks);
         
-            // when we get a work completiion for a send, we unlock the transit lock
-            // this indicates that the chunk is no longer in transit can be modified again.
-            struct chunk_entry * entry = qp_chunk_queue_front(qp->chunk_queue);
-            struct cvmrdma_mr * cur_mr = get_bounce_metadata_for_lkey(pd->bounce_metadata, entry->lkey);
+
+            if (send_info->no_data_send) {
+                DEBUG("[CQ] send op %d, wrid: 0x%lx done, no data send, unlocking no_data_message_lock\n", op, this_wc->wr_id);
+                pthread_mutex_unlock(&qp->no_data_message_lock);
+            } else {
+
+                // when we get a work completiion for a send, we unlock the transit lock
+                // this indicates that the chunk is no longer in transit can be modified again.
+                struct chunk_entry * entry = qp_chunk_queue_front(qp->chunk_queue);
+                struct cvmrdma_mr * cur_mr = get_bounce_metadata_for_lkey(pd->bounce_metadata, entry->lkey);
 #ifndef CVMRDMA_DISABLE_TRANSIT_LOCK
-            struct chunk_tracking_info* chunk_info = &cur_mr->chunk_tracking[entry->chunk_idx];
-            pthread_mutex_unlock(&chunk_info->in_transit_lock);
+                struct chunk_tracking_info* chunk_info = &cur_mr->chunk_tracking[entry->chunk_idx];
+                pthread_mutex_unlock(&chunk_info->in_transit_lock);
 #endif
-            DEBUG("[CQ] send op %d, wrid: 0x%lx done, unlocked chunk lock for chunk %lu\n", op, this_wc->wr_id, entry->chunk_idx);
-            qp_chunk_queue_pop(qp->chunk_queue);
+                DEBUG("[CQ] send op %d, wrid: 0x%lx done, unlocked chunk lock for chunk %lu\n", op, this_wc->wr_id, entry->chunk_idx);
+                qp_chunk_queue_pop(qp->chunk_queue);
+            }
             
-            if(send_info->nchunks == qp->wr_chunks_sent)
+            if(send_info->nchunks == qp->wr_chunks_sent || send_info->no_data_send)
             {
                 uint64_t wrid = send_info->wrid;
                 size_t bytes = send_info->bytes;
@@ -136,6 +143,15 @@ static int cq_server_loop_once(struct cvmrdma_context * ctxt, struct ibv_cq * pr
                     DEBUG("[CQ] User wrid %lx, byte_len %zu, imm_data %x, opcode %d, qp_num %x, status %d\n", send_wc.wr_id, send_wc.byte_len, send_wc.imm_data, send_wc.opcode, send_wc.qp_num, send_wc.status);
                     struct cvmrdma_cq * scq = (struct cvmrdma_cq *)qp->user_qp.qp.send_cq;
                     wcq_push(scq->wc_queue, &send_wc);
+
+                    uint64_t event = (uintptr_t) scq;
+                    bool expected = 0;
+                    if (atomic_compare_exchange_strong(&scq->comp_channel_event_fd_filled, &expected, 1))
+                    {
+                        DEBUG("[CQ] Writing %p to event fd %d\n", scq, scq->comp_channel_event_fd);
+                        write(scq->comp_channel_event_fd, &event, sizeof(event));
+                    }
+
                 }
             }
 
@@ -246,173 +262,58 @@ static int cq_server_loop_once(struct cvmrdma_context * ctxt, struct ibv_cq * pr
 
             enum ibv_wr_opcode wr_op = notif.op;
             bool is_write = (wr_op == IBV_WR_RDMA_WRITE) || (wr_op == IBV_WR_RDMA_WRITE_WITH_IMM);
-            bool is_send = (wr_op == IBV_WR_SEND) || (wr_op == IBV_WR_RDMA_WRITE_WITH_IMM);
+            bool is_send = (wr_op == IBV_WR_SEND) || (wr_op == IBV_WR_SEND_WITH_IMM);
             bool is_read = (wr_op == IBV_WR_RDMA_READ_INTERNAL);
 
-            // Decrypt directly to destination !
-            bool bypass_scatter = false;
-            void * dest = NULL;
-            uint64_t offt = 0;
-            struct cvmrdma_mr * cur_mr = NULL;
-            if(is_write)
-            {
-                /* The operation is a WRITE: use the remote_addr and rkey provided by the requester. We
-                always write in a contiguous block, so always bypass scatter */
-                uint32_t rkey = notif.rkey;
-                uint64_t hca_addr = notif.hca_addr;
-
-                cur_mr = get_bounce_metadata_for_rkey(pd->bounce_metadata, rkey);
-                assert(cur_mr);
-
-                offt = hca_addr - cur_mr->hca_va;
-                dest = (unsigned char *)cur_mr->user_mr.ibv_mr.addr + offt;
-
-                // the chunk offset needs to be 0, otherwise the encrypted chunk
-                // saved will not match the state of the chunk in the user memory region
-                if(notif.chunk_len == cvmrdma_chunk_bytes && notif.chunk_offt == 0){
-                    decrypted = dest;
-                    bypass_scatter = true;
-                }
+            bool no_data_send = false;
+            if (is_write && notif.rkey == 0 && notif.hca_addr == 0) {
+                // this is a no-data send, we don't have to decrypt the payload
+                no_data_send = true;
+                DEBUG("[CQ] No data send detected for WRITE for wrid 0x%lx, no need to decrypt payload\n", this_wc->wr_id);
             }
-            else if (is_send || is_read)
-            {
-                /* The operation is a SEND: we can only bypass the scatter if the next chunk fits
-                    in the current sge */
+            if (is_send && notif.payload_len == 0) {
+                // this is a no-data send, we don't have to decrypt the payload
+                no_data_send = true;
+                DEBUG("[CQ] No data send detected for SEND for wrid 0x%lx, no need to decrypt payload\n", this_wc->wr_id);
+            }
 
-                struct recv_metadata_entry * recv_info = NULL;
-                if (is_send) {
-                    recv_info = qp_recv_metadata_front(qp->recv_metadata);
-                } else if (is_read) {
-                    recv_info = qp_read_metadata_front(qp->read_metadata);
-                }
-                
-                struct ibv_sge * rcv_sgl = recv_info->sgl;
-                struct ibv_sge * cur_sge = &rcv_sgl[qp->cur_sge_idx];
+            if (no_data_send) {
+                DEBUG("[CQ] no data send notif contents: hca_addr: %lx, op: %d, rkey: %x, imm: %x, chunk_offt: %lu, chunk_len: %lu, last_chunk: %d, payload_len: %lu\n",
+                    notif.hca_addr, notif.op, notif.rkey, notif.imm,
+                    notif.chunk_offt, notif.chunk_len, notif.last_chunk, notif.payload_len);
+            }
 
-                cur_mr = get_bounce_metadata_for_lkey(pd->bounce_metadata, cur_sge->lkey);
-                assert(cur_mr);
+            if (!no_data_send){
 
-                // the chunk offset needs to be 0, otherwise the encrypted chunk
-                // saved will not match the state of the chunk in the user memory region
-                if(notif.chunk_len == cvmrdma_chunk_bytes 
-                    && qp->cur_offt_in_sge + notif.chunk_len <= cur_sge->length && notif.chunk_offt == 0)
+                // Decrypt directly to destination !
+                bool bypass_scatter = false;
+                void * dest = NULL;
+                uint64_t offt = 0;
+                struct cvmrdma_mr * cur_mr = NULL;
+                if(is_write)
                 {
-                    /* can write directly to dest! */
-                    unsigned char * mr_addr = cur_mr->user_mr.ibv_mr.addr;
-                    offt = (cur_sge->addr - cur_mr->hca_va) + qp->cur_offt_in_sge;
+                    /* The operation is a WRITE: use the remote_addr and rkey provided by the requester. We
+                    always write in a contiguous block, so always bypass scatter */
+                    uint32_t rkey = notif.rkey;
+                    uint64_t hca_addr = notif.hca_addr;
 
-                    decrypted = mr_addr + offt;
-                    bypass_scatter = true;
-                }
-            } else {
-                fprintf(stderr, "PROTOCOL ERROR: unexpected op %d in CQ server\n", wr_op);
-                exit(1);
-            }
+                    cur_mr = get_bounce_metadata_for_rkey(pd->bounce_metadata, rkey);
+                    assert(cur_mr);
 
-            unsigned long long payload_clen = notif.payload_len + cvmrdma_ABYTES(aead);
+                    offt = hca_addr - cur_mr->hca_va;
+                    dest = (unsigned char *)cur_mr->user_mr.ibv_mr.addr + offt;
 
-            DEBUG("[CQ] notif.chunk_offt 0x%"PRIx64" and notif.chunk_len %zu\n", notif.chunk_offt, notif.chunk_len);
-            DEBUG("[CQ] clen %llu\n", payload_clen);
-
-            size_t chunk_idx = offt / cvmrdma_chunk_bytes;
-            unsigned char * payload_start = NULL;
-            struct chunk_tracking_info* chunk_info = &cur_mr->chunk_tracking[chunk_idx];
-
-            if (!bypass_scatter || cvmrdma_disable_cache)
-            {
-                /* Copy the payload into private memory */
-                payload_start = private + header_bytes;
-                memcpy(payload_start, slot + header_bytes, payload_clen);
-                DEBUG("[CQ] private + offt %x %x %x %x %x %x %x %x %x %x %x %x %x %x %x %x %x %x\n", 
-                    payload_start[0+notif.chunk_offt], payload_start[1+notif.chunk_offt], payload_start[2+notif.chunk_offt], payload_start[3+notif.chunk_offt],
-                    payload_start[4+notif.chunk_offt], payload_start[5+notif.chunk_offt], payload_start[6+notif.chunk_offt], payload_start[7+notif.chunk_offt],
-                    payload_start[8+notif.chunk_offt], payload_start[9+notif.chunk_offt], payload_start[10+notif.chunk_offt], payload_start[11+notif.chunk_offt],
-                    payload_start[12+notif.chunk_offt], payload_start[13+notif.chunk_offt], payload_start[14+notif.chunk_offt], payload_start[15+notif.chunk_offt],
-                    payload_start[16+notif.chunk_offt], payload_start[17+notif.chunk_offt]);
-            } else {
-                /* Copy the payload into the private chunk cache */
-                // TODO: this is wrong
-                assert(offt % cvmrdma_chunk_bytes == 0);
-                DEBUG("[CQ] chunk_idx %zu to chunk cache\n", chunk_idx);
-                pthread_mutex_lock(&chunk_info->lock);
-
-#ifndef CVMRDMA_DISABLE_TRANSIT_LOCK
-                while (pthread_mutex_trylock(&chunk_info->in_transit_lock) != 0) {
-                    struct cvmrdma_qp * transit_qp = chunk_info->qp_which_holds_transit_lock;
-                    
-                    // Directly poll the CQ to process completions
-                    err = cvmrdma_cq_server_run_once_if_idle_send(ctxt, transit_qp->provider_cq, NULL);
-                    if(err < 0) {
-                        fprintf(stderr, "Polling the CQ failed %d\n", err);
-                        exit(1);
+                    // the chunk offset needs to be 0, otherwise the encrypted chunk
+                    // saved will not match the state of the chunk in the user memory region
+                    if(notif.chunk_len == cvmrdma_chunk_bytes && notif.chunk_offt == 0){
+                        decrypted = dest;
+                        bypass_scatter = true;
                     }
-				
-                    // Brief yield to prevent busy waiting
-                    sched_yield();
                 }
-                chunk_info->qp_which_holds_transit_lock = qp;
-#endif
-                payload_start = cur_mr->provider_va + chunk_idx * cvmrdma_ring_slot_bytes(ctxt->aead) +  cvmrdma_header_bytes(ctxt->aead);
-
-                memcpy(payload_start, slot + header_bytes, cvmrdma_ring_slot_bytes(ctxt->aead) - cvmrdma_header_bytes(ctxt->aead));
-
-                DEBUG("[CQ] payload_start %x %x %x %x %x %x %x %x %x %x %x %x %x %x %x %x %x %x\n", 
-                    payload_start[0], payload_start[1], payload_start[2], payload_start[3],
-                    payload_start[4], payload_start[5], payload_start[6], payload_start[7],
-                    payload_start[8], payload_start[9], payload_start[10], payload_start[11],
-                    payload_start[12], payload_start[13], payload_start[14], payload_start[15],
-                    payload_start[16], payload_start[17]);
-
-                struct uffdio_writeprotect uffdio_wp = {
-                    .range = {
-                        .start = decrypted,
-                        .len = cvmrdma_chunk_bytes,
-                    },
-                    .mode = 0,
-                };
-                if (ioctl(cur_mr->uffd, UFFDIO_WRITEPROTECT, &uffdio_wp) == -1) {
-                    fprintf(stderr, "[CACHE] ioctl-UFFDIO_WRITEPROTECT: %d\n", errno);
-                    exit(1);
-                }
-            }
-
-            unsigned long long payload_mlen = cvmrdma_chunk_bytes;
-            err = cvmrdma_decrypt(
-                decrypted, &payload_mlen,
-                NULL,
-                payload_start, payload_clen,
-                NULL, 0,
-                (unsigned char const *)notif.payload_nonce,
-                (unsigned char const *)shared_key,
-                aead
-            );
-            if(err)
-            {
-                fprintf(stderr, "WARN: Failed to decrypt bounce buffer for payload, exiting.\n");
-                exit(1);
-            }
-
-            DEBUG("[CQ] decrypted %x %x %x %x %x %x %x %x %x %x %x %x %x %x %x %x %x %x\n", decrypted[0+notif.chunk_offt],
-             decrypted[1+notif.chunk_offt], decrypted[2+notif.chunk_offt], decrypted[3+notif.chunk_offt], 
-             decrypted[4+notif.chunk_offt], decrypted[5+notif.chunk_offt], decrypted[6+notif.chunk_offt],
-              decrypted[7+notif.chunk_offt], decrypted[8+notif.chunk_offt], decrypted[9+notif.chunk_offt],
-               decrypted[10+notif.chunk_offt], decrypted[11+notif.chunk_offt], decrypted[12+notif.chunk_offt],
-                decrypted[13+notif.chunk_offt], decrypted[14+notif.chunk_offt], decrypted[15+notif.chunk_offt],
-                 decrypted[16+notif.chunk_offt], decrypted[17+notif.chunk_offt]);
-
-            /*** SCATTER ****/
-            /* Scatter the plaintext to user memory. If the op is a WRITE, the remote has set the destination address,
-                else the op is a SEND and we must use the next chunk in the current recv request */
-
-
-            if(!bypass_scatter || cvmrdma_disable_cache)
-            {
-                if (is_write){
-                    DEBUG("[CQ] WRITE: writing with notif.chunk_offt 0x%"PRIx64" and notif.chunk_len %zu to dest %p for notif.hca_addr %p\n", 
-                          notif.chunk_offt, notif.chunk_len, dest, (void *)notif.hca_addr);
-                    memcpy(dest, decrypted + notif.chunk_offt, notif.chunk_len);
-                } else if (is_send || is_read) {
-                    /* The operation is a SEND: use the next chunk on the current recv request */
+                else if (is_send || is_read)
+                {
+                    /* The operation is a SEND: we can only bypass the scatter if the next chunk fits
+                        in the current sge */
 
                     struct recv_metadata_entry * recv_info = NULL;
                     if (is_send) {
@@ -420,97 +321,240 @@ static int cq_server_loop_once(struct cvmrdma_context * ctxt, struct ibv_cq * pr
                     } else if (is_read) {
                         recv_info = qp_read_metadata_front(qp->read_metadata);
                     }
-                    struct ibv_sge * rcv_sgl = recv_info->sgl;
-                    int rcv_nsge = recv_info->nsge;
                     
-                    size_t bytes_copied = 0;
-
-                    while((bytes_copied < notif.chunk_len) && (qp->cur_sge_idx < rcv_nsge))
-                    {
-                        struct ibv_sge * cur_sge = &rcv_sgl[qp->cur_sge_idx];
-                        assert(cur_mr);
-                        unsigned char * mr_addr = cur_mr->user_mr.ibv_mr.addr;
-
-
-                        size_t remaining = notif.chunk_len - bytes_copied;
-                        assert(cur_sge);
-                        size_t available = cur_sge->length - qp->cur_offt_in_sge;
-
-                        uint64_t offt = (cur_sge->addr - cur_mr->hca_va) + qp->cur_offt_in_sge;
-
-                        if(remaining < available)
-                        {
-                            DEBUG("[CQ] SEND: copying %zu bytes from notif.chunk_offt %zu to offt %zu\n", remaining, notif.chunk_offt + bytes_copied, offt);
-                            memcpy(mr_addr + offt, decrypted + notif.chunk_offt + bytes_copied, remaining);
-                            bytes_copied += remaining;
-                            qp->cur_offt_in_sge += remaining;
-                        }
-                        else
-                        {
-                            DEBUG("[CQ] SEND: copying %zu bytes from notif.chunk_offt %zu to offt %zu\n", available, notif.chunk_offt + bytes_copied, offt);
-                            memcpy(mr_addr + offt, decrypted + notif.chunk_offt + bytes_copied, available);
-                            bytes_copied += available;
-                            
-                            /* move to next sge */
-                            qp->cur_sge_idx++;
-                            qp->cur_offt_in_sge = 0;
-                        }
-                    }
-
-
-                    if(bytes_copied < notif.chunk_len)
-                    {
-                        /* Early loop exit bc the sglist is empty. This is an error ! */
-                        fprintf(stderr, "Incoming chunk would exceed the end of the receive request! (notif.chunk_len 0x%"PRIx64" > recv %zu)\n", notif.chunk_len, bytes_copied);
-                        exit(1);
-                        /* TODO: emit IBV_WC_LOC_LEN_ERR in WC status for user !*/
-                    }
-                }
-            }
-            else // bypass scatter
-            {
-
-                struct uffdio_writeprotect uffdio_wp = {
-                    .range = {
-                        .start = (unsigned long) decrypted,
-                        .len = cvmrdma_chunk_bytes,
-                    },
-                    .mode = UFFDIO_WRITEPROTECT_MODE_WP,
-                };
-                if (ioctl(cur_mr->uffd, UFFDIO_WRITEPROTECT, &uffdio_wp) == -1) {
-                    fprintf(stderr, "[CQ] ioctl-UFFDIO_WRITEPROTECT: %d\n", errno);
-                    exit(1);
-                }
-
-                memcpy(chunk_info->nonce, notif.payload_nonce, cvmrdma_aead_NPUBBYTES);
-                atomic_store(&chunk_info->cached, true);
-                pthread_mutex_unlock(&chunk_info->lock);
-#ifndef CVMRDMA_DISABLE_TRANSIT_LOCK
-                pthread_mutex_unlock(&chunk_info->in_transit_lock);
-#endif
-
-                if (is_send || is_read) {
-
-
-                    /* Record in the QP the number of bytes written during the decrypt (directly to dest) */
-                    struct recv_metadata_entry * recv_info = NULL;
-                    if (is_send) {
-                        recv_info = qp_recv_metadata_front(qp->recv_metadata);
-                    } else if (is_read) {
-                        recv_info = qp_read_metadata_front(qp->read_metadata);
-                    }
-
-
                     struct ibv_sge * rcv_sgl = recv_info->sgl;
                     struct ibv_sge * cur_sge = &rcv_sgl[qp->cur_sge_idx];
 
-                    qp->cur_offt_in_sge += notif.chunk_len;
-                    if(qp->cur_offt_in_sge >= cur_sge->length)
+                    cur_mr = get_bounce_metadata_for_lkey(pd->bounce_metadata, cur_sge->lkey);
+                    assert(cur_mr);
+
+                    // the chunk offset needs to be 0, otherwise the encrypted chunk
+                    // saved will not match the state of the chunk in the user memory region
+                    if(notif.chunk_len == cvmrdma_chunk_bytes 
+                        && qp->cur_offt_in_sge + notif.chunk_len <= cur_sge->length && notif.chunk_offt == 0)
                     {
-                        qp->cur_offt_in_sge = 0;
-                        qp->cur_sge_idx++;
+                        /* can write directly to dest! */
+                        unsigned char * mr_addr = cur_mr->user_mr.ibv_mr.addr;
+                        offt = (cur_sge->addr - cur_mr->hca_va) + qp->cur_offt_in_sge;
+
+                        decrypted = mr_addr + offt;
+                        bypass_scatter = true;
+                    }
+                } else {
+                    fprintf(stderr, "PROTOCOL ERROR: unexpected op %d in CQ server\n", wr_op);
+                    exit(1);
+                }
+
+
+                unsigned long long payload_clen = notif.payload_len + cvmrdma_ABYTES(aead);
+
+                DEBUG("[CQ] notif.chunk_offt 0x%"PRIx64" and notif.chunk_len %zu\n", notif.chunk_offt, notif.chunk_len);
+                DEBUG("[CQ] clen %llu\n", payload_clen);
+
+                size_t chunk_idx = offt / cvmrdma_chunk_bytes;
+                unsigned char * payload_start = NULL;
+                struct chunk_tracking_info* chunk_info = &cur_mr->chunk_tracking[chunk_idx];
+
+                if (!bypass_scatter || cvmrdma_disable_cache)
+                {
+                    /* Copy the payload into private memory */
+                    payload_start = private + header_bytes;
+                    memcpy(payload_start, slot + header_bytes, payload_clen);
+                    DEBUG("[CQ] private + offt %x %x %x %x %x %x %x %x %x %x %x %x %x %x %x %x %x %x\n", 
+                        payload_start[0+notif.chunk_offt], payload_start[1+notif.chunk_offt], payload_start[2+notif.chunk_offt], payload_start[3+notif.chunk_offt],
+                        payload_start[4+notif.chunk_offt], payload_start[5+notif.chunk_offt], payload_start[6+notif.chunk_offt], payload_start[7+notif.chunk_offt],
+                        payload_start[8+notif.chunk_offt], payload_start[9+notif.chunk_offt], payload_start[10+notif.chunk_offt], payload_start[11+notif.chunk_offt],
+                        payload_start[12+notif.chunk_offt], payload_start[13+notif.chunk_offt], payload_start[14+notif.chunk_offt], payload_start[15+notif.chunk_offt],
+                        payload_start[16+notif.chunk_offt], payload_start[17+notif.chunk_offt]);
+                } else {
+                    /* Copy the payload into the private chunk cache */
+                    // TODO: this is wrong
+                    assert(offt % cvmrdma_chunk_bytes == 0);
+                    DEBUG("[CQ] chunk_idx %zu to chunk cache\n", chunk_idx);
+                    pthread_mutex_lock(&chunk_info->lock);
+
+#ifndef CVMRDMA_DISABLE_TRANSIT_LOCK
+                    while (pthread_mutex_trylock(&chunk_info->in_transit_lock) != 0) {
+                        struct cvmrdma_qp * transit_qp = chunk_info->qp_which_holds_transit_lock;
+                        
+                        // Directly poll the CQ to process completions
+                        err = cvmrdma_cq_server_run_once_if_idle_send(ctxt, transit_qp->provider_cq, NULL);
+                        if(err < 0) {
+                            fprintf(stderr, "Polling the CQ failed %d\n", err);
+                            exit(1);
+                        }
+                    
+                        // Brief yield to prevent busy waiting
+                        sched_yield();
+                    }
+                    chunk_info->qp_which_holds_transit_lock = qp;
+#endif
+                    payload_start = cur_mr->provider_va + chunk_idx * cvmrdma_ring_slot_bytes(ctxt->aead) +  cvmrdma_header_bytes(ctxt->aead);
+
+                    memcpy(payload_start, slot + header_bytes, cvmrdma_ring_slot_bytes(ctxt->aead) - cvmrdma_header_bytes(ctxt->aead));
+
+                    DEBUG("[CQ] payload_start %x %x %x %x %x %x %x %x %x %x %x %x %x %x %x %x %x %x\n", 
+                        payload_start[0], payload_start[1], payload_start[2], payload_start[3],
+                        payload_start[4], payload_start[5], payload_start[6], payload_start[7],
+                        payload_start[8], payload_start[9], payload_start[10], payload_start[11],
+                        payload_start[12], payload_start[13], payload_start[14], payload_start[15],
+                        payload_start[16], payload_start[17]);
+
+                    struct uffdio_writeprotect uffdio_wp = {
+                        .range = {
+                            .start = decrypted,
+                            .len = cvmrdma_chunk_bytes,
+                        },
+                        .mode = 0,
+                    };
+                    if (ioctl(cur_mr->uffd, UFFDIO_WRITEPROTECT, &uffdio_wp) == -1) {
+                        fprintf(stderr, "[CACHE] ioctl-UFFDIO_WRITEPROTECT: %d\n", errno);
+                        exit(1);
                     }
                 }
+
+                unsigned long long payload_mlen = cvmrdma_chunk_bytes;
+                err = cvmrdma_decrypt(
+                    decrypted, &payload_mlen,
+                    NULL,
+                    payload_start, payload_clen,
+                    NULL, 0,
+                    (unsigned char const *)notif.payload_nonce,
+                    (unsigned char const *)shared_key,
+                    aead
+                );
+                if(err)
+                {
+                    fprintf(stderr, "WARN: Failed to decrypt bounce buffer for payload, exiting.\n");
+                    exit(1);
+                }
+
+                DEBUG("[CQ] decrypted %x %x %x %x %x %x %x %x %x %x %x %x %x %x %x %x %x %x\n", decrypted[0+notif.chunk_offt],
+                decrypted[1+notif.chunk_offt], decrypted[2+notif.chunk_offt], decrypted[3+notif.chunk_offt], 
+                decrypted[4+notif.chunk_offt], decrypted[5+notif.chunk_offt], decrypted[6+notif.chunk_offt],
+                decrypted[7+notif.chunk_offt], decrypted[8+notif.chunk_offt], decrypted[9+notif.chunk_offt],
+                decrypted[10+notif.chunk_offt], decrypted[11+notif.chunk_offt], decrypted[12+notif.chunk_offt],
+                    decrypted[13+notif.chunk_offt], decrypted[14+notif.chunk_offt], decrypted[15+notif.chunk_offt],
+                    decrypted[16+notif.chunk_offt], decrypted[17+notif.chunk_offt]);
+
+                /*** SCATTER ****/
+                /* Scatter the plaintext to user memory. If the op is a WRITE, the remote has set the destination address,
+                    else the op is a SEND and we must use the next chunk in the current recv request */
+
+
+                if(!bypass_scatter || cvmrdma_disable_cache)
+                {
+                    if (is_write){
+                        DEBUG("[CQ] WRITE: writing with notif.chunk_offt 0x%"PRIx64" and notif.chunk_len %zu to dest %p for notif.hca_addr %p\n", 
+                            notif.chunk_offt, notif.chunk_len, dest, (void *)notif.hca_addr);
+                        memcpy(dest, decrypted + notif.chunk_offt, notif.chunk_len);
+                    } else if (is_send || is_read) {
+                        /* The operation is a SEND: use the next chunk on the current recv request */
+
+                        struct recv_metadata_entry * recv_info = NULL;
+                        if (is_send) {
+                            recv_info = qp_recv_metadata_front(qp->recv_metadata);
+                        } else if (is_read) {
+                            recv_info = qp_read_metadata_front(qp->read_metadata);
+                        }
+                        struct ibv_sge * rcv_sgl = recv_info->sgl;
+                        int rcv_nsge = recv_info->nsge;
+
+                        if (rcv_nsge <= 0) {
+                            fprintf(stderr, "PROTOCOL ERROR: recv request has no SGE entries!\n");
+                            exit(1);
+                        }
+                        
+                        size_t bytes_copied = 0;
+
+                        while((bytes_copied < notif.chunk_len) && (qp->cur_sge_idx < rcv_nsge))
+                        {
+                            struct ibv_sge * cur_sge = &rcv_sgl[qp->cur_sge_idx];
+                            assert(cur_mr);
+                            unsigned char * mr_addr = cur_mr->user_mr.ibv_mr.addr;
+
+
+                            size_t remaining = notif.chunk_len - bytes_copied;
+                            assert(cur_sge);
+                            size_t available = cur_sge->length - qp->cur_offt_in_sge;
+
+                            uint64_t offt = (cur_sge->addr - cur_mr->hca_va) + qp->cur_offt_in_sge;
+
+                            if(remaining < available)
+                            {
+                                DEBUG("[CQ] SEND: copying %zu bytes from notif.chunk_offt %zu to offt %zu\n", remaining, notif.chunk_offt + bytes_copied, offt);
+                                memcpy(mr_addr + offt, decrypted + notif.chunk_offt + bytes_copied, remaining);
+                                bytes_copied += remaining;
+                                qp->cur_offt_in_sge += remaining;
+                            }
+                            else
+                            {
+                                DEBUG("[CQ] SEND: copying %zu bytes from notif.chunk_offt %zu to offt %zu\n", available, notif.chunk_offt + bytes_copied, offt);
+                                memcpy(mr_addr + offt, decrypted + notif.chunk_offt + bytes_copied, available);
+                                bytes_copied += available;
+                                
+                                /* move to next sge */
+                                qp->cur_sge_idx++;
+                                qp->cur_offt_in_sge = 0;
+                            }
+                        }
+
+
+                        if(bytes_copied < notif.chunk_len)
+                        {
+                            /* Early loop exit bc the sglist is empty. This is an error ! */
+                            fprintf(stderr, "Incoming chunk would exceed the end of the receive request! (notif.chunk_len 0x%"PRIx64" > recv %zu)\n", notif.chunk_len, bytes_copied);
+                            exit(1);
+                            /* TODO: emit IBV_WC_LOC_LEN_ERR in WC status for user !*/
+                        }
+                    }
+                }
+                else // bypass scatter
+                {
+
+                    struct uffdio_writeprotect uffdio_wp = {
+                        .range = {
+                            .start = (unsigned long) decrypted,
+                            .len = cvmrdma_chunk_bytes,
+                        },
+                        .mode = UFFDIO_WRITEPROTECT_MODE_WP,
+                    };
+                    if (ioctl(cur_mr->uffd, UFFDIO_WRITEPROTECT, &uffdio_wp) == -1) {
+                        fprintf(stderr, "[CQ] ioctl-UFFDIO_WRITEPROTECT: %d\n", errno);
+                        exit(1);
+                    }
+
+                    memcpy(chunk_info->nonce, notif.payload_nonce, cvmrdma_aead_NPUBBYTES);
+                    atomic_store(&chunk_info->cached, true);
+                    pthread_mutex_unlock(&chunk_info->lock);
+    #ifndef CVMRDMA_DISABLE_TRANSIT_LOCK
+                    pthread_mutex_unlock(&chunk_info->in_transit_lock);
+    #endif
+
+                    if (is_send || is_read) {
+
+
+                        /* Record in the QP the number of bytes written during the decrypt (directly to dest) */
+                        struct recv_metadata_entry * recv_info = NULL;
+                        if (is_send) {
+                            recv_info = qp_recv_metadata_front(qp->recv_metadata);
+                        } else if (is_read) {
+                            recv_info = qp_read_metadata_front(qp->read_metadata);
+                        }
+
+
+                        struct ibv_sge * rcv_sgl = recv_info->sgl;
+                        struct ibv_sge * cur_sge = &rcv_sgl[qp->cur_sge_idx];
+
+                        qp->cur_offt_in_sge += notif.chunk_len;
+                        if(qp->cur_offt_in_sge >= cur_sge->length)
+                        {
+                            qp->cur_offt_in_sge = 0;
+                            qp->cur_sge_idx++;
+                        }
+                    }
+                }
+
             }
 
             qp->wr_bytes_rcved += notif.chunk_len;
@@ -559,6 +603,15 @@ static int cq_server_loop_once(struct cvmrdma_context * ctxt, struct ibv_cq * pr
                     if(send_info->send_signaled || qp->user_sq_sig_all) {
                         struct cvmrdma_cq * scq = (struct cvmrdma_cq *)qp->user_qp.qp.send_cq;
                         wcq_push(scq->wc_queue, &send_wc);
+
+                        uint64_t event = (uintptr_t) scq;
+                        bool expected = 0;
+                        if (atomic_compare_exchange_strong(&scq->comp_channel_event_fd_filled, &expected, 1))
+                        {
+                            DEBUG("[CQ] Writing %p to event fd %d\n", scq, scq->comp_channel_event_fd);
+                            write(scq->comp_channel_event_fd, &event, sizeof(event));
+                        }
+
                     }
 
                     // Do not write into the fd file as below, because this is a notification
@@ -598,7 +651,7 @@ static int cq_server_loop_once(struct cvmrdma_context * ctxt, struct ibv_cq * pr
                         }
                     }
                     assert(wc_op != 0);
-                    assert(qp->wr_bytes_rcved > 0);
+                    // assert(qp->wr_bytes_rcved > 0);
 
                     struct ibv_wc recv_wc = {
                         .byte_len = qp->wr_bytes_rcved,

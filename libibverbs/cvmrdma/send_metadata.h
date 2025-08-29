@@ -18,6 +18,7 @@ struct send_metadata_entry
     bool write_for_read;
     // If user has set SEND_SIGNALED, we need to send a WC back to the user
     bool send_signaled;
+    bool no_data_send; // if true, this OP does not send any data, just metadata
 };
 
 
@@ -36,7 +37,7 @@ typedef struct QpSendMetadata QpSendMetadata;
 QpSendMetadata * alloc_qp_send_metadata(void);
 void free_qp_send_metadata(QpSendMetadata * send_metadata);
 
-void qp_send_metadata_push(QpSendMetadata * send_metadata_manager, uint64_t wrid, enum ibv_wr_opcode op, size_t bytes, size_t nchunks, bool write_for_read, bool send_signaled);
+void qp_send_metadata_push(QpSendMetadata * send_metadata_manager, uint64_t wrid, enum ibv_wr_opcode op, size_t bytes, size_t nchunks, bool write_for_read, bool send_signaled, bool no_data_send);
 struct send_metadata_entry * qp_send_metadata_front(QpSendMetadata * send_metadata);
 void qp_send_metadata_pop(QpSendMetadata * send_metadata);
 

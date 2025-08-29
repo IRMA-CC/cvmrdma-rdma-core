@@ -14,7 +14,7 @@ void free_qp_send_metadata(QpSendMetadata * send_metadata)
     delete send_metadata;
 }
 
-void qp_send_metadata_push(QpSendMetadata * send_metadata_manager, uint64_t wrid, enum ibv_wr_opcode op, size_t bytes, size_t nchunks, bool write_for_read, bool send_signaled)
+void qp_send_metadata_push(QpSendMetadata * send_metadata_manager, uint64_t wrid, enum ibv_wr_opcode op, size_t bytes, size_t nchunks, bool write_for_read, bool send_signaled, bool no_data_send)
 {
     DEBUG("[SM] push SEND metadata: currently has %zu entries\n", send_metadata_manager->queue.size());
     struct send_metadata_entry entry = {
@@ -23,7 +23,8 @@ void qp_send_metadata_push(QpSendMetadata * send_metadata_manager, uint64_t wrid
         .bytes = bytes,
         .nchunks = nchunks,
         .write_for_read = write_for_read,
-        .send_signaled = send_signaled
+        .send_signaled = send_signaled,
+        .no_data_send = no_data_send,
     };
 
     send_metadata_manager->queue.push(entry);

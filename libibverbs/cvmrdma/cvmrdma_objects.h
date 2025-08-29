@@ -170,6 +170,12 @@ struct cvmrdma_qp {
 	void *ringbuf_va;
 	int ringbuf_dmabuf_fd;
 
+	struct ibv_mr *no_data_message_mr;
+	void *no_data_message_mr_va;
+	int no_data_message_mr_fd;
+	pthread_mutex_t no_data_message_lock;
+
+
 	int next_send_slot;
 	int next_recv_slot;
 	/* Amount of entries in the send line

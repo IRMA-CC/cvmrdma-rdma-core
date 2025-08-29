@@ -22,24 +22,24 @@ struct ibv_send_wr* wrq_front(WRQueue * wrq)
 void wrq_pop(WRQueue * wrq)
 {
     struct ibv_send_wr * wr = &wrq->front();
-    delete [] wr->sg_list;
+    if (wr->sg_list != nullptr) {
+        delete [] wr->sg_list;
+    }
     wrq->pop();
 }
 
 void wrq_push(WRQueue * wrq, struct ibv_send_wr * wr)
 {
-    struct ibv_send_wr * wr_copy = new ibv_send_wr{};
-
-    // The sgl is a _list_ not an array that simply can be copied. It contains a next pointer after all.
-    assert(wr->num_sge == 1);
-
-    struct ibv_sge * sgl_entry = new ibv_sge[1];
-
-    memcpy(sgl_entry, wr->sg_list, sizeof(struct ibv_sge));
-
     struct ibv_send_wr entry = {};
     memcpy(&entry, wr, sizeof(struct ibv_send_wr));
-    entry.sg_list = sgl_entry;
+
+    if (wr->num_sge > 0) {
+        struct ibv_sge * sgl_entry = new ibv_sge[wr->num_sge];
+        memcpy(sgl_entry, wr->sg_list, sizeof(struct ibv_sge) * wr->num_sge);
+        entry.sg_list = sgl_entry;
+    } else {
+        entry.sg_list = nullptr;
+    }
 
     wrq->push(entry);
 }
