@@ -266,7 +266,7 @@ static int cq_server_loop_once(struct cvmrdma_context * ctxt, struct ibv_cq * pr
             bool is_read = (wr_op == IBV_WR_RDMA_READ_INTERNAL);
 
             bool no_data_send = false;
-            if (is_write && notif.rkey == 0 && notif.hca_addr == 0) {
+            if (is_write && (notif.rkey <= 0 || notif.hca_addr < 0)) {
                 // this is a no-data send, we don't have to decrypt the payload
                 no_data_send = true;
                 DEBUG("[CQ] No data send detected for WRITE for wrid 0x%lx, no need to decrypt payload\n", this_wc->wr_id);
@@ -275,6 +275,11 @@ static int cq_server_loop_once(struct cvmrdma_context * ctxt, struct ibv_cq * pr
                 // this is a no-data send, we don't have to decrypt the payload
                 no_data_send = true;
                 DEBUG("[CQ] No data send detected for SEND for wrid 0x%lx, no need to decrypt payload\n", this_wc->wr_id);
+            }
+            if (is_read && notif.payload_len == 0) {
+                // this is a no-data send, we don't have to decrypt the payload
+                no_data_send = true;
+                DEBUG("[CQ] No data send detected for READ for wrid 0x%lx, no need to decrypt payload\n", this_wc->wr_id);
             }
 
             if (no_data_send) {
