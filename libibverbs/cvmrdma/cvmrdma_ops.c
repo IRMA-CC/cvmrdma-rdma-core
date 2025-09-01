@@ -502,12 +502,6 @@ static struct ibv_qp *cvmrdma_create_qp(struct ibv_pd * ibpd,
 		fprintf(stderr, "Failed to initialize the CVMRDMA send_lines_avail cond var %d\n", err);
 		goto dereg_ring_mr;
 	}
-	err = pthread_cond_init(&qp->recv_lines_ack, NULL);
-	if(err)
-	{
-		fprintf(stderr, "Failed to initialize the CVMRDMA recv_lines_ack cond var %d\n", err);
-		goto dereg_ring_mr;
-	}
 
 	err = attach_qp_to_cq_manager(ctxt, qp);
 	if(err)

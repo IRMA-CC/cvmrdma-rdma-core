@@ -159,8 +159,6 @@ struct cvmrdma_qp {
 	pthread_mutex_t send_lines_full_lock;
 	/* Notifies that new send lines are available */
 	pthread_cond_t send_lines_avail;
-	/* Notifies the ACK server to run */
-	pthread_cond_t recv_lines_ack;
 
 	/* Reserved chunks to gather, encrypt / scatter, decrypt */
 	void *bounce_private_mem;
