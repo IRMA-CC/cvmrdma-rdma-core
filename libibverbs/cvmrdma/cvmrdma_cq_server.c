@@ -145,8 +145,8 @@ static int cq_server_loop_once(struct cvmrdma_context * ctxt, struct ibv_cq * pr
                     wcq_push(scq->wc_queue, &send_wc);
 
                     uint64_t event = (uintptr_t) scq;
-                    bool expected = 0;
-                    if (atomic_compare_exchange_strong(&scq->comp_channel_event_fd_filled, &expected, 1))
+                    bool expected = 1;
+                    if (atomic_compare_exchange_strong(&scq->comp_channel_event_fd_filled, &expected, 0))
                     {
                         DEBUG("[CQ] Writing %p to event fd %d\n", scq, scq->comp_channel_event_fd);
                         write(scq->comp_channel_event_fd, &event, sizeof(event));
@@ -605,8 +605,8 @@ static int cq_server_loop_once(struct cvmrdma_context * ctxt, struct ibv_cq * pr
                         wcq_push(scq->wc_queue, &send_wc);
 
                         uint64_t event = (uintptr_t) scq;
-                        bool expected = 0;
-                        if (atomic_compare_exchange_strong(&scq->comp_channel_event_fd_filled, &expected, 1))
+                        bool expected = 1;
+                        if (atomic_compare_exchange_strong(&scq->comp_channel_event_fd_filled, &expected, 0))
                         {
                             DEBUG("[CQ] Writing %p to event fd %d\n", scq, scq->comp_channel_event_fd);
                             write(scq->comp_channel_event_fd, &event, sizeof(event));
@@ -670,8 +670,8 @@ static int cq_server_loop_once(struct cvmrdma_context * ctxt, struct ibv_cq * pr
                     // Pointer to cq struct, see verbs.c:603
                     uint64_t event = (uintptr_t) rcq;
                     
-                    bool expected = 0;
-                    if (atomic_compare_exchange_strong(&rcq->comp_channel_event_fd_filled, &expected, 1))
+                    bool expected = 1;
+                    if (atomic_compare_exchange_strong(&rcq->comp_channel_event_fd_filled, &expected, 0))
                     {
                         DEBUG("[CQ] Writing %p to event fd %d\n", rcq, rcq->comp_channel_event_fd);
                         write(rcq->comp_channel_event_fd, &event, sizeof(event));
@@ -777,7 +777,7 @@ void* cvmrdma_cq_wait_completion_event(void* c_cq) {
         // Toggle between busy polling and waiting for event
         // Since the event waiting seems to have problems (cf. the gam benchmark)
         // we still busy poll.
-        if(false) {
+        if(true) {
             // verbs.c:632 ibv_get_cq_event
             // This emulates:
             // ret = ibv_get_cq_event(cq->provider_comp_channel, &ev_cq, &ev_ctx);
@@ -797,19 +797,19 @@ void* cvmrdma_cq_wait_completion_event(void* c_cq) {
             DEBUG("[CQ] Got CQ event\n");
             assert(ev_cq == cq->prov_cq_recv || ev_cq == cq->prov_cq_send);
 
-            /* Request notification upon the next completion event */
-            ret = context->prov_ops.req_notify_cq(ev_cq, 0);
-            if (ret) {
-                fprintf(stderr, "Couldn't request CQ notification\n");
-                exit(1);
-            }
-
             // This emulates:
             // ibv_ack_cq_events(ev_cq, 1);
             pthread_mutex_lock(&ev_cq->mutex);
             ev_cq->comp_events_completed += 1;
             pthread_cond_signal(&ev_cq->cond);
             pthread_mutex_unlock(&ev_cq->mutex);
+
+            /* Request notification upon the next completion event */
+            ret = context->prov_ops.req_notify_cq(ev_cq, 0);
+            if (ret) {
+                fprintf(stderr, "Couldn't request CQ notification\n");
+                exit(1);
+            }
 
             if(ev_cq == cq->prov_cq_recv) {
                 do {

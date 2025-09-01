@@ -183,8 +183,8 @@ static struct ibv_cq *cvmrdma_create_cq(struct ibv_context *ibcontext, int cqe,
 	verbs_init_cq(ibcq_send, ibcontext, cq->provider_comp_channel, NULL);
 	cq->prov_cq_send = ibcq_send;
 
-	ret = ctxt->prov_ops.req_notify_cq(ibcq_send, 0);
 	if(channel != NULL) {
+		ret = ctxt->prov_ops.req_notify_cq(ibcq_send, 0);
 		if(ret)
 		{
 			fprintf(stderr, "Failed to request CQ notifications for send %d\n", ret);
@@ -1681,15 +1681,17 @@ static struct ibv_srq *cvmrdma_create_srq(struct ibv_pd *ibpd, struct ibv_srq_in
 
 static int cvmrdma_req_notify_cq(struct ibv_cq *ibcq, int solicited_only)
 {
+	struct cvmrdma_cq * cq = (struct cvmrdma_cq *)ibcq;
+	struct cvmrdma_context * ctxt = cvmrdma_get_ctx(cq->user_cq.cq.context);
+	bool expected = 0;
+	atomic_compare_exchange_strong(&cq->comp_channel_event_fd_filled, &expected, 1);
+
 	return 0;
 }
 
 static void cvmrdma_cq_event(struct ibv_cq *ibcq)
 {
-	struct cvmrdma_cq * cq = (struct cvmrdma_cq *)ibcq;
-	struct cvmrdma_context * ctxt = cvmrdma_get_ctx(cq->user_cq.cq.context);
-	bool expected = 1;
-	atomic_compare_exchange_strong(&cq->comp_channel_event_fd_filled, &expected, 0);
+	// we don't need to handle anything special when the event is detected by the application.
 	return;
 }
 
