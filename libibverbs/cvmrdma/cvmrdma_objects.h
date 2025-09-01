@@ -1,6 +1,7 @@
 #pragma once
 
 #include <pthread.h>
+#include <semaphore.h>
 
 #include <infiniband/driver.h>
 #include <stdatomic.h>
@@ -158,8 +159,6 @@ struct cvmrdma_qp {
 	pthread_mutex_t send_lines_full_lock;
 	/* Notifies that new send lines are available */
 	pthread_cond_t send_lines_avail;
-	/* Protect received_lines */
-	pthread_mutex_t received_lines_lock;
 	/* Notifies the ACK server to run */
 	pthread_cond_t recv_lines_ack;
 
@@ -173,7 +172,7 @@ struct cvmrdma_qp {
 	struct ibv_mr *no_data_message_mr;
 	void *no_data_message_mr_va;
 	int no_data_message_mr_fd;
-	pthread_mutex_t no_data_message_lock;
+	sem_t no_data_message_sem;
 
 
 	int next_send_slot;
@@ -266,8 +265,7 @@ struct chunk_tracking_info {
 	_Atomic bool cached; // 1 byte
 	pthread_mutex_t lock;
 
-	pthread_mutex_t in_transit_lock;
-	struct cvmrdma_qp * qp_which_holds_transit_lock;
+	sem_t in_transit_sem;
 };
 
 extern bool cvmrdma_disable_cache;

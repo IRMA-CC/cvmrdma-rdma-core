@@ -150,8 +150,10 @@ static struct ibv_cq *cvmrdma_create_cq(struct ibv_context *ibcontext, int cqe,
 	if(channel) {
 		assert(channel->fd >= 0);
 		cq->comp_channel_event_fd = channel->fd;
-		cq->provider_comp_channel = ibv_create_comp_channel_prov(ibcontext);
 	}
+	// always create a completion channel for the provider cq.
+	// This ensures cvmrdma will always get notifications on arrival.
+	cq->provider_comp_channel = ibv_create_comp_channel_prov(ibcontext);
 	/* Create the recv CQ */
 	struct ibv_cq * ibcq_recv = ctxt->prov_ops.create_cq(ibcontext, 16384, cq->provider_comp_channel, 0);
 	if(! ibcq_recv)
@@ -162,13 +164,11 @@ static struct ibv_cq *cvmrdma_create_cq(struct ibv_context *ibcontext, int cqe,
 	/* see ibv_create_cq */
 	verbs_init_cq(ibcq_recv, ibcontext, cq->provider_comp_channel, NULL);
 
-	if(channel != NULL) {
-		ret = ctxt->prov_ops.req_notify_cq(ibcq_recv, 0);
-		if(ret)
-		{
-			fprintf(stderr, "Failed to request CQ notifications for recv %d\n", ret);
-			exit(1);
-		}
+	ret = ctxt->prov_ops.req_notify_cq(ibcq_recv, 0);
+	if(ret)
+	{
+		fprintf(stderr, "Failed to request CQ notifications for recv %d\n", ret);
+		exit(1);
 	}
 	cq->prov_cq_recv = ibcq_recv;
 
@@ -183,13 +183,11 @@ static struct ibv_cq *cvmrdma_create_cq(struct ibv_context *ibcontext, int cqe,
 	verbs_init_cq(ibcq_send, ibcontext, cq->provider_comp_channel, NULL);
 	cq->prov_cq_send = ibcq_send;
 
-	if(channel != NULL) {
-		ret = ctxt->prov_ops.req_notify_cq(ibcq_send, 0);
-		if(ret)
-		{
-			fprintf(stderr, "Failed to request CQ notifications for send %d\n", ret);
-			exit(1);
-		}
+	ret = ctxt->prov_ops.req_notify_cq(ibcq_send, 0);
+	if(ret)
+	{
+		fprintf(stderr, "Failed to request CQ notifications for send %d\n", ret);
+		exit(1);
 	}
 
 	return &cq->user_cq.cq;
@@ -458,10 +456,10 @@ static struct ibv_qp *cvmrdma_create_qp(struct ibv_pd * ibpd,
 	qp->no_data_message_mr_fd = no_data_message_mr_fd;
 	qp->no_data_message_mr_va = no_data_message_mr_va;
 
-	err = pthread_mutex_init(&qp->no_data_message_lock, NULL);
+	err = sem_init(&qp->no_data_message_sem, 0, 1);
 	if(err)
 	{
-		fprintf(stderr, "Failed to initialize the CVMRDMA no_data_message_lock mutex %d\n", err);
+		fprintf(stderr, "Failed to initialize the CVMRDMA no_data_message_sem semaphore %d\n", err);
 		goto dereg_ring_mr;
 	}
 
@@ -498,12 +496,6 @@ static struct ibv_qp *cvmrdma_create_qp(struct ibv_pd * ibpd,
 		fprintf(stderr, "Failed to initialize the CVMRDMA send_lines_full_lock mutex %d\n", err);
 		goto dereg_ring_mr;
 	}
-	err = pthread_mutex_init(&qp->received_lines_lock, NULL);
-	if(err)
-	{
-		fprintf(stderr, "Failed to initialize the CVMRDMA received_lines_lock mutex %d\n", err);
-		goto dereg_ring_mr;
-	}
 	err = pthread_cond_init(&qp->send_lines_avail, NULL);
 	if(err)
 	{
@@ -526,13 +518,11 @@ static struct ibv_qp *cvmrdma_create_qp(struct ibv_pd * ibpd,
 
 	// Since the actual application is likely to not poll the cq all the time,
 	// we need another trigger to wake up the cq server.
-	if(c_cq->provider_comp_channel != NULL) {
-		err = pthread_create(&c_cq->provider_comp_channel_thread, NULL, &cvmrdma_cq_wait_completion_event, (void *)c_cq);
-		if (err)
-		{
-			fprintf(stderr, "Error creating cvmrdma_cq_wait_completion_event thread: %d\n", err);
-			exit(1);
-		}
+	err = pthread_create(&c_cq->provider_comp_channel_thread, NULL, &cvmrdma_cq_wait_completion_event, (void *)c_cq);
+	if (err)
+	{
+		fprintf(stderr, "Error creating cvmrdma_cq_wait_completion_event thread: %d\n", err);
+		exit(1);
 	}
 
 	/* We can only get the capability to the remote QP once we know its QPN, this will be done
@@ -877,15 +867,15 @@ static int post_send_do_bounce(struct cvmrdma_qp * qp, struct ibv_send_wr *wrs, 
 		uint32_t rkey = this_wr->wr.rdma.rkey;
 		uint64_t remote_addr = this_wr->wr.rdma.remote_addr;
 
-		if (rkey == 0) {
+		if (rkey <= 0) {
 			DEBUG("[SEND QPN %x] rkey is invalid: 0x%x\n", qp->user_qp.qp.qp_num, rkey);
 		}
-		if (remote_addr == 0) {
+		if (remote_addr < 0) {
 			DEBUG("[SEND QPN %x] remote_addr is invalid: 0x%lx\n", qp->user_qp.qp.qp_num, remote_addr);
 		}
 
 		bool no_data_send = false;
-		if (nsge == 0 || (rkey == 0 && is_write) || (remote_addr == 0 && is_write)) {
+		if (nsge == 0 || (rkey <= 0 && is_write) || (remote_addr < 0 && is_write)) {
 			nsge = 0; // should already be 0, but just to be sure
 			no_data_send = true;
 		}
@@ -1060,20 +1050,7 @@ static int post_send_do_bounce(struct cvmrdma_qp * qp, struct ibv_send_wr *wrs, 
 			DEBUG("[SEND QPN %x] Waiting for chunk lock for chunk %lu\n", qp->user_qp.qp.qp_num, chunk_idx);
 
 #ifndef CVMRDMA_DISABLE_TRANSIT_LOCK
-			while (pthread_mutex_trylock(&chunk_info->in_transit_lock) != 0) {
-				struct cvmrdma_qp * transit_qp = chunk_info->qp_which_holds_transit_lock;
-				
-				// Directly poll the CQ to process completions
-				err = cvmrdma_cq_server_run_once_if_idle_send(ctxt, transit_qp->provider_cq, NULL);
-				if(err < 0) {
-					fprintf(stderr, "Polling the CQ failed %d\n", err);
-					exit(1);
-				}
-				
-				// Brief yield to prevent busy waiting
-				sched_yield();
-			}
-			chunk_info->qp_which_holds_transit_lock = qp;
+			sem_wait(&chunk_info->in_transit_sem);
 #endif
 			DEBUG("[SEND QPN %x] Acquired chunk lock for chunk %lu\n", qp->user_qp.qp.qp_num, chunk_idx);
 
@@ -1248,7 +1225,7 @@ skip_payload_encryption:
 			chunks_in_wr++;
 
 			/* try to dequeue some SEND WC from the CQ (if no other thread is polling the CQ) */
-			if(qp->send_lines_full >= DIVIDE_ROUND_UP(cvmrdma_ack_threshold, 200))
+			/*if(qp->send_lines_full >= DIVIDE_ROUND_UP(cvmrdma_ack_threshold, 200))
 			{
 				err = cvmrdma_cq_server_run_once_if_idle_send(ctxt, qp->provider_cq, NULL);
 				if(err < 0)
@@ -1256,7 +1233,7 @@ skip_payload_encryption:
 					fprintf(stderr, "Polling the CQ after a post_send failed %d\n", err);
 					exit(1);
 				}
-			}
+			}*/
 		}
 
 
@@ -1302,7 +1279,7 @@ skip_payload_encryption:
 			}
 
 			DEBUG("[SEND QPN %x] Waiting for no-data message lock\n", qp->user_qp.qp.qp_num);
-			pthread_mutex_lock(&qp->no_data_message_lock);
+			sem_wait(&qp->no_data_message_sem);
 			DEBUG("[SEND QPN %x] Acquired no-data message lock\n", qp->user_qp.qp.qp_num);
 			unsigned char * slot = qp->no_data_message_mr_va;
 
@@ -1389,7 +1366,7 @@ skip_payload_encryption:
 				exit(1);
 			}
 
-			if(qp->send_lines_full >= DIVIDE_ROUND_UP(cvmrdma_ack_threshold, 200))
+			/*if(qp->send_lines_full >= DIVIDE_ROUND_UP(cvmrdma_ack_threshold, 200))
 			{
 				err = cvmrdma_cq_server_run_once_if_idle_send(ctxt, qp->provider_cq, NULL);
 				if(err < 0)
@@ -1397,7 +1374,7 @@ skip_payload_encryption:
 					fprintf(stderr, "Polling the CQ after a post_send failed %d\n", err);
 					exit(1);
 				}
-			}
+			}*/
 		}
 
 	}
@@ -1480,7 +1457,9 @@ static int cvmrdma_query_port(struct ibv_context *ibctxt, uint8_t port_num,
 }
 
 
-_Atomic uint64_t cvmrdma_mr_id = 0;
+// the 0 iod is not given to a mr in default libibverbs, we
+// therefore start counting from 1 for cvmrdma_mr_id
+_Atomic uint64_t cvmrdma_mr_id = 1;
 static struct ibv_mr *cvmrdma_reg_mr(struct ibv_pd *ibpd, void *addr, size_t length,
         uint64_t hca_va, int access)
 {
@@ -1556,7 +1535,7 @@ static struct ibv_mr *cvmrdma_reg_mr(struct ibv_pd *ibpd, void *addr, size_t len
 	for (uint64_t i = 0; i < num_chunks; i++)
 	{
 		pthread_mutex_init(&mr->chunk_tracking[i].lock, NULL);
-		pthread_mutex_init(&mr->chunk_tracking[i].in_transit_lock, NULL);
+		sem_init(&mr->chunk_tracking[i].in_transit_sem, 0, 1);
 	}
 
 

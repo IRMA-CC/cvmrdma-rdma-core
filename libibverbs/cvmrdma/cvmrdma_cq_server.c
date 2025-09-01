@@ -97,7 +97,7 @@ static int cq_server_loop_once(struct cvmrdma_context * ctxt, struct ibv_cq * pr
 
             if (send_info->no_data_send) {
                 DEBUG("[CQ] send op %d, wrid: 0x%lx done, no data send, unlocking no_data_message_lock\n", op, this_wc->wr_id);
-                pthread_mutex_unlock(&qp->no_data_message_lock);
+                sem_post(&qp->no_data_message_sem);
             } else {
 
                 // when we get a work completiion for a send, we unlock the transit lock
@@ -106,7 +106,7 @@ static int cq_server_loop_once(struct cvmrdma_context * ctxt, struct ibv_cq * pr
                 struct cvmrdma_mr * cur_mr = get_bounce_metadata_for_lkey(pd->bounce_metadata, entry->lkey);
 #ifndef CVMRDMA_DISABLE_TRANSIT_LOCK
                 struct chunk_tracking_info* chunk_info = &cur_mr->chunk_tracking[entry->chunk_idx];
-                pthread_mutex_unlock(&chunk_info->in_transit_lock);
+                sem_post(&chunk_info->in_transit_sem);
 #endif
                 DEBUG("[CQ] send op %d, wrid: 0x%lx done, unlocked chunk lock for chunk %lu\n", op, this_wc->wr_id, entry->chunk_idx);
                 qp_chunk_queue_pop(qp->chunk_queue);
@@ -374,20 +374,7 @@ static int cq_server_loop_once(struct cvmrdma_context * ctxt, struct ibv_cq * pr
                     pthread_mutex_lock(&chunk_info->lock);
 
 #ifndef CVMRDMA_DISABLE_TRANSIT_LOCK
-                    while (pthread_mutex_trylock(&chunk_info->in_transit_lock) != 0) {
-                        struct cvmrdma_qp * transit_qp = chunk_info->qp_which_holds_transit_lock;
-                        
-                        // Directly poll the CQ to process completions
-                        err = cvmrdma_cq_server_run_once_if_idle_send(ctxt, transit_qp->provider_cq, NULL);
-                        if(err < 0) {
-                            fprintf(stderr, "Polling the CQ failed %d\n", err);
-                            exit(1);
-                        }
-                    
-                        // Brief yield to prevent busy waiting
-                        sched_yield();
-                    }
-                    chunk_info->qp_which_holds_transit_lock = qp;
+                    sem_wait(&chunk_info->in_transit_sem);
 #endif
                     payload_start = cur_mr->provider_va + chunk_idx * cvmrdma_ring_slot_bytes(ctxt->aead) +  cvmrdma_header_bytes(ctxt->aead);
 
@@ -528,7 +515,7 @@ static int cq_server_loop_once(struct cvmrdma_context * ctxt, struct ibv_cq * pr
                     atomic_store(&chunk_info->cached, true);
                     pthread_mutex_unlock(&chunk_info->lock);
     #ifndef CVMRDMA_DISABLE_TRANSIT_LOCK
-                    pthread_mutex_unlock(&chunk_info->in_transit_lock);
+                    sem_post(&chunk_info->in_transit_sem);
     #endif
 
                     if (is_send || is_read) {
@@ -693,15 +680,6 @@ static int cq_server_loop_once(struct cvmrdma_context * ctxt, struct ibv_cq * pr
             } else {
                 remote_qp_notify_chunk_recv(qp->remote_addr, ctxt->network_evloop, qp->remote_qnc);
             }
-            
-
-
-            /*pthread_mutex_lock(&qp->received_lines_lock);
-            if ( ++qp->received_lines >= cvmrdma_ack_threshold)
-            {
-                pthread_cond_signal(&qp->recv_lines_ack);
-            }
-            pthread_mutex_unlock(&qp->received_lines_lock);*/
         }
     }
 
