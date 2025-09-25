@@ -68,7 +68,14 @@ static int cq_server_loop_once(struct cvmrdma_context * ctxt, struct ibv_cq * pr
 
         if(status != IBV_WC_SUCCESS)
         {
-            fprintf(stderr, "CQ server WARN: WC reports failure status: %d, vendor err %d\n", status, this_wc->vendor_err);
+            //fprintf(stderr, "ibv_wc_loc_prot_error %d, ibv_wc_wr_flush_err %d \n", IBV_WC_LOC_PROT_ERR, IBV_WC_WR_FLUSH_ERR);
+            if (status != IBV_WC_WR_FLUSH_ERR){
+                fprintf(stderr, "CQ server WARN: WC reports failure status: %d, vendor err %d\n", status, this_wc->vendor_err);
+            } else 
+            {
+                DEBUG("CQ server: WC reports flush status: %d, vendor err %d\n", status, this_wc->vendor_err);
+            }
+
             if(op == IBV_WC_SEND) {
                 struct cvmrdma_mr* mr = NULL;
                 int k = 0;
@@ -104,10 +111,8 @@ static int cq_server_loop_once(struct cvmrdma_context * ctxt, struct ibv_cq * pr
                 // this indicates that the chunk is no longer in transit can be modified again.
                 struct chunk_entry * entry = qp_chunk_queue_front(qp->chunk_queue);
                 struct cvmrdma_mr * cur_mr = get_bounce_metadata_for_lkey(pd->bounce_metadata, entry->lkey);
-#ifndef CVMRDMA_DISABLE_TRANSIT_LOCK
                 struct chunk_tracking_info* chunk_info = &cur_mr->chunk_tracking[entry->chunk_idx];
                 sem_post(&chunk_info->in_transit_sem);
-#endif
                 DEBUG("[CQ] send op %d, wrid: 0x%lx done, unlocked chunk lock for chunk %lu\n", op, this_wc->wr_id, entry->chunk_idx);
                 qp_chunk_queue_pop(qp->chunk_queue);
             }
@@ -158,7 +163,6 @@ static int cq_server_loop_once(struct cvmrdma_context * ctxt, struct ibv_cq * pr
         }
         else
         {
-            TIMING("cq_serv_wc_recv");
             /* A SEND WR has happened : per CVMRDMA procotol, it has to be a WRITE_WITH_IMM of a chunk in the ring buffer */
 
             if(op != IBV_WC_RECV_RDMA_WITH_IMM)
@@ -208,8 +212,6 @@ static int cq_server_loop_once(struct cvmrdma_context * ctxt, struct ibv_cq * pr
             qp->next_recv_slot = (this_recv_slot_id + 1) % cvmrdma_ring_entries;
 
 
-            TIMING("cds_t0");
-
 
             /**** DECRYPT *****/
             /* Decrypt the notification, then the payload 
@@ -228,10 +230,15 @@ static int cq_server_loop_once(struct cvmrdma_context * ctxt, struct ibv_cq * pr
 
             uint64_t nonce_metadata[cvmrdma_aead_NPUB_WORDS];
             DEBUG("[CQ] waiting for nonce\n");
+#ifndef CVMRDMA_DISABLE_SECURE_SECONDARY_CHANNEL
             struct nonce_entry * nonce_entry = qp_nonce_queue_front(qp->nonce_queue);
             memcpy(&nonce_metadata, nonce_entry->nonce, cvmrdma_aead_NPUBBYTES);
             qp_nonce_queue_pop(qp->nonce_queue);
-            DEBUG("[CQ] got nonce %lx %lx %lx\n", nonce_metadata[0], nonce_metadata[1], nonce_metadata[2]);
+#else
+            memset(nonce_metadata, 0, cvmrdma_aead_NPUBBYTES);
+#endif
+            fprintf(stderr, "[CQ] got nonce %lx %lx %lx\n", nonce_metadata[0], nonce_metadata[1], nonce_metadata[2]);
+            //clock_gettime(CLOCK_MONOTONIC, &t_wait_for_nonce);
 
             unsigned long long notif_mlen = sizeof(notif);
             err = cvmrdma_decrypt(
@@ -360,37 +367,44 @@ static int cq_server_loop_once(struct cvmrdma_context * ctxt, struct ibv_cq * pr
                 unsigned char * payload_start = NULL;
                 struct chunk_tracking_info* chunk_info = &cur_mr->chunk_tracking[chunk_idx];
 
+
+                pthread_mutex_lock(&chunk_info->lock);
+
+                //clock_gettime(CLOCK_MONOTONIC, &t_sem_wait_start);
+                sem_wait(&chunk_info->in_transit_sem);
+                //clock_gettime(CLOCK_MONOTONIC, &t_sem_wait_end);
+
                 if (!bypass_scatter || cvmrdma_disable_cache)
                 {
                     /* Copy the payload into private memory */
                     payload_start = private + header_bytes;
                     memcpy(payload_start, slot + header_bytes, payload_clen);
-                    DEBUG("[CQ] private + offt %x %x %x %x %x %x %x %x %x %x %x %x %x %x %x %x %x %x\n", 
+                    //fprintf(stderr, "[CQ] chunk offset %lu", notif.chunk_offt);
+                    /*fprintf(stderr,"[CQ] private + offt %x %x %x %x %x %x %x %x %x %x %x %x %x %x %x %x %x %x\n", 
                         payload_start[0+notif.chunk_offt], payload_start[1+notif.chunk_offt], payload_start[2+notif.chunk_offt], payload_start[3+notif.chunk_offt],
                         payload_start[4+notif.chunk_offt], payload_start[5+notif.chunk_offt], payload_start[6+notif.chunk_offt], payload_start[7+notif.chunk_offt],
                         payload_start[8+notif.chunk_offt], payload_start[9+notif.chunk_offt], payload_start[10+notif.chunk_offt], payload_start[11+notif.chunk_offt],
                         payload_start[12+notif.chunk_offt], payload_start[13+notif.chunk_offt], payload_start[14+notif.chunk_offt], payload_start[15+notif.chunk_offt],
-                        payload_start[16+notif.chunk_offt], payload_start[17+notif.chunk_offt]);
+                        payload_start[16+notif.chunk_offt], payload_start[17+notif.chunk_offt]);*/
+                    // if we bypass by decrypting directly to user memory, we need to invalidate the cache
+                    // because this new data needs to be encrypted and saved in the chunk cache next time we send.
+                    atomic_store(&chunk_info->cached, false);
+                    fprintf(stderr, "[CQ] not bypass scatter or cache disabled, invalidated chunk cache for chunk %zu\n", chunk_idx);
                 } else {
                     /* Copy the payload into the private chunk cache */
                     // TODO: this is wrong
                     assert(offt % cvmrdma_chunk_bytes == 0);
                     DEBUG("[CQ] chunk_idx %zu to chunk cache\n", chunk_idx);
-                    pthread_mutex_lock(&chunk_info->lock);
-
-#ifndef CVMRDMA_DISABLE_TRANSIT_LOCK
-                    sem_wait(&chunk_info->in_transit_sem);
-#endif
                     payload_start = cur_mr->provider_va + chunk_idx * cvmrdma_ring_slot_bytes(ctxt->aead) +  cvmrdma_header_bytes(ctxt->aead);
 
                     memcpy(payload_start, slot + header_bytes, cvmrdma_ring_slot_bytes(ctxt->aead) - cvmrdma_header_bytes(ctxt->aead));
 
-                    DEBUG("[CQ] payload_start %x %x %x %x %x %x %x %x %x %x %x %x %x %x %x %x %x %x\n", 
+                    /*fprintf(stderr, "[CQ] payload_start %x %x %x %x %x %x %x %x %x %x %x %x %x %x %x %x %x %x\n", 
                         payload_start[0], payload_start[1], payload_start[2], payload_start[3],
                         payload_start[4], payload_start[5], payload_start[6], payload_start[7],
                         payload_start[8], payload_start[9], payload_start[10], payload_start[11],
                         payload_start[12], payload_start[13], payload_start[14], payload_start[15],
-                        payload_start[16], payload_start[17]);
+                        payload_start[16], payload_start[17]);*/
 
                     struct uffdio_writeprotect uffdio_wp = {
                         .range = {
@@ -399,11 +413,15 @@ static int cq_server_loop_once(struct cvmrdma_context * ctxt, struct ibv_cq * pr
                         },
                         .mode = 0,
                     };
+                    fprintf(stderr, "[CQ] Making chunk %llu writable again. addr=%llx, len=%llx\n", chunk_idx, decrypted, cvmrdma_chunk_bytes);
+
                     if (ioctl(cur_mr->uffd, UFFDIO_WRITEPROTECT, &uffdio_wp) == -1) {
                         fprintf(stderr, "[CACHE] ioctl-UFFDIO_WRITEPROTECT: %d\n", errno);
                         exit(1);
                     }
                 }
+
+                //clock_gettime(CLOCK_MONOTONIC, &t_decrypt_data3);
 
                 unsigned long long payload_mlen = cvmrdma_chunk_bytes;
                 err = cvmrdma_decrypt(
@@ -421,7 +439,15 @@ static int cq_server_loop_once(struct cvmrdma_context * ctxt, struct ibv_cq * pr
                     exit(1);
                 }
 
-                DEBUG("[CQ] decrypted %x %x %x %x %x %x %x %x %x %x %x %x %x %x %x %x %x %x\n", decrypted[0+notif.chunk_offt],
+                //clock_gettime(CLOCK_MONOTONIC, &t_decrypt_data4);
+
+                /*fprintf(stderr, "[RECV] ptxt bytes:");
+                for (uint64_t i = 0; i < (cvmrdma_chunk_bytes > 16 ? 16 : cvmrdma_chunk_bytes); i++) {
+                    fprintf(stderr, "%02x", ((unsigned char *)decrypted)[i]);
+                }
+                fprintf(stderr, "\n");*/
+
+                fprintf(stderr, "[CQ] decrypted %x %x %x %x %x %x %x %x %x %x %x %x %x %x %x %x %x %x\n", decrypted[0+notif.chunk_offt],
                 decrypted[1+notif.chunk_offt], decrypted[2+notif.chunk_offt], decrypted[3+notif.chunk_offt], 
                 decrypted[4+notif.chunk_offt], decrypted[5+notif.chunk_offt], decrypted[6+notif.chunk_offt],
                 decrypted[7+notif.chunk_offt], decrypted[8+notif.chunk_offt], decrypted[9+notif.chunk_offt],
@@ -434,8 +460,11 @@ static int cq_server_loop_once(struct cvmrdma_context * ctxt, struct ibv_cq * pr
                     else the op is a SEND and we must use the next chunk in the current recv request */
 
 
+
                 if(!bypass_scatter || cvmrdma_disable_cache)
                 {
+                    //fprintf(stderr, "[CQ] NOT bypass scatter\n");
+
                     if (is_write){
                         DEBUG("[CQ] WRITE: writing with notif.chunk_offt 0x%"PRIx64" and notif.chunk_len %zu to dest %p for notif.hca_addr %p\n", 
                             notif.chunk_offt, notif.chunk_len, dest, (void *)notif.hca_addr);
@@ -449,6 +478,8 @@ static int cq_server_loop_once(struct cvmrdma_context * ctxt, struct ibv_cq * pr
                         } else if (is_read) {
                             recv_info = qp_read_metadata_front(qp->read_metadata);
                         }
+
+                        //clock_gettime(CLOCK_MONOTONIC, &t_copy_data1);
                         struct ibv_sge * rcv_sgl = recv_info->sgl;
                         int rcv_nsge = recv_info->nsge;
 
@@ -503,6 +534,7 @@ static int cq_server_loop_once(struct cvmrdma_context * ctxt, struct ibv_cq * pr
                 }
                 else // bypass scatter
                 {
+                    //fprintf(stderr, "[CQ] Bypass scatter\n");
 
                     struct uffdio_writeprotect uffdio_wp = {
                         .range = {
@@ -515,13 +547,12 @@ static int cq_server_loop_once(struct cvmrdma_context * ctxt, struct ibv_cq * pr
                         fprintf(stderr, "[CQ] ioctl-UFFDIO_WRITEPROTECT: %d\n", errno);
                         exit(1);
                     }
+                    fprintf(stderr, "[CQ] Making chunk %llu not writable. addr=%llx, len=%llx\n", chunk_idx, decrypted, cvmrdma_chunk_bytes);
+                    
+                    
 
                     memcpy(chunk_info->nonce, notif.payload_nonce, cvmrdma_aead_NPUBBYTES);
                     atomic_store(&chunk_info->cached, true);
-                    pthread_mutex_unlock(&chunk_info->lock);
-    #ifndef CVMRDMA_DISABLE_TRANSIT_LOCK
-                    sem_post(&chunk_info->in_transit_sem);
-    #endif
 
                     if (is_send || is_read) {
 
@@ -547,13 +578,16 @@ static int cq_server_loop_once(struct cvmrdma_context * ctxt, struct ibv_cq * pr
                     }
                 }
 
+                fprintf(stderr, "[CQ] cached chunk %zu for mr with lkey 0x%lx\n", chunk_idx, cur_mr->user_mr.ibv_mr.lkey);
+                pthread_mutex_unlock(&chunk_info->lock);
+                sem_post(&chunk_info->in_transit_sem);
+
+
             }
 
             qp->wr_bytes_rcved += notif.chunk_len;
 
             DEBUG("after chunk: rcved 0x%zx bytes of WR\n", qp->wr_bytes_rcved);
-
-            TIMING("cds_t1");
 
             /* Is this the end of a WR? */
             if(notif.last_chunk)
@@ -661,7 +695,6 @@ static int cq_server_loop_once(struct cvmrdma_context * ctxt, struct ibv_cq * pr
                     wcq_push(rcq->wc_queue, &recv_wc);
                     // Pointer to cq struct, see verbs.c:603
                     uint64_t event = (uintptr_t) rcq;
-                    
                     bool expected = 1;
                     if (atomic_compare_exchange_strong(&rcq->comp_channel_event_fd_filled, &expected, 0))
                     {
@@ -677,7 +710,6 @@ static int cq_server_loop_once(struct cvmrdma_context * ctxt, struct ibv_cq * pr
             /* We can notify the remote thay this chunk can be reused for writing
                 XXX: this could be pushed all the way up right after copying into private memory
                 But what about failures to decrypt?*/
-            TIMING("chunk_notify_recv");
 
             DEBUG("FFF [CQ] notifying remote that chunk %zu is free\n", this_recv_slot_id);
             if (qp->is_loopback) {
@@ -760,7 +792,9 @@ void* cvmrdma_cq_wait_completion_event(void* c_cq) {
         // Toggle between busy polling and waiting for event
         // Since the event waiting seems to have problems (cf. the gam benchmark)
         // we still busy poll.
-        if(true) {
+
+        // using notifications results in more interrupts, which we want to avoid in a sev machine
+        if(false) {
             // verbs.c:632 ibv_get_cq_event
             // This emulates:
             // ret = ibv_get_cq_event(cq->provider_comp_channel, &ev_cq, &ev_ctx);
@@ -768,6 +802,20 @@ void* cvmrdma_cq_wait_completion_event(void* c_cq) {
             //     fprintf(stderr, "Failed to get CQ event\n");
             //     exit(1);
             // }
+
+            /*if (atomic_load(&cq->stop_thread)) {
+                break;
+            }
+
+            ssize_t n = read(cq->provider_comp_channel->fd, &ev, sizeof ev);
+            if (n != sizeof ev) {
+                if (atomic_load(&cq->stop_thread)) {
+                    // read will be woken up and jump here once close() is called on the channel fd
+                    break;
+                }
+                fprintf(stderr, "Failed to read CQ event, read %zd bytes\n", n);
+                exit(1);
+            }*/
 
             if (read(cq->provider_comp_channel->fd, &ev, sizeof ev) != sizeof ev) {
                 fprintf(stderr, "Failed to read CQ event\n");
@@ -808,6 +856,8 @@ void* cvmrdma_cq_wait_completion_event(void* c_cq) {
             cvmrdma_cq_server_run_once_if_idle_send(context, cq, NULL);
         }
     }
+
+    return NULL;
 }
 
 void print_mr_from_ctxt(struct cvmrdma_context * context) {

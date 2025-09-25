@@ -54,7 +54,6 @@ static int recv_counter = 0;
 
 kj::Promise<void> QpNotificationChannel::notifyChunkRecv(NotifyChunkRecvContext context)
 {
-    TIMING("chunk_acked");
     recv_counter++;
     DEBUG("FFF [NS] notifyChunkRecv: %d\n", recv_counter);
     pthread_mutex_lock(m_send_lines_lock_ptr);

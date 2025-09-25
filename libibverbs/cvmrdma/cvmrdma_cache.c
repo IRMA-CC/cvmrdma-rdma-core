@@ -11,20 +11,74 @@
 #include "cvmrdma.h"
 #include "debug.h"
 
-#ifdef ROUND_TO_PAGE_SIZE
+int invalidate_chunk(int uffd, struct cvmrdma_mr* mr)
+{
+    struct uffd_msg  msg;
+    struct ibv_mr* user_mr = &mr->user_mr.ibv_mr;
 
-#include <sys/mman.h>
-#include <unistd.h>
+    int nread = read(uffd, &msg, sizeof(msg));
+    if (nread == 0 || nread == -1) {
+        return nread;
+    }
 
-#endif
+    /* We expect only one kind of event; verify that assumption. */
+
+    if (msg.event != UFFD_EVENT_PAGEFAULT) {
+        fprintf(stderr, "[CACHE] Unexpected event on userfaultfd\n");
+        exit(1);
+    }
+
+    DEBUG("[CACHE]    UFFD_EVENT_PAGEFAULT event: ");
+    DEBUG("[CACHE] flags = %llx; ", msg.arg.pagefault.flags);
+    DEBUG("[CACHE] address = %llx\n", msg.arg.pagefault.address);
+
+    assert(msg.arg.pagefault.flags & UFFD_PAGEFAULT_FLAG_WP);
+    assert(msg.arg.pagefault.flags & UFFD_PAGEFAULT_FLAG_WRITE);
+
+
+    // Mark chunk where this address falls into as dirty
+    uint64_t offt = (msg.arg.pagefault.address - mr->hca_va);
+    uint64_t chunk_idx = offt / cvmrdma_chunk_bytes;
+
+    sem_wait(&mr->chunk_tracking[chunk_idx].in_transit_sem);
+    DEBUG("[CACHE] chunk_idx = %llu\n", chunk_idx);
+    atomic_store(&mr->chunk_tracking[chunk_idx].cached, false);
+    fprintf(stderr, "[CACHE] Marked chunk %llu as dirty\n", chunk_idx);
+
+
+    // make all pages of the chunk as writable
+    uint64_t alinged_start = msg.arg.pagefault.address - (offt % cvmrdma_chunk_bytes);
+    size_t wp_len = (alinged_start - (uint64_t)user_mr->addr) + cvmrdma_chunk_bytes > user_mr->length ? user_mr->length - (alinged_start - (uint64_t)user_mr->addr) : cvmrdma_chunk_bytes;
+
+
+    struct uffdio_writeprotect uffdio_wp = {
+        .range = {
+            .start = alinged_start,
+            .len = wp_len
+        },
+        .mode = 0,
+    };
+    fprintf(stderr, "[CACHE] Making chunk %llu writable again. addr=%llx, len=%llx\n", chunk_idx, uffdio_wp.range.start, uffdio_wp.range.len);
+    DEBUG("[CACHE] start = %llx; len = %llx\n", uffdio_wp.range.start, uffdio_wp.range.len);
+    DEBUG("[CACHE] alinged_start = %llx; user_mr->length = %x user_mr->addr = %llx\n", alinged_start, user_mr->length, (uint64_t)user_mr->addr);
+    
+    if (ioctl(uffd, UFFDIO_WRITEPROTECT, &uffdio_wp) == -1) {
+        fprintf(stderr, "[CACHE] ioctl-UFFDIO_WRITEPROTECT: %d\n", errno);
+        exit(1);
+    }
+    
+    sem_post(&mr->chunk_tracking[chunk_idx].in_transit_sem);
+
+
+    return nread;
+}
+
 
 
 void* fault_handler_thread(void* arg) {
     struct fault_handler_thread_args* targs;                  /* userfaultfd file descriptor */
     targs = (struct fault_handler_thread_args*) arg;
-    struct ibv_mr* user_mr = (struct ibv_mr*) targs->mr;
     int uffd = targs->uffd;
-    struct uffd_msg  msg;  /* Data read from userfaultfd */
 
     /* Loop, handling incoming events on the userfaultfd
        file descriptor. */
@@ -52,7 +106,8 @@ void* fault_handler_thread(void* arg) {
             nready, (pollfd.revents & POLLIN) != 0,
             (pollfd.revents & POLLERR) != 0);
 
-        int nread = read(uffd, &msg, sizeof(msg));
+        int nread = invalidate_chunk(uffd, targs->mr);
+
         if (nread == 0) {
             fprintf(stderr, "[CACHE] EOF on userfaultfd!\n");
             exit(1);
@@ -63,51 +118,6 @@ void* fault_handler_thread(void* arg) {
             exit(1);
         }
 
-        /* We expect only one kind of event; verify that assumption. */
 
-        if (msg.event != UFFD_EVENT_PAGEFAULT) {
-            fprintf(stderr, "[CACHE] Unexpected event on userfaultfd\n");
-            exit(1);
-        }
-
-        DEBUG("[CACHE]    UFFD_EVENT_PAGEFAULT event: ");
-        DEBUG("[CACHE] flags = %llx; ", msg.arg.pagefault.flags);
-        DEBUG("[CACHE] address = %llx\n", msg.arg.pagefault.address);
-
-        assert(msg.arg.pagefault.flags & UFFD_PAGEFAULT_FLAG_WP);
-        assert(msg.arg.pagefault.flags & UFFD_PAGEFAULT_FLAG_WRITE);
-
-        // Mark chunk where this address falls into as dirty
-        uint64_t offt = (msg.arg.pagefault.address - targs->mr->hca_va);
-        uint64_t chunk_idx = offt / cvmrdma_chunk_bytes;
-        DEBUG("[CACHE] chunk_idx = %llu\n", chunk_idx);
-        atomic_store(&targs->mr->chunk_tracking[chunk_idx].cached, false);
-
-
-        // make all pages of the chunk as writable
-        uint64_t alinged_start = msg.arg.pagefault.address - (offt % cvmrdma_chunk_bytes);
-        size_t wp_len = (alinged_start - (uint64_t)user_mr->addr) + cvmrdma_chunk_bytes > user_mr->length ? user_mr->length - (alinged_start - (uint64_t)user_mr->addr) : cvmrdma_chunk_bytes;
-
-#ifdef ROUND_TO_PAGE_SIZE
-        // Round up to the nearest page size because otherwise the ioctl will fail
-        size_t page_size = sysconf(_SC_PAGESIZE);
-        wp_len = ((wp_len + page_size - 1) / page_size) * page_size;
-#endif
-
-
-        struct uffdio_writeprotect uffdio_wp = {
-            .range = {
-                .start = alinged_start,
-                .len = wp_len
-            },
-            .mode = 0,
-        };
-        DEBUG("[CACHE] start = %llx; len = %llx\n", uffdio_wp.range.start, uffdio_wp.range.len);
-        DEBUG("[CACHE] alinged_start = %llx; user_mr->length = %x user_mr->addr = %llx\n", alinged_start, user_mr->length, (uint64_t)user_mr->addr);
-        
-        if (ioctl(uffd, UFFDIO_WRITEPROTECT, &uffdio_wp) == -1) {
-            fprintf(stderr, "[CACHE] ioctl-UFFDIO_WRITEPROTECT: %d\n", errno);
-            exit(1);
-        }
     }
 }

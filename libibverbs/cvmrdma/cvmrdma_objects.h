@@ -20,9 +20,9 @@
 #include "wr_queue.h"
 #include "nonce_queue.h"
 
-// enabling this will disable the transit lock
+// enabling this will disable the secure secondary channel
 // WARNING: This will very likely lead to decryption errors, so this is for testing only!
-//#define CVMRDMA_DISABLE_TRANSIT_LOCK 0
+//#define CVMRDMA_DISABLE_SECURE_SECONDARY_CHANNEL 0
 
 
 struct cvmrdma_pd {

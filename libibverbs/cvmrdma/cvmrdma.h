@@ -40,7 +40,8 @@ static inline uint64_t cvmrdma_header_bytes(enum sodium_crypto_aead aead)
 	return sizeof(struct cq_server_notification) + cvmrdma_ABYTES(aead);
 }
 
-#define CVMRDMA_RING_BUFFER_SIZE 32 * 1048576 //536870912
+// originally 32 * 1048576
+#define CVMRDMA_RING_BUFFER_SIZE (256 * 1048576) //536870912
 // #define CVMRDMA_RING_ENTRIES 64
 
 // This must be smaller than the max_recv_wr/max_send_wr for control_ibqp in cvmrdma_create_qp.
