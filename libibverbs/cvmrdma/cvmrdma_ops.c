@@ -815,9 +815,16 @@ static int cvmrdma_post_recv(struct ibv_qp *ibqp, struct ibv_recv_wr *wr,
 
 
 _Atomic uint64_t cvmrdma_global_send_wr_id = 0;
+_Atomic uint64_t send_count = 0;
+_Atomic uint64_t no_data_send_count = 0;
+_Atomic uint64_t max_send_size = 0;
+uint64_t REPORT = 1000;
 static int post_send_do_bounce(struct cvmrdma_qp * qp, struct ibv_send_wr *wrs, struct ibv_send_wr **bad_wr, bool write_for_read)
 {
-	fprintf(stderr, "Start post_send_do_bounce QPN %x\n", qp->user_qp.qp.qp_num);
+	send_count++;
+	if (send_count % REPORT == 0){
+		fprintf(stderr, "Send %d\n", send_count);
+	}
 
 	struct cvmrdma_context * ctxt = cvmrdma_get_ctx(qp->user_qp.qp.context);
 	struct cvmrdma_pd * pd = (struct cvmrdma_pd *)qp->user_qp.qp.pd;
@@ -914,13 +921,21 @@ static int post_send_do_bounce(struct cvmrdma_qp * qp, struct ibv_send_wr *wrs, 
 			total_chunks += sge_chunks;
 		}
 
+		if (total_bytes > max_send_size){
+			max_send_size = total_bytes;
+			fprintf(stderr, "Found new max send size: %d\n", max_send_size);
+		}
+
 		if (total_chunks == 0) {
 			nsge = 0;
 			no_data_send = true;
 		}
 
 		if (no_data_send){
-			fprintf(stderr, "No data to send for WR %p\n", this_wr);
+			no_data_send_count++;
+			if (no_data_send_count % REPORT == 0){
+				fprintf(stderr, "Send %d no data messages\n", no_data_send_count);
+			}
 		}
 
 
@@ -951,7 +966,7 @@ static int post_send_do_bounce(struct cvmrdma_qp * qp, struct ibv_send_wr *wrs, 
 			randombytes_buf(nonce_metadata, cvmrdma_aead_NPUBBYTES);
 			// send the nonce metadata to the remote
 			
-			fprintf(stderr, "[Send] send nonce %lx %lx %lx\n", nonce_metadata[0], nonce_metadata[1], nonce_metadata[2]);
+			//fprintf(stderr, "[Send] send nonce %lx %lx %lx\n", nonce_metadata[0], nonce_metadata[1], nonce_metadata[2]);
 
 			if (qp->is_loopback) {
 				remote_notify_nonce(qp->local_addr, ctxt->network_evloop, qp->remote_qnc, nonce_metadata);
@@ -983,7 +998,7 @@ static int post_send_do_bounce(struct cvmrdma_qp * qp, struct ibv_send_wr *wrs, 
 				qp->user_qp.qp.qp_num, rkey, cur_sge->lkey, remote_addr, qp->dlid, qp->lid, this_op, (void*)ctxt);
 			DEBUG("[SEND QPN %x] chunks_in_wr %lu\n", qp->user_qp.qp.qp_num, chunks_in_wr);
 			DEBUG("[SEND QPN %x] cur_sge->length 0x%lx\n", qp->user_qp.qp.qp_num, cur_sge->length);
-			fprintf(stderr, "[SEND QPN %x] offt 0x%x\n", qp->user_qp.qp.qp_num, offt % cvmrdma_chunk_bytes);
+			//fprintf(stderr, "[SEND QPN %x] offt 0x%x\n", qp->user_qp.qp.qp_num, offt % cvmrdma_chunk_bytes);
 			DEBUG("[SEND QPN %x] last_chunk %d\n", qp->user_qp.qp.qp_num, last_chunk);
 			DEBUG("[SEND QPN %x] chunks_num %lu\n", qp->user_qp.qp.qp_num, chunks_num);
 			DEBUG("[SEND QPN %x] total_chunks %lu\n", qp->user_qp.qp.qp_num, total_chunks);
@@ -1003,12 +1018,11 @@ static int post_send_do_bounce(struct cvmrdma_qp * qp, struct ibv_send_wr *wrs, 
 			uint64_t alinged_offset = offt - (offt % cvmrdma_chunk_bytes);
 			/* location in memory */
 			unsigned char * ptxt = cur_mr->user_mr.ibv_mr.addr + alinged_offset;
-			fprintf(stderr, "[SEND QPN %x] chunk_addr %p, chunk aligned_offset 0x%lx, chunk_idx %lu\n", qp->user_qp.qp.qp_num, ptxt, alinged_offset, chunk_idx);
+			//fprintf(stderr, "[SEND QPN %x] chunk_addr %p, chunk aligned_offset 0x%lx, chunk_idx %lu\n", qp->user_qp.qp.qp_num, ptxt, alinged_offset, chunk_idx);
 			uint64_t send_len = alinged_offset + cvmrdma_chunk_bytes > cur_mr->user_mr.ibv_mr.length ? cur_mr->user_mr.ibv_mr.length - alinged_offset : cvmrdma_chunk_bytes;
 
 
-			// ...existing code...
-            uint64_t remaining_in_mr = cur_mr->user_mr.ibv_mr.length - alinged_offset;
+            /*uint64_t remaining_in_mr = cur_mr->user_mr.ibv_mr.length - alinged_offset;
             size_t within_chunk_offt = offt % cvmrdma_chunk_bytes;
             if ( (within_chunk_offt + 0x400 + 18 < cvmrdma_chunk_bytes) &&
                  (within_chunk_offt + 0x400 + 18 < remaining_in_mr) )
@@ -1026,7 +1040,7 @@ static int post_send_do_bounce(struct cvmrdma_qp * qp, struct ibv_send_wr *wrs, 
                     future_data[12], future_data[13], future_data[14], future_data[15],
                     future_data[16], future_data[17]
                 );
-            }
+            }*/
 
 			uint64_t true_payload_bytes = 0; 
 
@@ -1071,24 +1085,24 @@ static int post_send_do_bounce(struct cvmrdma_qp * qp, struct ibv_send_wr *wrs, 
 			}
 
 
-			bool cached = false;
 			struct chunk_tracking_info* chunk_info = &cur_mr->chunk_tracking[chunk_idx];
+			// everything that happend before is just preparation, but does not rely on the content of the chunk
+			// from here on we need to make sure that the chunk is not modified until we have sent it.
+			// Therefore we need to acquire the chunk lock and wait until the chunk is not in transit anymore.
+			sem_wait(&chunk_info->in_transit_sem);
+
+			bool cached = false;
 			if(!cvmrdma_disable_cache){
-				pthread_mutex_lock(&chunk_info->lock);
 				cached = atomic_load(&chunk_info->cached);
 			}
-			if(!cached) {
-				/* generate new payload nonce */
-				DEBUG("[SEND QPN %x] Generating new nonce for chunk %lu\n", qp->user_qp.qp.qp_num, chunk_idx);
-				randombytes_buf(chunk_info->nonce, cvmrdma_aead_NPUBBYTES);
-				DEBUG("[SEND QPN %x] nonce %lx %lx\n", qp->user_qp.qp.qp_num, chunk_info->nonce[0], chunk_info->nonce[1]);
-			}
 
+			// after we acquired the in_transit_sem, we set it to be write protected.
+			// the cache handler, can only remove the write protection if it can aquire the in_transit_sem.
+			// Until the cache can aquire the in_transit_sem, the write will block.
+			// There is the possibility, that a write occurs between aquiring the lock and setting the write protection.
+			// this is ok, because these writes will be included in the encryption of the chunk.
 			size_t wp_len = send_len;
-			// We should be fine with only marking it the user_mr data _after_ the encryption
-			// since writes during the encryption above are writes when the send completion 
-			// was not issued to the user program.
-			if(!cvmrdma_disable_cache && !cached){
+			if(!cvmrdma_disable_cache){
 				// Mark chunk in userMR as write protected
 				int uffd = cur_mr->uffd;
 				struct uffdio_writeprotect uffdio_wp = {
@@ -1101,11 +1115,21 @@ static int post_send_do_bounce(struct cvmrdma_qp * qp, struct ibv_send_wr *wrs, 
 				if (ioctl(uffd, UFFDIO_WRITEPROTECT, &uffdio_wp) == -1) {
 					exit(1);
 				}
-				fprintf(stderr, "[SEND] Making chunk %llu not writable. addr=%llx, len=%llx\n", chunk_idx, ptxt, wp_len);
+				//fprintf(stderr, "[SEND] Making chunk %llu not writable. addr=%llx, len=%llx\n", chunk_idx, ptxt, wp_len);
 
 				atomic_store(&chunk_info->cached, true);
-				fprintf(stderr, "[SEND QPN %x] Marked chunk %lu as cached\n", qp->user_qp.qp.qp_num, chunk_idx);
+				//fprintf(stderr, "[SEND QPN %x] Marked chunk %lu as cached\n", qp->user_qp.qp.qp_num, chunk_idx);
 			}
+
+
+			if(!cached) {
+				/* generate new payload nonce */
+				DEBUG("[SEND QPN %x] Generating new nonce for chunk %lu\n", qp->user_qp.qp.qp_num, chunk_idx);
+				randombytes_buf(chunk_info->nonce, cvmrdma_aead_NPUBBYTES);
+				DEBUG("[SEND QPN %x] nonce %lx %lx\n", qp->user_qp.qp.qp_num, chunk_info->nonce[0], chunk_info->nonce[1]);
+			}
+
+			
 
 			unsigned char * slot = cur_mr->provider_va + (chunk_idx * cvmrdma_ring_slot_bytes(ctxt->aead));
 
@@ -1123,9 +1147,6 @@ static int post_send_do_bounce(struct cvmrdma_qp * qp, struct ibv_send_wr *wrs, 
 			qp_chunk_queue_push(qp->chunk_queue, &entry);
 			DEBUG("[SEND QPN %x] Waiting for chunk lock for chunk %lu\n", qp->user_qp.qp.qp_num, chunk_idx);
 
-#ifndef CVMRDMA_DISABLE_TRANSIT_LOCK
-			sem_wait(&chunk_info->in_transit_sem);
-#endif
 			DEBUG("[SEND QPN %x] Acquired chunk lock for chunk %lu\n", qp->user_qp.qp.qp_num, chunk_idx);
 
 			/***** NOTIFY ******/
@@ -1182,7 +1203,7 @@ static int post_send_do_bounce(struct cvmrdma_qp * qp, struct ibv_send_wr *wrs, 
 			TIMING("gec_t0");
 			/**** ENCRYPT *****/
 			if(cached){
-				fprintf(stderr, "[SEND QPN %x] Chunk %lu is cached, skipping\n", qp->user_qp.qp.qp_num, chunk_idx);
+				//fprintf(stderr, "[SEND QPN %x] Chunk %lu is cached, skipping\n", qp->user_qp.qp.qp_num, chunk_idx);
 				goto skip_payload_encryption;
 			}
 
@@ -1284,10 +1305,6 @@ skip_payload_encryption:
 				exit(1);
 			}
 
-			if(!cvmrdma_disable_cache){
-				pthread_mutex_unlock(&chunk_info->lock);
-			}
-
 			bytes_sent += true_payload_bytes;
 			chunks_in_wr++;
 
@@ -1302,7 +1319,6 @@ skip_payload_encryption:
 				}
 			}*/
 		}
-
 
 		assert(bytes_sent == total_bytes);
 		assert(chunks_in_wr == total_chunks);
@@ -1601,7 +1617,6 @@ static struct ibv_mr *cvmrdma_reg_mr(struct ibv_pd *ibpd, void *addr, size_t len
 	}
 	for (uint64_t i = 0; i < num_chunks; i++)
 	{
-		pthread_mutex_init(&mr->chunk_tracking[i].lock, NULL);
 		sem_init(&mr->chunk_tracking[i].in_transit_sem, 0, 1);
 	}
 
@@ -1664,7 +1679,7 @@ static struct ibv_mr *cvmrdma_reg_mr(struct ibv_pd *ibpd, void *addr, size_t len
 	atomic_fetch_add_explicit(&cvmrdma_mr_id, 1, memory_order_relaxed);
 
 	/* Expose some information to the user */
-	fprintf(stderr, "[MR] Exposing user MR with addr %p, length %lu, lkey/rkey 0x%x\n", addr, length, mr_id);
+	//fprintf(stderr, "[MR] Exposing user MR with addr %p, length %lu, lkey/rkey 0x%x\n", addr, length, mr_id);
 	mr->user_mr.ibv_mr.addr = addr;
 	mr->user_mr.ibv_mr.context = ibctxt;
 	mr->user_mr.ibv_mr.handle = 0;

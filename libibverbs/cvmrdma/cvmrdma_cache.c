@@ -43,7 +43,7 @@ int invalidate_chunk(int uffd, struct cvmrdma_mr* mr)
     sem_wait(&mr->chunk_tracking[chunk_idx].in_transit_sem);
     DEBUG("[CACHE] chunk_idx = %llu\n", chunk_idx);
     atomic_store(&mr->chunk_tracking[chunk_idx].cached, false);
-    fprintf(stderr, "[CACHE] Marked chunk %llu as dirty\n", chunk_idx);
+    //fprintf(stderr, "[CACHE] Marked chunk %llu as dirty\n", chunk_idx);
 
 
     // make all pages of the chunk as writable
@@ -58,7 +58,7 @@ int invalidate_chunk(int uffd, struct cvmrdma_mr* mr)
         },
         .mode = 0,
     };
-    fprintf(stderr, "[CACHE] Making chunk %llu writable again. addr=%llx, len=%llx\n", chunk_idx, uffdio_wp.range.start, uffdio_wp.range.len);
+    //fprintf(stderr, "[CACHE] Making chunk %llu writable again. addr=%llx, len=%llx\n", chunk_idx, uffdio_wp.range.start, uffdio_wp.range.len);
     DEBUG("[CACHE] start = %llx; len = %llx\n", uffdio_wp.range.start, uffdio_wp.range.len);
     DEBUG("[CACHE] alinged_start = %llx; user_mr->length = %x user_mr->addr = %llx\n", alinged_start, user_mr->length, (uint64_t)user_mr->addr);
     

@@ -237,7 +237,7 @@ static int cq_server_loop_once(struct cvmrdma_context * ctxt, struct ibv_cq * pr
 #else
             memset(nonce_metadata, 0, cvmrdma_aead_NPUBBYTES);
 #endif
-            fprintf(stderr, "[CQ] got nonce %lx %lx %lx\n", nonce_metadata[0], nonce_metadata[1], nonce_metadata[2]);
+            //fprintf(stderr, "[CQ] got nonce %lx %lx %lx\n", nonce_metadata[0], nonce_metadata[1], nonce_metadata[2]);
             //clock_gettime(CLOCK_MONOTONIC, &t_wait_for_nonce);
 
             unsigned long long notif_mlen = sizeof(notif);
@@ -367,12 +367,11 @@ static int cq_server_loop_once(struct cvmrdma_context * ctxt, struct ibv_cq * pr
                 unsigned char * payload_start = NULL;
                 struct chunk_tracking_info* chunk_info = &cur_mr->chunk_tracking[chunk_idx];
 
-
-                pthread_mutex_lock(&chunk_info->lock);
-
-                //clock_gettime(CLOCK_MONOTONIC, &t_sem_wait_start);
+                // from here on out we will modify the chunk and/or its assoicated user mr
+                // we therefore need to be sure, nobody else is using it
                 sem_wait(&chunk_info->in_transit_sem);
-                //clock_gettime(CLOCK_MONOTONIC, &t_sem_wait_end);
+
+                int cached = atomic_load(&chunk_info->cached);
 
                 if (!bypass_scatter || cvmrdma_disable_cache)
                 {
@@ -389,7 +388,7 @@ static int cq_server_loop_once(struct cvmrdma_context * ctxt, struct ibv_cq * pr
                     // if we bypass by decrypting directly to user memory, we need to invalidate the cache
                     // because this new data needs to be encrypted and saved in the chunk cache next time we send.
                     atomic_store(&chunk_info->cached, false);
-                    fprintf(stderr, "[CQ] not bypass scatter or cache disabled, invalidated chunk cache for chunk %zu\n", chunk_idx);
+                    //fprintf(stderr, "[CQ] not bypass scatter or cache disabled, invalidated chunk cache for chunk %zu\n", chunk_idx);
                 } else {
                     /* Copy the payload into the private chunk cache */
                     // TODO: this is wrong
@@ -406,14 +405,26 @@ static int cq_server_loop_once(struct cvmrdma_context * ctxt, struct ibv_cq * pr
                         payload_start[12], payload_start[13], payload_start[14], payload_start[15],
                         payload_start[16], payload_start[17]);*/
 
+                }
+
+                // a write protection is only set, if the chunk is cached
+                // therefore we only need (and only can) remove the write protection
+                // if the chunk is cached
+                if (cached){
+                    uint64_t aligned_offset = offt - (offt % cvmrdma_chunk_bytes);
+                    unsigned char * ptxt = cur_mr->user_mr.ibv_mr.addr + aligned_offset;
+                    // in the next step the data from the chunk cache or the private memory will be decrypted to the user memory region
+                    // we therefore need to make the user memory region writable again
+                    // we assume the program using libibverbs does not modify the memory region while it is used as a receive buffer
                     struct uffdio_writeprotect uffdio_wp = {
                         .range = {
-                            .start = decrypted,
+                            .start = ptxt,
                             .len = cvmrdma_chunk_bytes,
                         },
                         .mode = 0,
                     };
-                    fprintf(stderr, "[CQ] Making chunk %llu writable again. addr=%llx, len=%llx\n", chunk_idx, decrypted, cvmrdma_chunk_bytes);
+
+                    //fprintf(stderr, "[CQ] Making chunk %llu writable again. addr=%llx, len=%llx\n", chunk_idx, decrypted, cvmrdma_chunk_bytes);
 
                     if (ioctl(cur_mr->uffd, UFFDIO_WRITEPROTECT, &uffdio_wp) == -1) {
                         fprintf(stderr, "[CACHE] ioctl-UFFDIO_WRITEPROTECT: %d\n", errno);
@@ -447,13 +458,13 @@ static int cq_server_loop_once(struct cvmrdma_context * ctxt, struct ibv_cq * pr
                 }
                 fprintf(stderr, "\n");*/
 
-                fprintf(stderr, "[CQ] decrypted %x %x %x %x %x %x %x %x %x %x %x %x %x %x %x %x %x %x\n", decrypted[0+notif.chunk_offt],
+                /*fprintf(stderr, "[CQ] decrypted %x %x %x %x %x %x %x %x %x %x %x %x %x %x %x %x %x %x\n", decrypted[0+notif.chunk_offt],
                 decrypted[1+notif.chunk_offt], decrypted[2+notif.chunk_offt], decrypted[3+notif.chunk_offt], 
                 decrypted[4+notif.chunk_offt], decrypted[5+notif.chunk_offt], decrypted[6+notif.chunk_offt],
                 decrypted[7+notif.chunk_offt], decrypted[8+notif.chunk_offt], decrypted[9+notif.chunk_offt],
                 decrypted[10+notif.chunk_offt], decrypted[11+notif.chunk_offt], decrypted[12+notif.chunk_offt],
                     decrypted[13+notif.chunk_offt], decrypted[14+notif.chunk_offt], decrypted[15+notif.chunk_offt],
-                    decrypted[16+notif.chunk_offt], decrypted[17+notif.chunk_offt]);
+                    decrypted[16+notif.chunk_offt], decrypted[17+notif.chunk_offt]);*/
 
                 /*** SCATTER ****/
                 /* Scatter the plaintext to user memory. If the op is a WRITE, the remote has set the destination address,
@@ -536,6 +547,8 @@ static int cq_server_loop_once(struct cvmrdma_context * ctxt, struct ibv_cq * pr
                 {
                     //fprintf(stderr, "[CQ] Bypass scatter\n");
 
+                    // ad write protection because we just decrypted directly to user memory
+                    // and the current saved chunk is up to date
                     struct uffdio_writeprotect uffdio_wp = {
                         .range = {
                             .start = (unsigned long) decrypted,
@@ -547,9 +560,7 @@ static int cq_server_loop_once(struct cvmrdma_context * ctxt, struct ibv_cq * pr
                         fprintf(stderr, "[CQ] ioctl-UFFDIO_WRITEPROTECT: %d\n", errno);
                         exit(1);
                     }
-                    fprintf(stderr, "[CQ] Making chunk %llu not writable. addr=%llx, len=%llx\n", chunk_idx, decrypted, cvmrdma_chunk_bytes);
-                    
-                    
+                    //fprintf(stderr, "[CQ] Making chunk %llu not writable. addr=%llx, len=%llx\n", chunk_idx, decrypted, cvmrdma_chunk_bytes);
 
                     memcpy(chunk_info->nonce, notif.payload_nonce, cvmrdma_aead_NPUBBYTES);
                     atomic_store(&chunk_info->cached, true);
@@ -578,8 +589,8 @@ static int cq_server_loop_once(struct cvmrdma_context * ctxt, struct ibv_cq * pr
                     }
                 }
 
-                fprintf(stderr, "[CQ] cached chunk %zu for mr with lkey 0x%lx\n", chunk_idx, cur_mr->user_mr.ibv_mr.lkey);
-                pthread_mutex_unlock(&chunk_info->lock);
+                //fprintf(stderr, "[CQ] cached chunk %zu for mr with lkey 0x%lx\n", chunk_idx, cur_mr->user_mr.ibv_mr.lkey);
+                // post that the chunk is no longer in transit
                 sem_post(&chunk_info->in_transit_sem);
 
 
