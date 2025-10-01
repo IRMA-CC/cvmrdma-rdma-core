@@ -18,6 +18,7 @@ int invalidate_chunk(int uffd, struct cvmrdma_mr* mr)
 
     int nread = read(uffd, &msg, sizeof(msg));
     if (nread == 0 || nread == -1) {
+        fprintf(stderr, "[CACHE] EOF or error on userfaultfd. Errno: %d\n", errno);
         return nread;
     }
 
@@ -114,10 +115,12 @@ void* fault_handler_thread(void* arg) {
         }
 
         if (nread == -1) {
-            fprintf(stderr, "[CACHE] read: %d\n", nread);
-            exit(1);
-        }
 
+            if (errno != EAGAIN && errno != EINTR){
+                fprintf(stderr, "[CACHE] read: %d\n", nread);
+                exit(1);
+            }
+        }
 
     }
 }

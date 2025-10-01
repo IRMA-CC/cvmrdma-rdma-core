@@ -22,7 +22,10 @@
 
 // enabling this will disable the secure secondary channel
 // WARNING: This will very likely lead to decryption errors, so this is for testing only!
-//#define CVMRDMA_DISABLE_SECURE_SECONDARY_CHANNEL 0
+// #define CVMRDMA_DISABLE_SECURE_SECONDARY_CHANNEL 0
+// WARNING: This will result in the slots no longer being acked
+// therefore this can only work if the application uses less slots than available in the ring
+// #define CVMRDMA_DISABLE_RECV_NOTIFY 0
 
 
 struct cvmrdma_pd {
@@ -266,3 +269,5 @@ struct chunk_tracking_info {
 };
 
 extern bool cvmrdma_disable_cache;
+extern struct timespec start_recv, refuel, setup, get_nonce, decrypt_metadata, sem_wait_start_recv, sem_wait_end_recv, copy_payload, remove_write_protection, decrypt_payload, scatter_or_bypass, last_chunk, end_recv;
+extern uint64_t total_time_recv[13];

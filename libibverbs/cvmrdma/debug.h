@@ -30,6 +30,37 @@
     } \
   } while(0)
 
+#define DEBUG_TIMING
+
+#ifdef DEBUG_TIMING
+static inline void get_time(struct timespec *t){
+	clock_gettime(CLOCK_MONOTONIC, t);
+}
+
+static inline void add_time_difference(uint64_t *sum_ns, struct timespec t1, struct timespec t2){
+	long seconds = t2.tv_sec - t1.tv_sec;
+    long ns = t2.tv_nsec - t1.tv_nsec;
+
+    if (t2.tv_nsec < t1.tv_nsec) {
+        --seconds;
+        ns += 1000000000;
+    }
+    long total_ns = seconds * 1000000000L + ns;
+
+    *sum_ns += total_ns;
+}
+
+static void save_results(uint64_t *values, char **labels, int length){
+
+    for (int i = 0; i < length; i++){
+        uint64_t value = values[i];
+        char* label = labels[i];
+
+        double percentage = (double) value / (double)values[0] * 100.0;
+
+        fprintf(stderr, "%s: %llu (%.2f%%)\n", label, value, percentage);
+    }
+}
 
 static inline void print_timings(struct timespec t1, struct timespec t2, const char* label) {
     long seconds = t2.tv_sec - t1.tv_sec;
@@ -49,3 +80,10 @@ static inline void print_percentage(struct timespec t1, struct timespec t2, stru
     double percentage = (double)part_ns / (double)total_ns * 100.0;
     printf("PERCENTAGE %s: %.2f%%\n", label, percentage);
 }
+#else
+static inline void get_time(struct timespec *t){}
+static inline void add_time_difference(uint64_t sum_ns, struct timespec t1, struct timespec t2){}
+static inline void print_timings(struct timespec t1, struct timespec t2, const char* label) {}
+static inline void print_percentage(struct timespec t1, struct timespec t2, struct timespec start, struct timespec end, const char* label) {}
+static void save_results(uint64_t *values, char **labels, int length){}
+#endif
