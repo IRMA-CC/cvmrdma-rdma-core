@@ -73,11 +73,11 @@ static inline int cvmrdma_encrypt(unsigned char *c,
         case SODIUM_AEAD_AES256GCM:
             return crypto_aead_aes256gcm_encrypt(c, clen_p, m, mlen, ad, adlen, nsec, npub, k);
         case LIBAEGIS_AEAD_AEGIS128X2:
-            *clen_p = mlen + aegis256x2_ABYTES_MAX;
-            return aegis128x2_encrypt(c, aegis256x2_ABYTES_MAX, m, mlen, ad, adlen, npub, k);
+            *clen_p = mlen + aegis128x2_ABYTES_MAX;
+            return aegis128x2_encrypt(c, aegis128x2_ABYTES_MAX, m, mlen, ad, adlen, npub, k);
         case LIBAEGIS_AEAD_AEGIS128X4:
-            *clen_p = mlen + aegis256x4_ABYTES_MAX;
-            return aegis128x4_encrypt(c, aegis256x4_ABYTES_MAX, m, mlen, ad, adlen, npub, k);
+            *clen_p = mlen + aegis128x4_ABYTES_MAX;
+            return aegis128x4_encrypt(c, aegis128x4_ABYTES_MAX, m, mlen, ad, adlen, npub, k);
     }
 }
 

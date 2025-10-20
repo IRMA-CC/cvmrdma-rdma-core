@@ -23,7 +23,6 @@ void qp_chunk_queue_push(QpChunk * chunk_queue, struct chunk_entry * entry)
 
 void qp_chunk_queue_pop(QpChunk * chunk_queue)
 {
-    DEBUG("[RM] pop chunk queue: currently has %zu entries\n", chunk_queue->queue.size());
     chunk_queue->queue.pop();
 }
 

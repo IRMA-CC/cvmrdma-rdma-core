@@ -11,9 +11,7 @@ interface CVMRDMA {
         ) -> ();
 
         notifyNonce @2 (
-            nonce0: UInt64,
-            nonce1: UInt64,
-            nonce2: UInt64
+            nonces: List(UInt64)
         ) -> ();
 
         # called on WC for a WWI, freeing up a slot in the ring buffer

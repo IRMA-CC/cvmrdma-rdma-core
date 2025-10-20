@@ -58,6 +58,7 @@ public:
 
         m_queue.pop_front();
 
+
         /* No need to notify_one after pop, there is a single consummer, no one
             else is waiting. */
     }

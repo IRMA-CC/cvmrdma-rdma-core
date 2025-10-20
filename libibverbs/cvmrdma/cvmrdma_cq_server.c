@@ -24,10 +24,24 @@
 #include "cvmrdma_network_evloop_priv.h"
 #include "chunk_queue.h"
 
-struct timespec start_recv, refuel, setup, get_nonce, decrypt_metadata, sem_wait_start_recv, sem_wait_end_recv, copy_payload, remove_write_protection, decrypt_payload, scatter_or_bypass, last_chunk, end_recv;
-uint64_t total_time_recv[13] = {0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0};
+#ifdef DEBUG_TIMING
+struct timespec start_recv, refuel, setup, get_nonce, decrypt_metadata, sem_wait_start_recv, sem_wait_end_recv, copy_payload, remove_write_protection, decrypt_payload, scatter_or_bypass, last_chunk_prepare_data, last_chunk_push_wc last_chunk, end_recv;
+struct timespec start_send_recv, end_send_recv, recv_get_bounce_metadata, recv_get_send_metadata;
+#else
+uint64_t start_recv, refuel, setup, get_nonce, decrypt_metadata, sem_wait_start_recv, sem_wait_end_recv, copy_payload, remove_write_protection, decrypt_payload, scatter_or_bypass, last_chunk, last_chunk_prepare_data, last_chunk_push_wc, end_recv;
+uint64_t start_send_recv, end_send_recv, recv_get_bounce_metadata, recv_get_send_metadata;
+#endif
+uint64_t total_time_recv[15] = {0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0};
+uint64_t total_time_recv_counters[15] = {0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0};
+uint64_t total_time_all[7] = {0, 0, 0, 0, 0, 0, 0};
+uint64_t total_time_all_counters[7] = {0, 0, 0, 0, 0, 0, 0};
+
+_Atomic uint64_t no_data_recv_count = 0;
+_Atomic uint64_t recv_count = 0;
 
 #define CQ_SERVER_NUM_WCS 16
+
+// this loop is never run in parallel
 static int cq_server_loop_once(struct cvmrdma_context * ctxt, struct ibv_cq * prov_cq)
 {
     QPMetadataManager * qp_metadata_manager = ctxt->qp_metadata_manager;
@@ -73,7 +87,7 @@ static int cq_server_loop_once(struct cvmrdma_context * ctxt, struct ibv_cq * pr
         {
             //fprintf(stderr, "ibv_wc_loc_prot_error %d, ibv_wc_wr_flush_err %d \n", IBV_WC_LOC_PROT_ERR, IBV_WC_WR_FLUSH_ERR);
             if (status != IBV_WC_WR_FLUSH_ERR){
-                fprintf(stderr, "CQ server WARN: WC reports failure status: %d, vendor err %d\n", status, this_wc->vendor_err);
+                fprintf(stderr, "CQ server WARN: WC reports failure status: %s, vendor err %d\n", ibv_wc_status_str(status), this_wc->vendor_err);
             } else 
             {
                 DEBUG("CQ server: WC reports flush status: %d, vendor err %d\n", status, this_wc->vendor_err);
@@ -95,12 +109,15 @@ static int cq_server_loop_once(struct cvmrdma_context * ctxt, struct ibv_cq * pr
         }
         else if(! (op & IBV_WC_RECV))
         {
+            get_time(&start_send_recv);
             /* This is a send completion (SEND, WRITE, WWI) */
             DEBUG("[CQ] send op %d, wrid: 0x%lx done\n", op, this_wc->wr_id);
 
             qp->wr_chunks_sent++;
 
             struct send_metadata_entry * send_info = qp_send_metadata_front(qp->send_metadata);
+
+            get_time(&recv_get_send_metadata);
 
             DEBUG("[CQ] send op %d, wrid: 0x%lx done, chunks sent %zu send_info->nchunks %zu\n", op, this_wc->wr_id, qp->wr_chunks_sent, send_info->nchunks);
         
@@ -119,6 +136,7 @@ static int cq_server_loop_once(struct cvmrdma_context * ctxt, struct ibv_cq * pr
                 DEBUG("[CQ] send op %d, wrid: 0x%lx done, unlocked chunk lock for chunk %lu\n", op, this_wc->wr_id, entry->chunk_idx);
                 qp_chunk_queue_pop(qp->chunk_queue);
             }
+            get_time(&recv_get_bounce_metadata);
             
             if(send_info->nchunks == qp->wr_chunks_sent || send_info->no_data_send)
             {
@@ -151,6 +169,7 @@ static int cq_server_loop_once(struct cvmrdma_context * ctxt, struct ibv_cq * pr
                     DEBUG("[CQ] User wrid %lx, byte_len %zu, imm_data %x, opcode %d, qp_num %x, status %d\n", send_wc.wr_id, send_wc.byte_len, send_wc.imm_data, send_wc.opcode, send_wc.qp_num, send_wc.status);
                     struct cvmrdma_cq * scq = (struct cvmrdma_cq *)qp->user_qp.qp.send_cq;
                     wcq_push(scq->wc_queue, &send_wc);
+                    no_data_recv_count++;
 
                     uint64_t event = (uintptr_t) scq;
                     bool expected = 1;
@@ -162,6 +181,16 @@ static int cq_server_loop_once(struct cvmrdma_context * ctxt, struct ibv_cq * pr
 
                 }
             }
+            get_time(&end_send_recv);
+
+
+            add_time_difference(total_time_all, total_time_all_counters, submit_start, end_send_recv);
+            add_time_difference(total_time_all + 1, total_time_all_counters + 1, submit_start, submit_end);
+            add_time_difference(total_time_all + 2, total_time_all_counters + 2, ibv_send, start_send_recv);
+            add_time_difference(total_time_all + 3, total_time_all_counters + 3, start_send_recv, end_send_recv);
+            add_time_difference(total_time_all + 4, total_time_all_counters + 4, start_send_recv, recv_get_send_metadata);
+            add_time_difference(total_time_all + 5, total_time_all_counters + 5, recv_get_send_metadata, recv_get_bounce_metadata);
+            add_time_difference(total_time_all + 6, total_time_all_counters + 6, recv_get_bounce_metadata, end_send_recv);
 
         }
         else
@@ -216,6 +245,7 @@ static int cq_server_loop_once(struct cvmrdma_context * ctxt, struct ibv_cq * pr
 
             /* And update the slot idx */
             qp->next_recv_slot = (this_recv_slot_id + 1) % cvmrdma_ring_entries;
+            qp->received_lines++;
 
 
 
@@ -436,10 +466,9 @@ static int cq_server_loop_once(struct cvmrdma_context * ctxt, struct ibv_cq * pr
                         .mode = 0,
                     };
 
-                    //fprintf(stderr, "[CQ] Making chunk %llu writable again. addr=%llx, len=%llx\n", chunk_idx, decrypted, cvmrdma_chunk_bytes);
 
                     if (ioctl(cur_mr->uffd, UFFDIO_WRITEPROTECT, &uffdio_wp) == -1) {
-                        fprintf(stderr, "[CACHE] ioctl-UFFDIO_WRITEPROTECT: %d\n", errno);
+                        fprintf(stderr, "[SERVER] ioctl-UFFDIO_WRITEPROTECT: %d\n", errno);
                         exit(1);
                     }
                 }
@@ -720,8 +749,12 @@ static int cq_server_loop_once(struct cvmrdma_context * ctxt, struct ibv_cq * pr
 
                     DEBUG("[CQ] Pushing WC, byte_len %zu, imm %x, opcode %d, qp_num %x, status %d, wr_id %lx\n", recv_wc.byte_len, recv_wc.imm_data, recv_wc.opcode, recv_wc.qp_num, recv_wc.status, recv_wc.wr_id);
 
-                    /* Notify user CQ of a RECV */
+                    get_time(&last_chunk_prepare_data);
+
                     wcq_push(rcq->wc_queue, &recv_wc);
+
+                    get_time(&last_chunk_push_wc);
+                    recv_count++;
                     // Pointer to cq struct, see verbs.c:603
                     uint64_t event = (uintptr_t) rcq;
                     bool expected = 1;
@@ -743,27 +776,35 @@ static int cq_server_loop_once(struct cvmrdma_context * ctxt, struct ibv_cq * pr
 
 #ifndef CVMRDMA_DISABLE_RECV_NOTIFY
             DEBUG("FFF [CQ] notifying remote that chunk %zu is free\n", this_recv_slot_id);
-            if (qp->is_loopback) {
-                remote_qp_notify_chunk_recv(qp->local_addr, ctxt->network_evloop, qp->remote_qnc);
-            } else {
-                remote_qp_notify_chunk_recv(qp->remote_addr, ctxt->network_evloop, qp->remote_qnc);
+
+            if (qp->received_lines >= qp->received_lines_threshold){
+                if (qp->is_loopback) {
+                    remote_qp_notify_chunk_recv(qp->local_addr, ctxt->network_evloop, qp->remote_qnc);
+                } else {
+                    remote_qp_notify_chunk_recv(qp->remote_addr, ctxt->network_evloop, qp->remote_qnc);
+                }
+
+                qp->received_lines_threshold += (cvmrdma_ring_entries / 2);
             }
+            
 #endif
             get_time(&end_recv);
 
-            add_time_difference(total_time_recv, start_recv, end_recv);
-            add_time_difference(total_time_recv+1, start_recv, refuel);
-            add_time_difference(total_time_recv+2, refuel, setup);
-            add_time_difference(total_time_recv+3, setup, get_nonce);
-            add_time_difference(total_time_recv+4, get_nonce, decrypt_metadata);
-            add_time_difference(total_time_recv+5, decrypt_metadata, sem_wait_start_recv);
-            add_time_difference(total_time_recv+6, sem_wait_start_recv, sem_wait_end_recv);
-            add_time_difference(total_time_recv+7, sem_wait_end_recv, copy_payload);
-            add_time_difference(total_time_recv+8, copy_payload, remove_write_protection);
-            add_time_difference(total_time_recv+9, remove_write_protection, decrypt_payload);
-            add_time_difference(total_time_recv+10, decrypt_payload, scatter_or_bypass);
-            add_time_difference(total_time_recv+11, scatter_or_bypass, last_chunk);
-            add_time_difference(total_time_recv+12, last_chunk, end_recv);
+            add_time_difference(total_time_recv, total_time_recv_counters, start_recv, end_recv);
+            add_time_difference(total_time_recv+1, total_time_recv_counters+1, start_recv, refuel);
+            add_time_difference(total_time_recv+2, total_time_recv_counters+2, refuel, setup);
+            add_time_difference(total_time_recv+3, total_time_recv_counters+3, setup, get_nonce);
+            add_time_difference(total_time_recv+4, total_time_recv_counters+4, get_nonce, decrypt_metadata);
+            add_time_difference(total_time_recv+5, total_time_recv_counters+5, decrypt_metadata, sem_wait_start_recv);
+            add_time_difference(total_time_recv+6, total_time_recv_counters+6, sem_wait_start_recv, sem_wait_end_recv);
+            add_time_difference(total_time_recv+7, total_time_recv_counters+7, sem_wait_end_recv, copy_payload);
+            add_time_difference(total_time_recv+8, total_time_recv_counters+8, copy_payload, remove_write_protection);
+            add_time_difference(total_time_recv+9, total_time_recv_counters+9, remove_write_protection, decrypt_payload);
+            add_time_difference(total_time_recv+10, total_time_recv_counters+10, decrypt_payload, scatter_or_bypass);
+            add_time_difference(total_time_recv+11, total_time_recv_counters+11, scatter_or_bypass, last_chunk_prepare_data);
+            add_time_difference(total_time_recv+12, total_time_recv_counters+12, last_chunk_prepare_data, last_chunk_push_wc);
+            add_time_difference(total_time_recv+13, total_time_recv_counters+13, last_chunk_push_wc, last_chunk);
+            add_time_difference(total_time_recv+14, total_time_recv_counters+14, start_recv, end_recv);
         }
     }
 

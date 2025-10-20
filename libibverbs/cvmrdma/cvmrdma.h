@@ -7,6 +7,8 @@
 #define PAGE_SIZE 4096
 #define DIVIDE_ROUND_UP(x,y) ((x + y - 1) / y)
 
+#define NONCE_CACHE_SIZE 100
+
 struct cq_server_notification
 {
     uint64_t hca_addr; // 8

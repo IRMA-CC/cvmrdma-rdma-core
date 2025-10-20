@@ -16,7 +16,6 @@ void free_qp_recv_metadata(QpRecvMetadata * recv_metadata)
 
 void qp_recv_metadata_push(QpRecvMetadata * recv_metadata_manager, uint64_t wrid, struct ibv_sge * sgl, int nsge)
 {
-    DEBUG("[RM] push RECV metadata: currently has %zu entries\n", recv_metadata_manager->queue.size());
     
     // The sgl is a _list_ not an array that simply can be copied. It contains a next pointer after all.
     assert(nsge == 1);
@@ -38,7 +37,6 @@ void qp_recv_metadata_push(QpRecvMetadata * recv_metadata_manager, uint64_t wrid
 
 void qp_recv_metadata_pop(QpRecvMetadata * recv_metadata_manager)
 {
-    DEBUG("[RM] pop RECV metadata: currently has %zu entries\n", recv_metadata_manager->queue.size());
     struct recv_metadata_entry & entry = recv_metadata_manager->queue.front();
     delete [] entry.sgl;
     recv_metadata_manager->queue.pop();
@@ -46,6 +44,5 @@ void qp_recv_metadata_pop(QpRecvMetadata * recv_metadata_manager)
 
 struct recv_metadata_entry * qp_recv_metadata_front(QpRecvMetadata * recv_metadata_manager)
 {
-    DEBUG("[RM] RECV metadata front: currently has %zu entries\n", recv_metadata_manager->queue.size()); 
     return &recv_metadata_manager->queue.front();
 }

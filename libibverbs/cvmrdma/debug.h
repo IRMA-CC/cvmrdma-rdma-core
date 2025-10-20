@@ -30,14 +30,15 @@
     } \
   } while(0)
 
-#define DEBUG_TIMING
+//#define DEBUG_TIMING
+#define DEBUG_CYCLES
 
 #ifdef DEBUG_TIMING
 static inline void get_time(struct timespec *t){
 	clock_gettime(CLOCK_MONOTONIC, t);
 }
 
-static inline void add_time_difference(uint64_t *sum_ns, struct timespec t1, struct timespec t2){
+static inline void add_time_difference(uint64_t *sum_ns, uint64_t *counter, struct timespec t1, struct timespec t2){
 	long seconds = t2.tv_sec - t1.tv_sec;
     long ns = t2.tv_nsec - t1.tv_nsec;
 
@@ -48,18 +49,25 @@ static inline void add_time_difference(uint64_t *sum_ns, struct timespec t1, str
     long total_ns = seconds * 1000000000L + ns;
 
     *sum_ns += total_ns;
+    (*counter)++;
 }
 
-static void save_results(uint64_t *values, char **labels, int length){
+static void save_results(uint64_t *values, uint64_t *counters, char **labels, int length){
+
+    double total_mean = (double)values[0] / (double)counters[0];
 
     for (int i = 0; i < length; i++){
         uint64_t value = values[i];
+        uint64_t counter = counters[i];
         char* label = labels[i];
 
-        double percentage = (double) value / (double)values[0] * 100.0;
+        double mean = (double)value / (double)counter;
 
-        fprintf(stderr, "%s: %llu (%.2f%%)\n", label, value, percentage);
+        double percentage = mean / total_mean * 100.0;
+
+        fprintf(stderr, "%s: %f (%.2f%%)\n", label, mean, percentage);
     }
+    fprintf(stderr, "\n");
 }
 
 static inline void print_timings(struct timespec t1, struct timespec t2, const char* label) {
@@ -80,10 +88,58 @@ static inline void print_percentage(struct timespec t1, struct timespec t2, stru
     double percentage = (double)part_ns / (double)total_ns * 100.0;
     printf("PERCENTAGE %s: %.2f%%\n", label, percentage);
 }
+#elif defined(DEBUG_CYCLES)
+
+static inline uint64_t rdtscp(void) {
+    unsigned int lo, hi;
+    __asm__ volatile ("RDTSCP\n\t" : "=a"(lo), "=d"(hi) : : "%rcx");
+    return ((uint64_t)hi << 32) | lo;
+}
+
+static inline void get_time(uint64_t *t) {
+    *t = rdtscp();
+}
+
+static inline void add_time_difference(uint64_t *sum_cycles, uint64_t *counter, uint64_t t1, uint64_t t2) {
+    uint64_t diff = t2 - t1;
+    *sum_cycles += diff;
+    (*counter)++;
+}
+
+static void save_results(uint64_t *values, uint64_t *counters, char **labels, int length){
+
+    double total_mean = (double)values[0] / (double)counters[0];
+
+    for (int i = 0; i < length; i++){
+        uint64_t value = values[i];
+        uint64_t counter = counters[i];
+        char* label = labels[i];
+
+        double mean = (double)value / (double)counter;
+
+        double percentage = mean / total_mean * 100.0;
+
+        fprintf(stderr, "%s: %f (%.2f%%)\n", label, mean, percentage);
+    }
+    fprintf(stderr, "\n");
+}
+
+static inline void print_timings(uint64_t t1, uint64_t t2, const char* label) {
+    uint64_t total_cycles = t2 - t1;
+    printf("TIMING CYCLES %s: %lu cycles\n", label, total_cycles);
+}
+
+static inline void print_percentage(uint64_t t1, uint64_t t2, uint64_t start, uint64_t end, const char* label) {
+    uint64_t total_cycles = end - start;
+    uint64_t part_cycles = t2 - t1;
+    double percentage = (double)part_cycles / (double)total_cycles * 100.0;
+    printf("PERCENTAGE CYCLES %s: %.2f%%\n", label, percentage);
+}
+
 #else
-static inline void get_time(struct timespec *t){}
-static inline void add_time_difference(uint64_t sum_ns, struct timespec t1, struct timespec t2){}
-static inline void print_timings(struct timespec t1, struct timespec t2, const char* label) {}
-static inline void print_percentage(struct timespec t1, struct timespec t2, struct timespec start, struct timespec end, const char* label) {}
-static void save_results(uint64_t *values, char **labels, int length){}
+#define get_time(x) ((void)0)
+#define add_time_difference(a,b,c,d) ((void)0)
+#define save_results(a,b,c,d) ((void)0)
+#define print_timings(a,b,c) ((void)0)
+#define print_percentage(a,b,c,d,e) ((void)0)
 #endif

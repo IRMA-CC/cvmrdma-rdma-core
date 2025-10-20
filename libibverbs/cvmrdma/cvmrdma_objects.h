@@ -19,6 +19,7 @@
 #include "wc_queue.h"
 #include "wr_queue.h"
 #include "nonce_queue.h"
+#include "cvmrdma.h"
 
 // enabling this will disable the secure secondary channel
 // WARNING: This will very likely lead to decryption errors, so this is for testing only!
@@ -175,6 +176,8 @@ struct cvmrdma_qp {
 	int no_data_message_mr_fd;
 	sem_t no_data_message_sem;
 
+	uint64_t nonce_metadata_cache[cvmrdma_aead_NPUB_WORDS * NONCE_CACHE_SIZE];
+	int nonce_metadata_cache_offset;
 
 	int next_send_slot;
 	int next_recv_slot;
@@ -186,7 +189,8 @@ struct cvmrdma_qp {
 	/* During recv the server counts the number of slots processed.
 	   If a certain threshold is reached, the server sends an ACK.
 	*/
-	int received_lines;
+	uint64_t received_lines;
+	uint64_t received_lines_threshold;
 
 	/* qp specific counter of all send messages*/
 	_Atomic uint64_t cvmrdma_qp_send_wr_id;
@@ -269,5 +273,14 @@ struct chunk_tracking_info {
 };
 
 extern bool cvmrdma_disable_cache;
-extern struct timespec start_recv, refuel, setup, get_nonce, decrypt_metadata, sem_wait_start_recv, sem_wait_end_recv, copy_payload, remove_write_protection, decrypt_payload, scatter_or_bypass, last_chunk, end_recv;
-extern uint64_t total_time_recv[13];
+#ifdef DEBUG_TIMING
+extern struct timespec start_recv, refuel, setup, get_nonce, decrypt_metadata, sem_wait_start_recv, sem_wait_end_recv, copy_payload, remove_write_protection, decrypt_payload, scatter_or_bypass, last_chunk_prepare_data, last_chunk_push_wc, last_chunk, end_recv;
+extern struct timespec start_send_recv, end_send_recv, submit_start, ibv_send, submit_end, recv_get_bounce_metadata, recv_get_send_metadata;
+#else
+extern uint64_t start_send_recv, end_send_recv, submit_start, ibv_send, submit_end, recv_get_bounce_metadata, recv_get_send_metadata;
+extern uint64_t start_recv, refuel, setup, get_nonce, decrypt_metadata, sem_wait_start_recv, sem_wait_end_recv, copy_payload, remove_write_protection, decrypt_payload, scatter_or_bypass, last_chunk_prepare_data, last_chunk_push_wc, last_chunk, end_recv;
+#endif
+extern uint64_t total_time_recv[15];
+extern uint64_t total_time_recv_counters[15];
+extern uint64_t total_time_all[7];
+extern uint64_t total_time_all_counters[7];

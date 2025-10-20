@@ -15,6 +15,7 @@
 #include "recv_metadata.h"
 #include "nonce_queue.h"
 #include "debug.h"
+#include "cvmrdma.h"
 
 static capnp::CapabilityServerSet<CVMRDMA::QpNotificationChannel> qnc_capset;
 
@@ -57,7 +58,7 @@ kj::Promise<void> QpNotificationChannel::notifyChunkRecv(NotifyChunkRecvContext 
     recv_counter++;
     DEBUG("FFF [NS] notifyChunkRecv: %d\n", recv_counter);
     pthread_mutex_lock(m_send_lines_lock_ptr);
-    (*m_send_lines_full_ptr) = (*m_send_lines_full_ptr) - 1;
+    (*m_send_lines_full_ptr) = (*m_send_lines_full_ptr) - (cvmrdma_ring_entries / 2);
     pthread_mutex_unlock(m_send_lines_lock_ptr);
 
     pthread_cond_signal(m_send_lines_avail_cv_ptr);
@@ -85,16 +86,21 @@ kj::Promise<void> QpNotificationChannel::setRemoteParams(SetRemoteParamsContext 
 kj::Promise<void> QpNotificationChannel::notifyNonce(NotifyNonceContext context)
 {
     auto p = context.getParams();
-    uint64_t nonce[cvmrdma_aead_NPUBBYTES] = {
-        p.getNonce0(),
-        p.getNonce1(),
-        p.getNonce2()
-    };
 
-    DEBUG("[NS] Received nonce: 0x%" PRIx64 " 0x%" PRIx64 " 0x%" PRIx64 "\n",
-        nonce[0], nonce[1], nonce[2]);
+    KJ_REQUIRE(p.getNonces().size() == NONCE_CACHE_SIZE * cvmrdma_aead_NPUB_WORDS, "Nonce list size mismatch");
 
-    this->notify_nonce(nonce);
+    //fprintf(stderr, "Batch receive \n");
+    for (int j = 0; j < NONCE_CACHE_SIZE; j++){
+
+        uint64_t nonce[cvmrdma_aead_NPUB_WORDS];
+        for (size_t i = 0; i < cvmrdma_aead_NPUB_WORDS; i++) {
+            nonce[i] = p.getNonces()[i + j * cvmrdma_aead_NPUB_WORDS];
+        }
+
+        //fprintf(stderr, "[NS] Received nonce: 0x%" PRIx64 " 0x%" PRIx64 " 0x%" PRIx64 "\n", nonce[0], nonce[1], nonce[2]);
+
+        this->notify_nonce(nonce);
+    }
 
     return kj::READY_NOW;
 }

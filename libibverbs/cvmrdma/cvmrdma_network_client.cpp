@@ -5,6 +5,7 @@
 #include <thread>
 
 #include "debug.h"
+#include "cvmrdma.h"
 
 static int send_counter = 0;
 
@@ -35,12 +36,13 @@ kj::Promise<void> notify_nonce_rpc(QPNotificationClient * qnc, uint64_t * nonce)
 {
     auto req = qnc->notifyNonceRequest();
 
-    req.setNonce0(nonce[0]);
-    req.setNonce1(nonce[1]);
-    req.setNonce2(nonce[2]);
+    //fprintf(stderr, "Batch send \n");
+    auto nonces = req.initNonces(NONCE_CACHE_SIZE * cvmrdma_aead_NPUB_WORDS);
+    for (int i = 0; i < NONCE_CACHE_SIZE * cvmrdma_aead_NPUB_WORDS; i++){
+        nonces.set(i, nonce[i]);
 
-    DEBUG("[NC] Sending nonce to remote: 0x%" PRIx64 " 0x%" PRIx64 " 0x%" PRIx64 "\n",
-        nonce[0], nonce[1], nonce[2]);
+        //fprintf(stderr, "[NC] Sending nonce to remote: 0x%" PRIx64 "\n", nonce[i]);
+    }
 
     return req.send().ignoreResult();
 }

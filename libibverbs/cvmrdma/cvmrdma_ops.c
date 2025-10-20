@@ -77,6 +77,8 @@ static char * lookup_ip_by_lid(uint64_t lid)
 
 static struct ibv_pd * cvmrdma_alloc_pd(struct ibv_context * ibcontext)
 {
+	
+	fprintf(stderr, "Using NONCE_CACHE with value %d\n", NONCE_CACHE_SIZE);
     struct cvmrdma_context * ctxt = cvmrdma_get_ctx(ibcontext);
 
     PdBounceMetadata * bounce_metadata;
@@ -368,6 +370,10 @@ static struct ibv_qp *cvmrdma_create_qp(struct ibv_pd * ibpd,
 
 	struct cvmrdma_qp * qp = calloc(1, sizeof(struct cvmrdma_qp));
 	qp->wr_queue = alloc_wr_queue();
+	qp->nonce_metadata_cache_offset = 0;
+
+	qp->received_lines = 0;
+	qp->received_lines_threshold = cvmrdma_ring_entries / 2;
 
 	/* Create the provider QP */
 	struct ibv_qp_init_attr_ex attr_ex = {0};
@@ -761,6 +767,7 @@ err:
     return ret;
 }
 
+_Atomic uint64_t total_polled = 0;
 
 /* Poll the WCs that are passed by the CQ server. */
 static int cvmrdma_poll_cq(struct ibv_cq * ibcq, int num_entries, struct ibv_wc *wc)
@@ -772,6 +779,7 @@ static int cvmrdma_poll_cq(struct ibv_cq * ibcq, int num_entries, struct ibv_wc 
 
 	/* If there are notifications OR an error, return ... */
 	n_popped = wcq_pop_into(cq->wc_queue, wc, num_entries);
+	total_polled += n_popped;
 	if(n_popped != 0)
 	{
 		return n_popped;
@@ -815,6 +823,46 @@ static int cvmrdma_post_recv(struct ibv_qp *ibqp, struct ibv_recv_wr *wr,
 
 
 
+void send_nonce_cache(struct cvmrdma_qp *qp, struct cvmrdma_context *ctxt, uint64_t *nonce_metadata) {
+#ifndef CVMRDMA_DISABLE_SECURE_SECONDARY_CHANNEL
+	if (qp->nonce_metadata_cache_offset == 0){
+		randombytes_buf(&qp->nonce_metadata_cache, cvmrdma_aead_NPUBBYTES * NONCE_CACHE_SIZE);
+
+		if (qp->is_loopback) {
+			remote_notify_nonce(qp->local_addr, ctxt->network_evloop, qp->remote_qnc, &qp->nonce_metadata_cache);
+		} else {
+			remote_notify_nonce(qp->remote_addr, ctxt->network_evloop, qp->remote_qnc, &qp->nonce_metadata_cache);
+		}
+	}
+	size_t word_off = (size_t)(qp->nonce_metadata_cache_offset) * cvmrdma_aead_NPUB_WORDS;
+    memcpy(nonce_metadata,
+           &qp->nonce_metadata_cache[word_off],
+           cvmrdma_aead_NPUBBYTES);	
+	qp->nonce_metadata_cache_offset = (qp->nonce_metadata_cache_offset + 1) % NONCE_CACHE_SIZE;
+#else 
+	memset(nonce_metadata, 0, cvmrdma_aead_NPUBBYTES);
+#endif
+}
+
+void send_nonce(struct cvmrdma_qp *qp, struct cvmrdma_context *ctxt, uint64_t *nonce_metadata) {
+#ifndef CVMRDMA_DISABLE_SECURE_SECONDARY_CHANNEL
+	randombytes_buf(nonce_metadata, cvmrdma_aead_NPUBBYTES);
+	// send the nonce metadata to the remote
+
+	//fprintf(stderr, "[Send] send nonce %lx %lx %lx\n", nonce_metadata[0], nonce_metadata[1], nonce_metadata[2]);
+
+	if (qp->is_loopback) {
+		remote_notify_nonce(qp->local_addr, ctxt->network_evloop, qp->remote_qnc, nonce_metadata);
+	} else {
+		remote_notify_nonce(qp->remote_addr, ctxt->network_evloop, qp->remote_qnc, nonce_metadata);
+	}
+#else 
+	memset(nonce_metadata, 0, cvmrdma_aead_NPUBBYTES);
+#endif
+}
+
+
+
 _Atomic uint64_t cvmrdma_global_send_wr_id = 0;
 
 // these variables are all just used for debugging
@@ -824,21 +872,29 @@ _Atomic uint64_t max_send_size = 0;
 _Atomic uint64_t total_chunks_send = 0;
 _Atomic uint64_t chunk_cache_used = 0;
 
-struct timespec start, calc_chunks, send_nonce, slot_wait_start, slot_wait_end, sem_wait_end, write_protect, encrypt_metadata, payload_encryption, ibv_send, end;
-uint64_t total_time[11] = {0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0};
-char *labels[11] = {"Total", "Calc chunks", "Send nonce", "Chunk calculation 2", "Slot wait", "Sem wait", "Write protect", "Encrypt metadata", "Payload encryption", "ibv_post_send", "End"};
-char *labels_recv[13] = {"Total", "Refuel", "Setup", "Get nonce", "Decrypt metadata", "Sem wait start", "Sem wait end", "Copy payload", "Remove write protection", "Decrypt payload", "Scatter or bypass", "Last chunk", "End"};
-
+#ifdef DEBUG_TIMING
+struct timespec start, calc_chunks, send_nonce_time, slot_wait_start, slot_wait_end, sem_wait_end, cache_atomic_load, write_protect, cache_atomic_store, encrypt_metadata, payload_encryption, ibv_send, end;
+struct timespec submit_start, submit_end;
+#else
+uint64_t start, calc_chunks, send_nonce_time, slot_wait_start, slot_wait_end, sem_wait_end, cache_atomic_load, write_protect, cache_atomic_store, encrypt_metadata, payload_encryption, ibv_send, end;
+uint64_t submit_start, submit_end;
+#endif
+uint64_t total_time[13] = {0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0};
+uint64_t total_time_counters[13] = {0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0};
+char *labels[13] = {"Total", "Calc chunks", "Send nonce", "Chunk calculation 2", "Slot wait", "Sem wait", "atomic load", "Write protect", "atomic store", "Encrypt metadata", "Payload encryption", "ibv_post_send", "End"};
+char *labels_recv[15] = {"Total", "Refuel", "Setup", "Get nonce", "Decrypt metadata", "Sem wait start", "Sem wait end", "Copy payload", "Remove write protection", "Decrypt payload", "Scatter or bypass", "Last chunk prepare data", "Last chunk push wc", "Last chunk comp channel", "End"};
+char *labels_all[7] = {"Total process time", "Submit time", "Raw rdma send time", "recv time", "recv_get_send_metadata", "recv_get_bounce_metadata", "recv_signal"};
 
 uint64_t REPORT = 1000;
-static int post_send_do_bounce(struct cvmrdma_qp * qp, struct ibv_send_wr *wrs, struct ibv_send_wr **bad_wr, bool write_for_read)
+
+static int post_send_do_bounce(struct cvmrdma_qp * qp, struct ibv_send_wr *wrs, struct ibv_send_wr **bad_wr)
 {
 	get_time(&start);
 
 	send_count++;
-	if (send_count % REPORT == 0){
+	/*if (send_count % REPORT == 0){
 		fprintf(stderr, "Send %d\n", send_count);
-	}
+	}*/
 
 	struct cvmrdma_context * ctxt = cvmrdma_get_ctx(qp->user_qp.qp.context);
 	struct cvmrdma_pd * pd = (struct cvmrdma_pd *)qp->user_qp.qp.pd;
@@ -934,17 +990,17 @@ static int post_send_do_bounce(struct cvmrdma_qp * qp, struct ibv_send_wr *wrs, 
 			size_t sge_chunks = DIVIDE_ROUND_UP(sgl[i].length + ((sgl[i].addr- cur_mr->hca_va) % cvmrdma_chunk_bytes), cvmrdma_chunk_bytes);
 			total_chunks += sge_chunks;
 		}
-		if (total_chunks > 1){
+		/*if (total_chunks > 1){
 			fprintf(stderr, "Send more than one chunks: %d\n", total_chunks);
 		}
 		total_chunks_send += total_chunks;
 		if (total_chunks_send % REPORT == 0){
 			fprintf(stderr, "Send %d chunks\n", total_chunks_send);
-		}
+		}*/
 
 		if (total_bytes > max_send_size){
 			max_send_size = total_bytes;
-			fprintf(stderr, "Found new max send size: %d\n", max_send_size);
+			// fprintf(stderr, "Found new max send size: %d\n", max_send_size);
 		}
 
 		if (total_chunks == 0) {
@@ -954,9 +1010,9 @@ static int post_send_do_bounce(struct cvmrdma_qp * qp, struct ibv_send_wr *wrs, 
 
 		if (no_data_send){
 			no_data_send_count++;
-			if (no_data_send_count % REPORT == 0){
+			/*if (no_data_send_count % REPORT == 0){
 				fprintf(stderr, "Send %d no data messages\n", no_data_send_count);
-			}
+			}*/
 		}
 
 
@@ -965,7 +1021,7 @@ static int post_send_do_bounce(struct cvmrdma_qp * qp, struct ibv_send_wr *wrs, 
 		   BEFORE we start sending, so that CQ server has this informatin when WCs start to arrive
 		   This means that each chunk has to send EXACTLY payload_bytes, even if the tag ends up
 		   being shorter (bc of the AEAD choice) */
-		qp_send_metadata_push(qp->send_metadata, this_wr->wr_id, this_op, total_bytes, total_chunks, write_for_read, send_signaled, no_data_send);
+		qp_send_metadata_push(qp->send_metadata, this_wr->wr_id, this_op, total_bytes, total_chunks, send_signaled, no_data_send);
 
 		if (is_read){
 			qp_read_metadata_push(qp->read_metadata, this_wr->wr_id, sgl, nsge);
@@ -981,26 +1037,19 @@ static int post_send_do_bounce(struct cvmrdma_qp * qp, struct ibv_send_wr *wrs, 
 
 		get_time(&calc_chunks);
 
+#if defined(DEBUG_TIMING) || defined(DEBUG_CYCLES)
+		if (total_chunks > 1) {
+			fprintf(stderr, "WARNING: More than one chunk, time mesaurements will be incorrect\n");
+		}
+#endif
+
 		while(cur_sge_idx < nsge)
 		{
 			// generate new metadata nonce for each metadata 
 			uint64_t nonce_metadata[cvmrdma_aead_NPUB_WORDS];
-#ifndef CVMRDMA_DISABLE_SECURE_SECONDARY_CHANNEL
-			randombytes_buf(nonce_metadata, cvmrdma_aead_NPUBBYTES);
-			// send the nonce metadata to the remote
-			
-			//fprintf(stderr, "[Send] send nonce %lx %lx %lx\n", nonce_metadata[0], nonce_metadata[1], nonce_metadata[2]);
+			send_nonce_cache(qp, ctxt, nonce_metadata);
 
-			if (qp->is_loopback) {
-				remote_notify_nonce(qp->local_addr, ctxt->network_evloop, qp->remote_qnc, nonce_metadata);
-			} else {
-				remote_notify_nonce(qp->remote_addr, ctxt->network_evloop, qp->remote_qnc, nonce_metadata);
-			}
-#else 
-			memset(nonce_metadata, 0, cvmrdma_aead_NPUBBYTES);
-#endif
-
-			get_time(&send_nonce);
+			get_time(&send_nonce_time);
 
 
 			struct ibv_sge * cur_sge = &sgl[cur_sge_idx];
@@ -1093,14 +1142,15 @@ static int post_send_do_bounce(struct cvmrdma_qp * qp, struct ibv_send_wr *wrs, 
 
 				while(qp->send_lines_full >= cvmrdma_ring_entries)
 				{
+					fprintf(stderr, "[SEND QPN %x] Waiting for send slot\n", qp->user_qp.qp.qp_num);
 					pthread_cond_wait(&qp->send_lines_avail, &qp->send_lines_full_lock);
 				}
 
 				slot_id = qp->next_send_slot;
 
-				if (slot_id == cvmrdma_ring_entries - 1){
+				/*if (slot_id == cvmrdma_ring_entries - 1){
 					fprintf(stderr, "Used all slots!!!\n");
-				}
+				}*/
 
 				qp->next_send_slot = (slot_id + 1) % cvmrdma_ring_entries;
 				
@@ -1126,13 +1176,15 @@ static int post_send_do_bounce(struct cvmrdma_qp * qp, struct ibv_send_wr *wrs, 
 				cached = atomic_load(&chunk_info->cached);
 			}
 
+			get_time(&cache_atomic_load);
+
 			// after we acquired the in_transit_sem, we set it to be write protected.
 			// the cache handler, can only remove the write protection if it can aquire the in_transit_sem.
 			// Until the cache can aquire the in_transit_sem, the write will block.
 			// There is the possibility, that a write occurs between aquiring the lock and setting the write protection.
 			// this is ok, because these writes will be included in the encryption of the chunk.
 			size_t wp_len = send_len;
-			if(!cvmrdma_disable_cache){
+			if(!cvmrdma_disable_cache && !cached) {
 				// Mark chunk in userMR as write protected
 				int uffd = cur_mr->uffd;
 				struct uffdio_writeprotect uffdio_wp = {
@@ -1145,12 +1197,18 @@ static int post_send_do_bounce(struct cvmrdma_qp * qp, struct ibv_send_wr *wrs, 
 				if (ioctl(uffd, UFFDIO_WRITEPROTECT, &uffdio_wp) == -1) {
 					exit(1);
 				}
+
+
+				get_time(&write_protect);
 				//fprintf(stderr, "[SEND] Making chunk %llu not writable. addr=%llx, len=%llx\n", chunk_idx, ptxt, wp_len);
 
 				atomic_store(&chunk_info->cached, true);
+				get_time(&cache_atomic_store);
 				//fprintf(stderr, "[SEND QPN %x] Marked chunk %lu as cached\n", qp->user_qp.qp.qp_num, chunk_idx);
+			} else {
+				get_time(&write_protect);
+				get_time(&cache_atomic_store);
 			}
-			get_time(&write_protect);
 
 
 			if(!cached) {
@@ -1232,15 +1290,13 @@ static int post_send_do_bounce(struct cvmrdma_qp * qp, struct ibv_send_wr *wrs, 
 			}
 
 			get_time(&encrypt_metadata);
-
-			TIMING("gec_t0");
 			/**** ENCRYPT *****/
 			if(cached){
 				//fprintf(stderr, "[SEND QPN %x] Chunk %lu is cached, skipping\n", qp->user_qp.qp.qp_num, chunk_idx);
 				chunk_cache_used++;
-				if (chunk_cache_used % 100 == 0){
+				/*if (chunk_cache_used % 100 == 0){
 					fprintf(stderr, "Chunk cached used %d times\n", chunk_cache_used);
-				}
+				}*/
 				goto skip_payload_encryption;
 			}
 
@@ -1365,7 +1421,7 @@ skip_payload_encryption:
 			DEBUG("[SEND QPN %x] No data send, sending no-data message\n", qp->user_qp.qp.qp_num);
 			
 			uint64_t nonce_metadata[cvmrdma_aead_NPUB_WORDS];
-#ifndef CVMRDMA_DISABLE_SECURE_SECONDARY_CHANNEL
+/*#ifndef CVMRDMA_DISABLE_SECURE_SECONDARY_CHANNEL
 			randombytes_buf(nonce_metadata, cvmrdma_aead_NPUBBYTES);
 			// send the nonce metadata to the remote
 			if (qp->is_loopback) {
@@ -1375,9 +1431,10 @@ skip_payload_encryption:
 			}
 #else 
 			memset(nonce_metadata, 0, cvmrdma_aead_NPUBBYTES);
-#endif
+#endif*/
+			send_nonce_cache(qp, ctxt, nonce_metadata);
 
-			get_time(&send_nonce);
+			get_time(&send_nonce_time);
 			bool last_chunk = true; // no data send, so this is the last chunk
 
 			get_time(&slot_wait_start);
@@ -1388,14 +1445,15 @@ skip_payload_encryption:
 
 				while(qp->send_lines_full >= cvmrdma_ring_entries)
 				{
+					fprintf(stderr, "[SEND QPN %x] Waiting for send slot\n", qp->user_qp.qp.qp_num);
 					pthread_cond_wait(&qp->send_lines_avail, &qp->send_lines_full_lock);
 				}
 
 				slot_id = qp->next_send_slot;
 
-				if (slot_id == cvmrdma_ring_entries - 1){
+				/*if (slot_id == cvmrdma_ring_entries - 1){
 					fprintf(stderr, "Used all slots!!!\n");
-				}
+				}*/
 
 				qp->next_send_slot = (slot_id + 1) % cvmrdma_ring_entries;
 				
@@ -1411,7 +1469,9 @@ skip_payload_encryption:
 			DEBUG("[SEND QPN %x] Waiting for no-data message lock\n", qp->user_qp.qp.qp_num);
 			sem_wait(&qp->no_data_message_sem);
 			get_time(&sem_wait_end);
+			get_time(&cache_atomic_load);
 			get_time(&write_protect);
+			get_time(&cache_atomic_store);
 			DEBUG("[SEND QPN %x] Acquired no-data message lock\n", qp->user_qp.qp.qp_num);
 			unsigned char * slot = qp->no_data_message_mr_va;
 
@@ -1513,29 +1573,43 @@ skip_payload_encryption:
 		}
 	}
 
+
 	get_time(&end);
-	add_time_difference(total_time, start, end);
-	add_time_difference(total_time + 1, start, calc_chunks);
-	add_time_difference(total_time + 2, calc_chunks, send_nonce);
-	add_time_difference(total_time + 3, send_nonce, slot_wait_start);
-	add_time_difference(total_time + 4, slot_wait_start, slot_wait_end);
-	add_time_difference(total_time + 5, slot_wait_end, sem_wait_end);
-	add_time_difference(total_time + 6, sem_wait_end, write_protect);
-	add_time_difference(total_time + 7, write_protect, encrypt_metadata);
-	add_time_difference(total_time + 8, encrypt_metadata, payload_encryption);
-	add_time_difference(total_time + 9, payload_encryption, ibv_send);
-	add_time_difference(total_time + 10, ibv_send, end);
+	add_time_difference(total_time, total_time_counters, start, end);
+	add_time_difference(total_time + 1, total_time_counters+1, start, calc_chunks);
+	add_time_difference(total_time + 2, total_time_counters+2, calc_chunks, send_nonce_time);
+	add_time_difference(total_time + 3, total_time_counters+3, send_nonce_time, slot_wait_start);
+	add_time_difference(total_time + 4, total_time_counters+4, slot_wait_start, slot_wait_end);
+	add_time_difference(total_time + 5, total_time_counters+5, slot_wait_end, sem_wait_end);
+	add_time_difference(total_time + 6, total_time_counters+6, sem_wait_end, cache_atomic_load);
+	add_time_difference(total_time + 7, total_time_counters+7, cache_atomic_load, write_protect);
+	add_time_difference(total_time + 8, total_time_counters+8, write_protect, cache_atomic_store);
+	add_time_difference(total_time + 9, total_time_counters+9, cache_atomic_store, encrypt_metadata);
+	add_time_difference(total_time + 10, total_time_counters+10, encrypt_metadata, payload_encryption);
+	add_time_difference(total_time + 11, total_time_counters+11, payload_encryption, ibv_send);
+	add_time_difference(total_time + 12, total_time_counters+12, ibv_send, end);
 
 
 	return 0;
 }
 
 
+
+_Atomic submitted_send_counts = 0;
+
 static int cvmrdma_post_send(struct ibv_qp *ibqp, struct ibv_send_wr *wr,
 		     struct ibv_send_wr **bad_wr)
 {
+	submitted_send_counts++;
+	get_time(&submit_start);
+
     struct cvmrdma_qp * qp = (struct cvmrdma_qp *)ibqp;
 	int ret = 0;
+
+
+	get_time(&submit_end);
+	ret = post_send_do_bounce(qp, wr, bad_wr);
+	return ret;
 
 	// In theory we'd need to do wr validation in order to send rejected wr as bad_wr to the user.
 	
@@ -1573,10 +1647,11 @@ void *cvmrdma_do_bounce_loop(void *args) {
 
 	while(1) {
 		// If there are no entries to pop, this blocks non-busy until there are.
+		get_time(&submit_end);
 		wr = wrq_front(qp->wr_queue);
 
 		struct ibv_send_wr * bad_wr = NULL;
-		int ret = post_send_do_bounce(qp, wr, &bad_wr, false);
+		int ret = post_send_do_bounce(qp, wr, &bad_wr);
 		if(ret < 0)
 		{
 			fprintf(stderr, "failed to send WR with wr_id %lu, ret %d\n", wr->wr_id, ret);
@@ -1611,10 +1686,16 @@ _Atomic uint64_t cvmrdma_mr_id = 1;
 static struct ibv_mr *cvmrdma_reg_mr(struct ibv_pd *ibpd, void *addr, size_t length,
         uint64_t hca_va, int access)
 {
+
 	struct cvmrdma_pd * pd = (struct cvmrdma_pd *)ibpd;
 	struct ibv_context * ibctxt = pd->user_pd.context;
 	struct cvmrdma_context * ctxt = cvmrdma_get_ctx(ibctxt);
 	assert(length > 0);
+
+	if (((uintptr_t)addr % sysconf(_SC_PAGESIZE)) != 0 || (length % sysconf(_SC_PAGESIZE)) != 0) {
+		fprintf(stderr, "ERROR: addr (%p) and length (%zu) must be page aligned\n", addr, length);
+		exit(1);
+	}
 
     /* CVM
 		
@@ -1962,14 +2043,15 @@ out:
 }*/
 
 static int cvmrdma_dealloc_pd(struct ibv_pd *pd) {
-	fprintf(stderr, "dealloc pd called\n");
+	fprintf(stderr, "Dealloc pd called\n");
 	return 0;
 }
 
 static void cvmrdma_free_context(struct ibv_context *context){
 	
-	save_results(total_time, labels, 11);
-	save_results(total_time_recv, labels_recv, 13);
+	save_results(total_time, total_time_counters, labels, 13);
+	save_results(total_time_recv, total_time_recv_counters, labels_recv, 15);
+	save_results(total_time_all, total_time_all_counters, labels_all, 7);
 
 	fprintf(stderr, "Free context called\n");
 }
@@ -2033,10 +2115,10 @@ CapnpEvloopThread * evloop_server = NULL;
 CVMRDMAServer * tcp_server = NULL;
 
 bool cvmrdma_disable_cache = false;
-uint64_t cvmrdma_chunk_bytes = 2048 * 4096;
+uint64_t cvmrdma_chunk_bytes = 1024 * 4;
 uint64_t cvmrdma_ring_entries = -1;
 uint64_t cvmrdma_ack_threshold = -1;
-// it should always hold (cvmrdma_chunk_bytes * cvmrdma_ring_entires) < 64 * 2048 * 4096 = 536870912 bytes = 512 MiB
+// it should always hold (cvmrdma_chunk_bytes * cvmrdma_ring_entries) < 64 * 2048 * 4096 = 536870912 bytes = 512 MiB
 static struct verbs_context *cvmrdma_alloc_context(struct ibv_device *ibdev,
 						  int cmd_fd,
 						  void *private_data)
