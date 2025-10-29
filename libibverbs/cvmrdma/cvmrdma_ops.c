@@ -44,10 +44,10 @@
 
 static char * lookup_ip_by_lid(uint64_t lid)
 {
-	FILE * fp = fopen("/root/lid_to_ip", "r");
+	FILE * fp = fopen("/root/lid_to_ip_mlx5", "r");
 	if(! fp)
 	{
-		fprintf(stderr, "Failed to open /root/lid_to_ip\n");
+		fprintf(stderr, "Failed to open /root/lid_to_ip_mlx5\n");
 		return NULL;
 	}
 
@@ -70,7 +70,7 @@ static char * lookup_ip_by_lid(uint64_t lid)
         }
     }
     fclose(fp);
-	fprintf(stderr, "LID %d not found in /root/lid_to_ip\n", lid);
+	fprintf(stderr, "LID %d not found in /root/lid_to_ip_mlx5\n", lid);
 	return NULL; // LID not found
 }
 
@@ -569,12 +569,16 @@ static struct ibv_qp *cvmrdma_create_qp(struct ibv_pd * ibpd,
 	qp->nonce_set = false;
 	qp->nonce_queue = alloc_qp_nonce_queue();
 
+#ifdef SKIP_WR_QUEUE
+	fprintf(stderr, "CVMRDMA: Skipping WR queue processing\n");
+#else
 	err = pthread_create(&qp->send_server_thread, NULL, &cvmrdma_do_bounce_loop, (void *)qp);
 	if (err)
 	{
 		fprintf(stderr, "Error creating cvmrdma_cq_wait_completion_event thread: %d\n", err);
 		exit(1);
 	}
+#endif
 
 	char const * local_bind_addr = getenv("CVMRDMA_BIND_ADDR");
 	if(! local_bind_addr)
@@ -767,7 +771,7 @@ err:
     return ret;
 }
 
-_Atomic uint64_t total_polled = 0;
+//_Atomic uint64_t total_polled = 0;
 
 /* Poll the WCs that are passed by the CQ server. */
 static int cvmrdma_poll_cq(struct ibv_cq * ibcq, int num_entries, struct ibv_wc *wc)
@@ -779,7 +783,7 @@ static int cvmrdma_poll_cq(struct ibv_cq * ibcq, int num_entries, struct ibv_wc 
 
 	/* If there are notifications OR an error, return ... */
 	n_popped = wcq_pop_into(cq->wc_queue, wc, num_entries);
-	total_polled += n_popped;
+	// total_polled += n_popped;
 	if(n_popped != 0)
 	{
 		return n_popped;
@@ -866,23 +870,23 @@ void send_nonce(struct cvmrdma_qp *qp, struct cvmrdma_context *ctxt, uint64_t *n
 _Atomic uint64_t cvmrdma_global_send_wr_id = 0;
 
 // these variables are all just used for debugging
-_Atomic uint64_t send_count = 0;
-_Atomic uint64_t no_data_send_count = 0;
-_Atomic uint64_t max_send_size = 0;
-_Atomic uint64_t total_chunks_send = 0;
-_Atomic uint64_t chunk_cache_used = 0;
+// _Atomic uint64_t send_count = 0;
+//_Atomic uint64_t no_data_send_count = 0;
+//_Atomic uint64_t max_send_size = 0;
+//_Atomic uint64_t total_chunks_send = 0;
+//_Atomic uint64_t chunk_cache_used = 0;
 
 #ifdef DEBUG_TIMING
-struct timespec start, calc_chunks, send_nonce_time, slot_wait_start, slot_wait_end, sem_wait_end, cache_atomic_load, write_protect, cache_atomic_store, encrypt_metadata, payload_encryption, ibv_send, end;
+struct timespec start, calc_chunks, metadata_push, read_time, send_nonce_time, slot_wait_start, slot_wait_end, sem_wait_end, cache_atomic_load, write_protect, cache_atomic_store, encrypt_metadata, payload_encryption, ibv_send, end;
 struct timespec submit_start, submit_end;
 #else
-uint64_t start, calc_chunks, send_nonce_time, slot_wait_start, slot_wait_end, sem_wait_end, cache_atomic_load, write_protect, cache_atomic_store, encrypt_metadata, payload_encryption, ibv_send, end;
+uint64_t start, calc_chunks, metadata_push, read_time, send_nonce_time, slot_wait_start, slot_wait_end, sem_wait_end, cache_atomic_load, write_protect, cache_atomic_store, encrypt_metadata, payload_encryption, ibv_send, end;
 uint64_t submit_start, submit_end;
 #endif
-uint64_t total_time[13] = {0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0};
-uint64_t total_time_counters[13] = {0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0};
-char *labels[13] = {"Total", "Calc chunks", "Send nonce", "Chunk calculation 2", "Slot wait", "Sem wait", "atomic load", "Write protect", "atomic store", "Encrypt metadata", "Payload encryption", "ibv_post_send", "End"};
-char *labels_recv[15] = {"Total", "Refuel", "Setup", "Get nonce", "Decrypt metadata", "Sem wait start", "Sem wait end", "Copy payload", "Remove write protection", "Decrypt payload", "Scatter or bypass", "Last chunk prepare data", "Last chunk push wc", "Last chunk comp channel", "End"};
+uint64_t total_time[15] = {0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0};
+uint64_t total_time_counters[15] = {0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0};
+char *labels[15] = {"Total", "Calc chunks", "Metadata push", "Read time", "Send nonce", "Chunk calculation 2", "Slot wait", "Sem wait", "atomic load", "Write protect", "atomic store", "Encrypt metadata", "Payload encryption", "ibv_post_send", "End"};
+char *labels_recv[16] = {"Total", "Refuel", "Setup", "Get nonce", "Decrypt metadata", "Sem wait start", "Sem wait end", "Copy payload", "Remove write protection", "Decrypt payload", "Scatter or bypass", "Last chunk prepare data", "Last chunk push wc", "Last chunk comp channel", "End", "Poll time"};
 char *labels_all[7] = {"Total process time", "Submit time", "Raw rdma send time", "recv time", "recv_get_send_metadata", "recv_get_bounce_metadata", "recv_signal"};
 
 uint64_t REPORT = 1000;
@@ -891,8 +895,8 @@ static int post_send_do_bounce(struct cvmrdma_qp * qp, struct ibv_send_wr *wrs, 
 {
 	get_time(&start);
 
-	send_count++;
-	/*if (send_count % REPORT == 0){
+	/*send_count++;
+	if (send_count % REPORT == 0){
 		fprintf(stderr, "Send %d\n", send_count);
 	}*/
 
@@ -998,10 +1002,10 @@ static int post_send_do_bounce(struct cvmrdma_qp * qp, struct ibv_send_wr *wrs, 
 			fprintf(stderr, "Send %d chunks\n", total_chunks_send);
 		}*/
 
-		if (total_bytes > max_send_size){
+		/*if (total_bytes > max_send_size){
 			max_send_size = total_bytes;
-			// fprintf(stderr, "Found new max send size: %d\n", max_send_size);
-		}
+			fprintf(stderr, "Found new max send size: %d\n", max_send_size);
+		}*/
 
 		if (total_chunks == 0) {
 			nsge = 0;
@@ -1009,7 +1013,7 @@ static int post_send_do_bounce(struct cvmrdma_qp * qp, struct ibv_send_wr *wrs, 
 		}
 
 		if (no_data_send){
-			no_data_send_count++;
+			//no_data_send_count++;
 			/*if (no_data_send_count % REPORT == 0){
 				fprintf(stderr, "Send %d no data messages\n", no_data_send_count);
 			}*/
@@ -1021,7 +1025,13 @@ static int post_send_do_bounce(struct cvmrdma_qp * qp, struct ibv_send_wr *wrs, 
 		   BEFORE we start sending, so that CQ server has this informatin when WCs start to arrive
 		   This means that each chunk has to send EXACTLY payload_bytes, even if the tag ends up
 		   being shorter (bc of the AEAD choice) */
+
+		get_time(&calc_chunks);
+
 		qp_send_metadata_push(qp->send_metadata, this_wr->wr_id, this_op, total_bytes, total_chunks, send_signaled, no_data_send);
+
+		get_time(&metadata_push);
+
 
 		if (is_read){
 			qp_read_metadata_push(qp->read_metadata, this_wr->wr_id, sgl, nsge);
@@ -1030,12 +1040,12 @@ static int post_send_do_bounce(struct cvmrdma_qp * qp, struct ibv_send_wr *wrs, 
 				remote_qp_notify_read(qp->local_addr, ctxt->network_evloop, qp->remote_qnc, remote_addr, total_bytes, rkey);
 			} else {
 				remote_qp_notify_read(qp->remote_addr, ctxt->network_evloop, qp->remote_qnc, remote_addr, total_bytes, rkey);
-			}
+			} 
 
 			return 0;
 		}
 
-		get_time(&calc_chunks);
+		get_time(&read_time);
 
 #if defined(DEBUG_TIMING) || defined(DEBUG_CYCLES)
 		if (total_chunks > 1) {
@@ -1293,7 +1303,7 @@ static int post_send_do_bounce(struct cvmrdma_qp * qp, struct ibv_send_wr *wrs, 
 			/**** ENCRYPT *****/
 			if(cached){
 				//fprintf(stderr, "[SEND QPN %x] Chunk %lu is cached, skipping\n", qp->user_qp.qp.qp_num, chunk_idx);
-				chunk_cache_used++;
+				//chunk_cache_used++;
 				/*if (chunk_cache_used % 100 == 0){
 					fprintf(stderr, "Chunk cached used %d times\n", chunk_cache_used);
 				}*/
@@ -1577,17 +1587,19 @@ skip_payload_encryption:
 	get_time(&end);
 	add_time_difference(total_time, total_time_counters, start, end);
 	add_time_difference(total_time + 1, total_time_counters+1, start, calc_chunks);
-	add_time_difference(total_time + 2, total_time_counters+2, calc_chunks, send_nonce_time);
-	add_time_difference(total_time + 3, total_time_counters+3, send_nonce_time, slot_wait_start);
-	add_time_difference(total_time + 4, total_time_counters+4, slot_wait_start, slot_wait_end);
-	add_time_difference(total_time + 5, total_time_counters+5, slot_wait_end, sem_wait_end);
-	add_time_difference(total_time + 6, total_time_counters+6, sem_wait_end, cache_atomic_load);
-	add_time_difference(total_time + 7, total_time_counters+7, cache_atomic_load, write_protect);
-	add_time_difference(total_time + 8, total_time_counters+8, write_protect, cache_atomic_store);
-	add_time_difference(total_time + 9, total_time_counters+9, cache_atomic_store, encrypt_metadata);
-	add_time_difference(total_time + 10, total_time_counters+10, encrypt_metadata, payload_encryption);
-	add_time_difference(total_time + 11, total_time_counters+11, payload_encryption, ibv_send);
-	add_time_difference(total_time + 12, total_time_counters+12, ibv_send, end);
+	add_time_difference(total_time + 2, total_time_counters+2, calc_chunks, metadata_push);
+	add_time_difference(total_time + 3, total_time_counters+3, metadata_push, read_time);
+	add_time_difference(total_time + 4, total_time_counters+4, read_time, send_nonce_time);
+	add_time_difference(total_time + 5, total_time_counters+5, send_nonce_time, slot_wait_start);
+	add_time_difference(total_time + 6, total_time_counters+6, slot_wait_start, slot_wait_end);
+	add_time_difference(total_time + 7, total_time_counters+7, slot_wait_end, sem_wait_end);
+	add_time_difference(total_time + 8, total_time_counters+8, sem_wait_end, cache_atomic_load);
+	add_time_difference(total_time + 9, total_time_counters+9, cache_atomic_load, write_protect);
+	add_time_difference(total_time + 10, total_time_counters+10, write_protect, cache_atomic_store);
+	add_time_difference(total_time + 11, total_time_counters+11, cache_atomic_store, encrypt_metadata);
+	add_time_difference(total_time + 12, total_time_counters+12, encrypt_metadata, payload_encryption);
+	add_time_difference(total_time + 13, total_time_counters+13, payload_encryption, ibv_send);
+	add_time_difference(total_time + 14, total_time_counters+14, ibv_send, end);
 
 
 	return 0;
@@ -1606,11 +1618,20 @@ static int cvmrdma_post_send(struct ibv_qp *ibqp, struct ibv_send_wr *wr,
     struct cvmrdma_qp * qp = (struct cvmrdma_qp *)ibqp;
 	int ret = 0;
 
-
+#ifdef SKIP_WR_QUEUE
 	get_time(&submit_end);
-	ret = post_send_do_bounce(qp, wr, bad_wr);
+	for(struct ibv_send_wr * this_wr = wr ; this_wr != NULL ; this_wr = this_wr->next)
+	{
+		if (this_wr->opcode == IBV_WR_RDMA_READ_INTERNAL) {
+			fprintf(stderr, "ERROR: RDMA_READ_INTERNAL not allowed to be used externally\n");
+			return EINVAL;
+		}
+
+		ret = post_send_do_bounce(qp, this_wr, bad_wr);
+	}
 	return ret;
 
+#else
 	// In theory we'd need to do wr validation in order to send rejected wr as bad_wr to the user.
 	
 	// Just push the WRs here and handle them asynchronously in cvmrdma_do_bounce_loop.
@@ -1625,10 +1646,11 @@ static int cvmrdma_post_send(struct ibv_qp *ibqp, struct ibv_send_wr *wr,
 	}
 
 	DEBUG("[SEND QPN %x] WRs posted\n", qp->user_qp.qp.qp_num);
-
     return ret;
+#endif
 }
 
+#ifndef SKIP_WR_QUEUE
 // This function is started in a thread to process the WRs posted by the user.
 void *cvmrdma_do_bounce_loop(void *args) {
 	struct cvmrdma_qp * qp = (struct cvmrdma_qp *)args;
@@ -1660,6 +1682,7 @@ void *cvmrdma_do_bounce_loop(void *args) {
 		wrq_pop(qp->wr_queue);
 	}
 }
+#endif
 
 static int cvmrdma_query_device_ex(struct ibv_context *ibctxt,
 			const struct ibv_query_device_ex_input *input,
@@ -1692,10 +1715,14 @@ static struct ibv_mr *cvmrdma_reg_mr(struct ibv_pd *ibpd, void *addr, size_t len
 	struct cvmrdma_context * ctxt = cvmrdma_get_ctx(ibctxt);
 	assert(length > 0);
 
-	if (((uintptr_t)addr % sysconf(_SC_PAGESIZE)) != 0 || (length % sysconf(_SC_PAGESIZE)) != 0) {
-		fprintf(stderr, "ERROR: addr (%p) and length (%zu) must be page aligned\n", addr, length);
-		exit(1);
+	if (!cvmrdma_disable_cache){
+		// if the cache is on we need to make sure that the addr and length are page aligned
+		if (((uintptr_t)addr % sysconf(_SC_PAGESIZE)) != 0 || (length % sysconf(_SC_PAGESIZE)) != 0) {
+			fprintf(stderr, "ERROR: addr (%p) and length (%zu) must be page aligned\n", addr, length);
+			exit(1);
+		}
 	}
+	
 
     /* CVM
 		
@@ -2049,8 +2076,8 @@ static int cvmrdma_dealloc_pd(struct ibv_pd *pd) {
 
 static void cvmrdma_free_context(struct ibv_context *context){
 	
-	save_results(total_time, total_time_counters, labels, 13);
-	save_results(total_time_recv, total_time_recv_counters, labels_recv, 15);
+	save_results(total_time, total_time_counters, labels, 15);
+	save_results(total_time_recv, total_time_recv_counters, labels_recv, 16);
 	save_results(total_time_all, total_time_all_counters, labels_all, 7);
 
 	fprintf(stderr, "Free context called\n");

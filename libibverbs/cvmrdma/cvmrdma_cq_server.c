@@ -27,17 +27,21 @@
 #ifdef DEBUG_TIMING
 struct timespec start_recv, refuel, setup, get_nonce, decrypt_metadata, sem_wait_start_recv, sem_wait_end_recv, copy_payload, remove_write_protection, decrypt_payload, scatter_or_bypass, last_chunk_prepare_data, last_chunk_push_wc last_chunk, end_recv;
 struct timespec start_send_recv, end_send_recv, recv_get_bounce_metadata, recv_get_send_metadata;
+struct timespec poll_start, poll_end;
 #else
 uint64_t start_recv, refuel, setup, get_nonce, decrypt_metadata, sem_wait_start_recv, sem_wait_end_recv, copy_payload, remove_write_protection, decrypt_payload, scatter_or_bypass, last_chunk, last_chunk_prepare_data, last_chunk_push_wc, end_recv;
 uint64_t start_send_recv, end_send_recv, recv_get_bounce_metadata, recv_get_send_metadata;
+uint64_t poll_start, poll_end;
 #endif
-uint64_t total_time_recv[15] = {0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0};
-uint64_t total_time_recv_counters[15] = {0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0};
+uint64_t total_time_recv[16] = {0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0};
+uint64_t total_time_recv_counters[16] = {0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0};
 uint64_t total_time_all[7] = {0, 0, 0, 0, 0, 0, 0};
 uint64_t total_time_all_counters[7] = {0, 0, 0, 0, 0, 0, 0};
 
-_Atomic uint64_t no_data_recv_count = 0;
-_Atomic uint64_t recv_count = 0;
+//_Atomic uint64_t no_data_recv_count = 0;
+//_Atomic uint64_t recv_count = 0;
+
+int found_nwcs = 0;
 
 #define CQ_SERVER_NUM_WCS 16
 
@@ -54,6 +58,12 @@ static int cq_server_loop_once(struct cvmrdma_context * ctxt, struct ibv_cq * pr
 
     struct ibv_wc wcs[CQ_SERVER_NUM_WCS];
 
+    // if we found something in the last poll, this is a new poll cycle
+    if (found_nwcs == 1) {
+        found_nwcs = 0;
+        get_time(&poll_start);
+    }
+
     int nwcs = ctxt->prov_ops.poll_cq(prov_cq, CQ_SERVER_NUM_WCS, wcs);
     if(nwcs < 0)
     {
@@ -64,6 +74,8 @@ static int cq_server_loop_once(struct cvmrdma_context * ctxt, struct ibv_cq * pr
     if(nwcs > 0)
     {
         DEBUG("[CQ] polled %d\n", nwcs);
+        found_nwcs = 1;
+        get_time(&poll_end);
     }
 
     for(int i = 0 ; i < nwcs ; i++)
@@ -169,7 +181,7 @@ static int cq_server_loop_once(struct cvmrdma_context * ctxt, struct ibv_cq * pr
                     DEBUG("[CQ] User wrid %lx, byte_len %zu, imm_data %x, opcode %d, qp_num %x, status %d\n", send_wc.wr_id, send_wc.byte_len, send_wc.imm_data, send_wc.opcode, send_wc.qp_num, send_wc.status);
                     struct cvmrdma_cq * scq = (struct cvmrdma_cq *)qp->user_qp.qp.send_cq;
                     wcq_push(scq->wc_queue, &send_wc);
-                    no_data_recv_count++;
+                    //no_data_recv_count++;
 
                     uint64_t event = (uintptr_t) scq;
                     bool expected = 1;
@@ -754,7 +766,7 @@ static int cq_server_loop_once(struct cvmrdma_context * ctxt, struct ibv_cq * pr
                     wcq_push(rcq->wc_queue, &recv_wc);
 
                     get_time(&last_chunk_push_wc);
-                    recv_count++;
+                    //recv_count++;
                     // Pointer to cq struct, see verbs.c:603
                     uint64_t event = (uintptr_t) rcq;
                     bool expected = 1;
@@ -805,6 +817,7 @@ static int cq_server_loop_once(struct cvmrdma_context * ctxt, struct ibv_cq * pr
             add_time_difference(total_time_recv+12, total_time_recv_counters+12, last_chunk_prepare_data, last_chunk_push_wc);
             add_time_difference(total_time_recv+13, total_time_recv_counters+13, last_chunk_push_wc, last_chunk);
             add_time_difference(total_time_recv+14, total_time_recv_counters+14, start_recv, end_recv);
+            add_time_difference(total_time_recv+15, total_time_recv_counters+15, poll_start, poll_end);
         }
     }
 

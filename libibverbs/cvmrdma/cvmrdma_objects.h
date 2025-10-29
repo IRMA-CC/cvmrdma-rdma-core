@@ -28,6 +28,8 @@
 // therefore this can only work if the application uses less slots than available in the ring
 // #define CVMRDMA_DISABLE_RECV_NOTIFY 0
 
+#define SKIP_WR_QUEUE 0
+
 
 struct cvmrdma_pd {
 	struct ibv_pd user_pd;
@@ -276,11 +278,13 @@ extern bool cvmrdma_disable_cache;
 #ifdef DEBUG_TIMING
 extern struct timespec start_recv, refuel, setup, get_nonce, decrypt_metadata, sem_wait_start_recv, sem_wait_end_recv, copy_payload, remove_write_protection, decrypt_payload, scatter_or_bypass, last_chunk_prepare_data, last_chunk_push_wc, last_chunk, end_recv;
 extern struct timespec start_send_recv, end_send_recv, submit_start, ibv_send, submit_end, recv_get_bounce_metadata, recv_get_send_metadata;
+extern struct timespec poll_start, poll_end;
 #else
 extern uint64_t start_send_recv, end_send_recv, submit_start, ibv_send, submit_end, recv_get_bounce_metadata, recv_get_send_metadata;
 extern uint64_t start_recv, refuel, setup, get_nonce, decrypt_metadata, sem_wait_start_recv, sem_wait_end_recv, copy_payload, remove_write_protection, decrypt_payload, scatter_or_bypass, last_chunk_prepare_data, last_chunk_push_wc, last_chunk, end_recv;
+extern uint64_t poll_start, poll_end;
 #endif
-extern uint64_t total_time_recv[15];
-extern uint64_t total_time_recv_counters[15];
+extern uint64_t total_time_recv[16];
+extern uint64_t total_time_recv_counters[16];
 extern uint64_t total_time_all[7];
 extern uint64_t total_time_all_counters[7];

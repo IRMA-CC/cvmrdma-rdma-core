@@ -31,7 +31,7 @@
   } while(0)
 
 //#define DEBUG_TIMING
-#define DEBUG_CYCLES
+// #define DEBUG_CYCLES
 
 #ifdef DEBUG_TIMING
 static inline void get_time(struct timespec *t){
