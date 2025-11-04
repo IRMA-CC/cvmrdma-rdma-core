@@ -52,15 +52,17 @@ public:
         return i;
     }
 
-    void pop()
+    T & pop()
     {
         auto locked = std::scoped_lock{m_lock};
 
+        T& item = m_queue.front();
         m_queue.pop_front();
 
 
         /* No need to notify_one after pop, there is a single consummer, no one
             else is waiting. */
+        return item;
     }
 
     size_t size()

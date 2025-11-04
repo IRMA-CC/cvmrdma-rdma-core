@@ -15,6 +15,9 @@ struct recv_metadata_entry
     uint64_t wrid;
     struct ibv_sge * sgl;
     int nsge;
+
+    // This is only used for reads
+    int send_signaled;
 };
 
 

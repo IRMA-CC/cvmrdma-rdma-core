@@ -34,6 +34,14 @@
 // #define DEBUG_CYCLES
 
 #ifdef DEBUG_TIMING
+
+#define LOG_TIME(ts) do { \
+    uint64_t ns_total = (uint64_t)(ts).tv_sec * 1000000000ULL + (uint64_t)(ts).tv_nsec; \
+    printf("%s = %" PRIu64 " ns\n", #ts, ns_total); \
+} while (0)
+
+#define LOG_STRING(x) printf("%s\n", x);
+
 static inline void get_time(struct timespec *t){
 	clock_gettime(CLOCK_MONOTONIC, t);
 }
@@ -90,6 +98,10 @@ static inline void print_percentage(struct timespec t1, struct timespec t2, stru
 }
 #elif defined(DEBUG_CYCLES)
 
+#define LOG_TIME(x) printf("%s = %" PRIu64 " \n", #x, x);
+
+#define LOG_STRING(x) printf("%s\n", x);
+
 static inline uint64_t rdtscp(void) {
     unsigned int lo, hi;
     __asm__ volatile ("RDTSCP\n\t" : "=a"(lo), "=d"(hi) : : "%rcx");
@@ -137,6 +149,8 @@ static inline void print_percentage(uint64_t t1, uint64_t t2, uint64_t start, ui
 }
 
 #else
+#define LOG_STRING(x) ((void)0)
+#define LOG_TIME(x) ((void)0)
 #define get_time(x) ((void)0)
 #define add_time_difference(a,b,c,d) ((void)0)
 #define save_results(a,b,c,d) ((void)0)

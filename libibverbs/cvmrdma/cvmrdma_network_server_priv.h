@@ -39,7 +39,8 @@ public:
         pthread_cond_t * receive_nonce_cv_ptr,
         QpNonce ** nonce_queue,
         bool * nonce_set_ptr,
-        WRQueue ** wr_queue_ptr
+        WRQueue ** wr_queue_ptr,
+        struct cvmrdma_qp * qp_ptr
     );
     
     kj::Promise<void> notifyChunkRecv(NotifyChunkRecvContext context) override;
@@ -94,7 +95,15 @@ public:
         send_wrs[0].sg_list = send_sgl;
         send_wrs[0].next = NULL;
 
+        
+#ifdef SKIP_WR_QUEUE
+        fprintf(stderr, "Error: SKIP_WR_QUEUE not supported in server notify_read, you need to import post_send_do_bounce for c++ \n");
+        exit(1);
+        // struct ibv_send_wr * bad_wr = NULL;
+        // post_send_do_bounce(m_qp_ptr, send_wrs, &bad_wr);
+#else
         wrq_push(*m_wr_queue_ptr, send_wrs);
+#endif
 
         DEBUG("[NS] Notify read at addr 0x%" PRIx64 " size 0x%" PRIx64 "\n", addr, size);
         // This is a no-op in the server, the client will handle this.
@@ -113,6 +122,7 @@ private:
     bool * m_nonce_set_ptr = nullptr;
 
     WRQueue ** m_wr_queue_ptr = nullptr;
+    struct cvmrdma_qp * m_qp_ptr = nullptr;
 
     /* Counter in the original qp tracking the number of lines full in the remote recv ring / the locl send ring */
     int * m_send_lines_full_ptr = nullptr;
@@ -140,7 +150,8 @@ public:
         QpNonce ** nonce_queue,
         bool * nonce_set_ptr,
 
-        WRQueue ** wr_queue_ptr
+        WRQueue ** wr_queue_ptr,
+        struct cvmrdma_qp * qp_ptr
     );
     void qp_notification_channel_destroy(QpNotificationChannel * pnc);
 
@@ -168,7 +179,8 @@ void cvmrdma_server_register_qp(CVMRDMAServer * cs,
     QpNonce ** nonce_queue,
     bool * nonce_set_ptr,
 
-    WRQueue ** wr_queue_ptr
+    WRQueue ** wr_queue_ptr,
+    struct cvmrdma_qp * qp_ptr
 );
 
 #ifdef __cplusplus

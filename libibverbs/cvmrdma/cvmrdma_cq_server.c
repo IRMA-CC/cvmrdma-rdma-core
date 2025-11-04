@@ -24,19 +24,22 @@
 #include "cvmrdma_network_evloop_priv.h"
 #include "chunk_queue.h"
 
-#ifdef DEBUG_TIMING
-struct timespec start_recv, refuel, setup, get_nonce, decrypt_metadata, sem_wait_start_recv, sem_wait_end_recv, copy_payload, remove_write_protection, decrypt_payload, scatter_or_bypass, last_chunk_prepare_data, last_chunk_push_wc last_chunk, end_recv;
-struct timespec start_send_recv, end_send_recv, recv_get_bounce_metadata, recv_get_send_metadata;
-struct timespec poll_start, poll_end;
-#else
-uint64_t start_recv, refuel, setup, get_nonce, decrypt_metadata, sem_wait_start_recv, sem_wait_end_recv, copy_payload, remove_write_protection, decrypt_payload, scatter_or_bypass, last_chunk, last_chunk_prepare_data, last_chunk_push_wc, end_recv;
-uint64_t start_send_recv, end_send_recv, recv_get_bounce_metadata, recv_get_send_metadata;
-uint64_t poll_start, poll_end;
-#endif
-uint64_t total_time_recv[16] = {0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0};
-uint64_t total_time_recv_counters[16] = {0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0};
-uint64_t total_time_all[7] = {0, 0, 0, 0, 0, 0, 0};
-uint64_t total_time_all_counters[7] = {0, 0, 0, 0, 0, 0, 0};
+// These variables are for the send side
+cvm_time_t wc_send_start; // Tracks time taken to receive the WC for the write request
+cvm_time_t wc_send_end; // Tracks time taken to process the received WC for the write request
+// The variables are for the recv side
+cvm_time_t wc_recv_start; // Tracks the inital time when a recv is noticed
+cvm_time_t wc_refuel; // Tracks time taken to refuel the recv queue
+cvm_time_t wc_calculations; // Tracks time taken to process the recv WC and get all properties needed for receiving
+cvm_time_t wc_get_nonce; // Tracks time taken to get the nonce for the
+cvm_time_t wc_decrypt_metadata; // Tracks time taken to decrypt the metadata for the recv WC
+cvm_time_t wc_wait_for_sem; // Tracks time taken to wait for the semaphore
+cvm_time_t wc_copy_payload; // Tracks time taken to copy the payload for the recv WC
+cvm_time_t wc_cache_remove_write_protection; // Tracks time taken to remove write protection for the recv WC
+cvm_time_t wc_decrypt_payload; // Tracks time taken to decrypt the payload for the recv WC
+cvm_time_t wc_scatter_or_bypass; // Tracks time taken to scatter the payload to the user buffers or bypass if possible
+cvm_time_t wc_notify_user; // Tracks time taken to notify the user of the received WR
+cvm_time_t wc_notify_sender; // Tracks time taken to notify the sender that the recv is done
 
 //_Atomic uint64_t no_data_recv_count = 0;
 //_Atomic uint64_t recv_count = 0;
@@ -61,7 +64,6 @@ static int cq_server_loop_once(struct cvmrdma_context * ctxt, struct ibv_cq * pr
     // if we found something in the last poll, this is a new poll cycle
     if (found_nwcs == 1) {
         found_nwcs = 0;
-        get_time(&poll_start);
     }
 
     int nwcs = ctxt->prov_ops.poll_cq(prov_cq, CQ_SERVER_NUM_WCS, wcs);
@@ -75,7 +77,6 @@ static int cq_server_loop_once(struct cvmrdma_context * ctxt, struct ibv_cq * pr
     {
         DEBUG("[CQ] polled %d\n", nwcs);
         found_nwcs = 1;
-        get_time(&poll_end);
     }
 
     for(int i = 0 ; i < nwcs ; i++)
@@ -121,15 +122,13 @@ static int cq_server_loop_once(struct cvmrdma_context * ctxt, struct ibv_cq * pr
         }
         else if(! (op & IBV_WC_RECV))
         {
-            get_time(&start_send_recv);
+            get_time(&wc_send_start);
             /* This is a send completion (SEND, WRITE, WWI) */
             DEBUG("[CQ] send op %d, wrid: 0x%lx done\n", op, this_wc->wr_id);
 
             qp->wr_chunks_sent++;
 
             struct send_metadata_entry * send_info = qp_send_metadata_front(qp->send_metadata);
-
-            get_time(&recv_get_send_metadata);
 
             DEBUG("[CQ] send op %d, wrid: 0x%lx done, chunks sent %zu send_info->nchunks %zu\n", op, this_wc->wr_id, qp->wr_chunks_sent, send_info->nchunks);
         
@@ -148,7 +147,6 @@ static int cq_server_loop_once(struct cvmrdma_context * ctxt, struct ibv_cq * pr
                 DEBUG("[CQ] send op %d, wrid: 0x%lx done, unlocked chunk lock for chunk %lu\n", op, this_wc->wr_id, entry->chunk_idx);
                 qp_chunk_queue_pop(qp->chunk_queue);
             }
-            get_time(&recv_get_bounce_metadata);
             
             if(send_info->nchunks == qp->wr_chunks_sent || send_info->no_data_send)
             {
@@ -176,7 +174,7 @@ static int cq_server_loop_once(struct cvmrdma_context * ctxt, struct ibv_cq * pr
                 /* Notify user CQ of a SEND if IBV_SEND_SIGNALED was set and qp was created with
                    sq_sig_all=0
                 */
-                if(send_info->send_signaled || qp->user_sq_sig_all) {
+                if((send_info->send_signaled || qp->user_sq_sig_all) && send_info->op != IBV_WR_RDMA_READ_PING && send_info->op != IBV_WR_RDMA_READ_INTERNAL) {
                     DEBUG("[CQ] Sending WC to user send_signaled %d user_sq_sig_all %d\n", send_info->send_signaled, qp->user_sq_sig_all);
                     DEBUG("[CQ] User wrid %lx, byte_len %zu, imm_data %x, opcode %d, qp_num %x, status %d\n", send_wc.wr_id, send_wc.byte_len, send_wc.imm_data, send_wc.opcode, send_wc.qp_num, send_wc.status);
                     struct cvmrdma_cq * scq = (struct cvmrdma_cq *)qp->user_qp.qp.send_cq;
@@ -193,23 +191,33 @@ static int cq_server_loop_once(struct cvmrdma_context * ctxt, struct ibv_cq * pr
 
                 }
             }
-            get_time(&end_send_recv);
+            get_time(&wc_send_end);
 
 
-            add_time_difference(total_time_all, total_time_all_counters, submit_start, end_send_recv);
-            add_time_difference(total_time_all + 1, total_time_all_counters + 1, submit_start, submit_end);
-            add_time_difference(total_time_all + 2, total_time_all_counters + 2, ibv_send, start_send_recv);
-            add_time_difference(total_time_all + 3, total_time_all_counters + 3, start_send_recv, end_send_recv);
-            add_time_difference(total_time_all + 4, total_time_all_counters + 4, start_send_recv, recv_get_send_metadata);
-            add_time_difference(total_time_all + 5, total_time_all_counters + 5, recv_get_send_metadata, recv_get_bounce_metadata);
-            add_time_difference(total_time_all + 6, total_time_all_counters + 6, recv_get_bounce_metadata, end_send_recv);
-
+            LOG_STRING("SEND WR/WC times:");
+            LOG_TIME(wr_submit_start);
+            LOG_TIME(wr_submit_end);
+            LOG_TIME(wr_calculations);
+            LOG_TIME(wr_metadata_push);
+            LOG_TIME(wr_send_nonce);
+            LOG_TIME(wr_wait_for_recv_slot);
+            LOG_TIME(wr_wait_for_sem);
+            LOG_TIME(wr_cache_atomic_load);
+            LOG_TIME(wr_cache_write_protect);
+            LOG_TIME(wr_cache_atomic_store);
+            LOG_TIME(wr_generate_nonce);
+            LOG_TIME(wr_push_chunk_tracking);
+            LOG_TIME(wr_encrypt_metadata);
+            LOG_TIME(wr_encrypt_payload);
+            LOG_TIME(wr_ibv_post_send);
+            LOG_TIME(wc_send_start);
+            LOG_TIME(wc_send_end);
         }
         else
         {
             /* A SEND WR has happened : per CVMRDMA procotol, it has to be a WRITE_WITH_IMM of a chunk in the ring buffer */
 
-            get_time(&start_recv);
+            get_time(&wc_recv_start);
 
             if(op != IBV_WC_RECV_RDMA_WITH_IMM)
             {
@@ -230,7 +238,7 @@ static int cq_server_loop_once(struct cvmrdma_context * ctxt, struct ibv_cq * pr
                     fprintf(stderr, "WARN: failed to refuel recv queue for QPN %x\n", qpn);
                 }
             }
-            get_time(&refuel);
+            get_time(&wc_refuel);
 
 
             DEBUG("before chunk: rcved 0x%zx bytes of WR\n", qp->wr_bytes_rcved);
@@ -276,7 +284,7 @@ static int cq_server_loop_once(struct cvmrdma_context * ctxt, struct ibv_cq * pr
                 exit(1);
             }
 
-            get_time(&setup);
+            get_time(&wc_calculations);
 
             uint64_t nonce_metadata[cvmrdma_aead_NPUB_WORDS];
             DEBUG("[CQ] waiting for nonce\n");
@@ -288,7 +296,7 @@ static int cq_server_loop_once(struct cvmrdma_context * ctxt, struct ibv_cq * pr
             memset(nonce_metadata, 0, cvmrdma_aead_NPUBBYTES);
 #endif
             //fprintf(stderr, "[CQ] got nonce %lx %lx %lx\n", nonce_metadata[0], nonce_metadata[1], nonce_metadata[2]);
-            get_time(&get_nonce);
+            get_time(&wc_get_nonce);
 
             unsigned long long notif_mlen = sizeof(notif);
             err = cvmrdma_decrypt(
@@ -315,12 +323,41 @@ static int cq_server_loop_once(struct cvmrdma_context * ctxt, struct ibv_cq * pr
                     notif_start[8], notif_start[9]);
                 DEBUG("notif immediate data %d, opcode %d, wc_length %d\n", notif.imm, this_wc->opcode, wc_length);
             }
-            get_time(&decrypt_metadata);
+            get_time(&wc_decrypt_metadata);
 
             enum ibv_wr_opcode wr_op = notif.op;
             bool is_write = (wr_op == IBV_WR_RDMA_WRITE) || (wr_op == IBV_WR_RDMA_WRITE_WITH_IMM);
             bool is_send = (wr_op == IBV_WR_SEND) || (wr_op == IBV_WR_SEND_WITH_IMM);
-            bool is_read = (wr_op == IBV_WR_RDMA_READ_INTERNAL);
+            bool is_read_internal = (wr_op == IBV_WR_RDMA_READ_INTERNAL);
+            bool is_read_ping = (wr_op == IBV_WR_RDMA_READ_PING);
+
+            if (is_read_ping) {
+                // for read pings, we have to issue an internal read to fetch the data
+                // and send it back to the requester
+                struct ibv_send_wr send_wrs[1] = {0};
+                struct ibv_sge send_sgl[1] = {{.addr = (uint64_t) notif.hca_addr, .length = notif.chunk_len, .lkey = notif.rkey}};
+
+                // we don't send a SIGNALED flag, because this wr is internal and on the server side we don't
+                // expect a work completion for it
+                send_wrs[0].opcode = IBV_WR_RDMA_READ_INTERNAL;
+                send_wrs[0].num_sge = 1;
+                send_wrs[0].imm_data = 0;
+                // wr_id is not used in this case, but we set it to 0 for consistency        
+                send_wrs[0].wr_id = 0;
+                send_wrs[0].sg_list = send_sgl;
+                send_wrs[0].next = NULL;
+
+#ifdef SKIP_WR_QUEUE 
+                // fprintf(stderr, "[CQ] Posting internal read WWI for READ_PING. QPN %x, addr %lx, len %lu, rkey %x\n", qpn, send_sgl[0].addr, send_sgl[0].length, send_sgl[0].lkey);
+                struct ibv_send_wr * bad_wr = NULL;
+                post_send_do_bounce(qp, send_wrs, &bad_wr);
+#else
+                wrq_push(qp->wr_queue, send_wrs);
+#endif
+                // skip the whole chunk processing for read pings
+                // and only trigger the code that notifies the other node that chunk slots can be reused
+                goto skip_chunk_processing;
+            }
 
             bool no_data_send = false;
             if (is_write && (notif.rkey <= 0 || notif.hca_addr < 0)) {
@@ -333,7 +370,7 @@ static int cq_server_loop_once(struct cvmrdma_context * ctxt, struct ibv_cq * pr
                 no_data_send = true;
                 DEBUG("[CQ] No data send detected for SEND for wrid 0x%lx, no need to decrypt payload\n", this_wc->wr_id);
             }
-            if (is_read && notif.payload_len == 0) {
+            if (is_read_internal && notif.payload_len == 0) {
                 // this is a no-data send, we don't have to decrypt the payload
                 no_data_send = true;
                 DEBUG("[CQ] No data send detected for READ for wrid 0x%lx, no need to decrypt payload\n", this_wc->wr_id);
@@ -348,7 +385,7 @@ static int cq_server_loop_once(struct cvmrdma_context * ctxt, struct ibv_cq * pr
             if (!no_data_send){
 
                 // Decrypt directly to destination !
-                bool bypass_scatter = false;
+                bool copy_into_chunk_cache = false;
                 void * dest = NULL;
                 uint64_t offt = 0;
                 struct cvmrdma_mr * cur_mr = NULL;
@@ -369,10 +406,10 @@ static int cq_server_loop_once(struct cvmrdma_context * ctxt, struct ibv_cq * pr
                     // saved will not match the state of the chunk in the user memory region
                     if(notif.chunk_len == cvmrdma_chunk_bytes && notif.chunk_offt == 0){
                         decrypted = dest;
-                        bypass_scatter = true;
+                        copy_into_chunk_cache = true;
                     }
                 }
-                else if (is_send || is_read)
+                else if (is_send || is_read_internal)
                 {
                     /* The operation is a SEND: we can only bypass the scatter if the next chunk fits
                         in the current sge */
@@ -380,7 +417,7 @@ static int cq_server_loop_once(struct cvmrdma_context * ctxt, struct ibv_cq * pr
                     struct recv_metadata_entry * recv_info = NULL;
                     if (is_send) {
                         recv_info = qp_recv_metadata_front(qp->recv_metadata);
-                    } else if (is_read) {
+                    } else if (is_read_internal) {
                         recv_info = qp_read_metadata_front(qp->read_metadata);
                     }
                     
@@ -400,7 +437,7 @@ static int cq_server_loop_once(struct cvmrdma_context * ctxt, struct ibv_cq * pr
                         offt = (cur_sge->addr - cur_mr->hca_va) + qp->cur_offt_in_sge;
 
                         decrypted = mr_addr + offt;
-                        bypass_scatter = true;
+                        copy_into_chunk_cache = true;
                     }
                 } else {
                     fprintf(stderr, "PROTOCOL ERROR: unexpected op %d in CQ server\n", wr_op);
@@ -419,52 +456,50 @@ static int cq_server_loop_once(struct cvmrdma_context * ctxt, struct ibv_cq * pr
 
                 // from here on out we will modify the chunk and/or its assoicated user mr
                 // we therefore need to be sure, nobody else is using it
-                get_time(&sem_wait_start_recv);
                 sem_wait(&chunk_info->in_transit_sem);
-                get_time(&sem_wait_end_recv);
+                get_time(&wc_wait_for_sem);
 
-                int cached = atomic_load(&chunk_info->cached);
+                int cached = false;
+                if (!cvmrdma_disable_cache){
+                    cached = atomic_load(&chunk_info->cached);
+                }
 
-                if (!bypass_scatter || cvmrdma_disable_cache)
+                // if the chunk is still cached (meaning the user has not modified it since our last send)
+                // and the nonce matches, we don't need to copy and decrypt the payload
+                /*if (cached && memcmp(chunk_info->nonce, notif.payload_nonce, cvmrdma_aead_NPUBBYTES) == 0 && !cvmrdma_disable_cache){
+                    wc_copy_payload = wc_wait_for_sem;
+                    wc_cache_remove_write_protection = wc_wait_for_sem;
+                    wc_decrypt_payload = wc_wait_for_sem;
+                    wc_scatter_or_bypass = wc_wait_for_sem;
+                    goto skip_decrypt;
+                }*/
+
+                if (!copy_into_chunk_cache || cvmrdma_disable_cache)
                 {
+                    // this happens either because we do not use caching, or because the incoming chunk only contains a part of the full chunk
+                    // in this case we cannot copy it into the chunk cache, as this would result in (potentially) old data being present in the chunk cache
                     /* Copy the payload into private memory */
                     payload_start = private + header_bytes;
                     memcpy(payload_start, slot + header_bytes, payload_clen);
-                    //fprintf(stderr, "[CQ] chunk offset %lu", notif.chunk_offt);
-                    /*fprintf(stderr,"[CQ] private + offt %x %x %x %x %x %x %x %x %x %x %x %x %x %x %x %x %x %x\n", 
-                        payload_start[0+notif.chunk_offt], payload_start[1+notif.chunk_offt], payload_start[2+notif.chunk_offt], payload_start[3+notif.chunk_offt],
-                        payload_start[4+notif.chunk_offt], payload_start[5+notif.chunk_offt], payload_start[6+notif.chunk_offt], payload_start[7+notif.chunk_offt],
-                        payload_start[8+notif.chunk_offt], payload_start[9+notif.chunk_offt], payload_start[10+notif.chunk_offt], payload_start[11+notif.chunk_offt],
-                        payload_start[12+notif.chunk_offt], payload_start[13+notif.chunk_offt], payload_start[14+notif.chunk_offt], payload_start[15+notif.chunk_offt],
-                        payload_start[16+notif.chunk_offt], payload_start[17+notif.chunk_offt]);*/
                     // if we bypass by decrypting directly to user memory, we need to invalidate the cache
                     // because this new data needs to be encrypted and saved in the chunk cache next time we send.
-                    atomic_store(&chunk_info->cached, false);
-                    //fprintf(stderr, "[CQ] not bypass scatter or cache disabled, invalidated chunk cache for chunk %zu\n", chunk_idx);
+                    if (!cvmrdma_disable_cache){
+                        atomic_store(&chunk_info->cached, false);
+                    }
                 } else {
                     /* Copy the payload into the private chunk cache */
-                    // TODO: this is wrong
                     assert(offt % cvmrdma_chunk_bytes == 0);
                     DEBUG("[CQ] chunk_idx %zu to chunk cache\n", chunk_idx);
                     payload_start = cur_mr->provider_va + chunk_idx * cvmrdma_ring_slot_bytes(ctxt->aead) +  cvmrdma_header_bytes(ctxt->aead);
-
                     memcpy(payload_start, slot + header_bytes, cvmrdma_ring_slot_bytes(ctxt->aead) - cvmrdma_header_bytes(ctxt->aead));
-
-                    /*fprintf(stderr, "[CQ] payload_start %x %x %x %x %x %x %x %x %x %x %x %x %x %x %x %x %x %x\n", 
-                        payload_start[0], payload_start[1], payload_start[2], payload_start[3],
-                        payload_start[4], payload_start[5], payload_start[6], payload_start[7],
-                        payload_start[8], payload_start[9], payload_start[10], payload_start[11],
-                        payload_start[12], payload_start[13], payload_start[14], payload_start[15],
-                        payload_start[16], payload_start[17]);*/
-
                 }
 
-                get_time(&copy_payload);
+                get_time(&wc_copy_payload);
 
                 // a write protection is only set, if the chunk is cached
                 // therefore we only need (and only can) remove the write protection
                 // if the chunk is cached
-                if (cached){
+                if (cached && !cvmrdma_disable_cache){
                     uint64_t aligned_offset = offt - (offt % cvmrdma_chunk_bytes);
                     unsigned char * ptxt = cur_mr->user_mr.ibv_mr.addr + aligned_offset;
                     // in the next step the data from the chunk cache or the private memory will be decrypted to the user memory region
@@ -478,13 +513,12 @@ static int cq_server_loop_once(struct cvmrdma_context * ctxt, struct ibv_cq * pr
                         .mode = 0,
                     };
 
-
                     if (ioctl(cur_mr->uffd, UFFDIO_WRITEPROTECT, &uffdio_wp) == -1) {
                         fprintf(stderr, "[SERVER] ioctl-UFFDIO_WRITEPROTECT: %d\n", errno);
                         exit(1);
                     }
                 }
-                get_time(&remove_write_protection);
+                get_time(&wc_cache_remove_write_protection);
 
                 unsigned long long payload_mlen = cvmrdma_chunk_bytes;
                 err = cvmrdma_decrypt(
@@ -501,47 +535,31 @@ static int cq_server_loop_once(struct cvmrdma_context * ctxt, struct ibv_cq * pr
                     fprintf(stderr, "WARN: Failed to decrypt bounce buffer for payload, exiting.\n");
                     exit(1);
                 }
-                get_time(&decrypt_payload);
-
-                /*fprintf(stderr, "[RECV] ptxt bytes:");
-                for (uint64_t i = 0; i < (cvmrdma_chunk_bytes > 16 ? 16 : cvmrdma_chunk_bytes); i++) {
-                    fprintf(stderr, "%02x", ((unsigned char *)decrypted)[i]);
-                }
-                fprintf(stderr, "\n");*/
-
-                /*fprintf(stderr, "[CQ] decrypted %x %x %x %x %x %x %x %x %x %x %x %x %x %x %x %x %x %x\n", decrypted[0+notif.chunk_offt],
-                decrypted[1+notif.chunk_offt], decrypted[2+notif.chunk_offt], decrypted[3+notif.chunk_offt], 
-                decrypted[4+notif.chunk_offt], decrypted[5+notif.chunk_offt], decrypted[6+notif.chunk_offt],
-                decrypted[7+notif.chunk_offt], decrypted[8+notif.chunk_offt], decrypted[9+notif.chunk_offt],
-                decrypted[10+notif.chunk_offt], decrypted[11+notif.chunk_offt], decrypted[12+notif.chunk_offt],
-                    decrypted[13+notif.chunk_offt], decrypted[14+notif.chunk_offt], decrypted[15+notif.chunk_offt],
-                    decrypted[16+notif.chunk_offt], decrypted[17+notif.chunk_offt]);*/
+                get_time(&wc_decrypt_payload);
 
                 /*** SCATTER ****/
                 /* Scatter the plaintext to user memory. If the op is a WRITE, the remote has set the destination address,
                     else the op is a SEND and we must use the next chunk in the current recv request */
 
-
-
-                if(!bypass_scatter || cvmrdma_disable_cache)
+                if(!copy_into_chunk_cache || cvmrdma_disable_cache)
                 {
                     //fprintf(stderr, "[CQ] NOT bypass scatter\n");
 
                     if (is_write){
                         DEBUG("[CQ] WRITE: writing with notif.chunk_offt 0x%"PRIx64" and notif.chunk_len %zu to dest %p for notif.hca_addr %p\n", 
                             notif.chunk_offt, notif.chunk_len, dest, (void *)notif.hca_addr);
+
                         memcpy(dest, decrypted + notif.chunk_offt, notif.chunk_len);
-                    } else if (is_send || is_read) {
+                    } else if (is_send || is_read_internal) {
                         /* The operation is a SEND: use the next chunk on the current recv request */
 
                         struct recv_metadata_entry * recv_info = NULL;
                         if (is_send) {
                             recv_info = qp_recv_metadata_front(qp->recv_metadata);
-                        } else if (is_read) {
+                        } else if (is_read_internal) {
                             recv_info = qp_read_metadata_front(qp->read_metadata);
                         }
 
-                        //clock_gettime(CLOCK_MONOTONIC, &t_copy_data1);
                         struct ibv_sge * rcv_sgl = recv_info->sgl;
                         int rcv_nsge = recv_info->nsge;
 
@@ -584,7 +602,6 @@ static int cq_server_loop_once(struct cvmrdma_context * ctxt, struct ibv_cq * pr
                             }
                         }
 
-
                         if(bytes_copied < notif.chunk_len)
                         {
                             /* Early loop exit bc the sglist is empty. This is an error ! */
@@ -594,11 +611,11 @@ static int cq_server_loop_once(struct cvmrdma_context * ctxt, struct ibv_cq * pr
                         }
                     }
                 }
-                else // bypass scatter
+                else // if we use the chunk cache, the chunk was directly decrypted to user memory
                 {
                     //fprintf(stderr, "[CQ] Bypass scatter\n");
 
-                    // ad write protection because we just decrypted directly to user memory
+                    // add write protection because we just decrypted directly to user memory
                     // and the current saved chunk is up to date
                     struct uffdio_writeprotect uffdio_wp = {
                         .range = {
@@ -616,14 +633,14 @@ static int cq_server_loop_once(struct cvmrdma_context * ctxt, struct ibv_cq * pr
                     memcpy(chunk_info->nonce, notif.payload_nonce, cvmrdma_aead_NPUBBYTES);
                     atomic_store(&chunk_info->cached, true);
 
-                    if (is_send || is_read) {
+                    if (is_send || is_read_internal) {
 
 
                         /* Record in the QP the number of bytes written during the decrypt (directly to dest) */
                         struct recv_metadata_entry * recv_info = NULL;
                         if (is_send) {
                             recv_info = qp_recv_metadata_front(qp->recv_metadata);
-                        } else if (is_read) {
+                        } else if (is_read_internal) {
                             recv_info = qp_read_metadata_front(qp->read_metadata);
                         }
 
@@ -639,7 +656,10 @@ static int cq_server_loop_once(struct cvmrdma_context * ctxt, struct ibv_cq * pr
                         }
                     }
                 }
-                get_time(&scatter_or_bypass);
+
+
+                get_time(&wc_scatter_or_bypass);
+skip_decrypt:
 
                 //fprintf(stderr, "[CQ] cached chunk %zu for mr with lkey 0x%lx\n", chunk_idx, cur_mr->user_mr.ibv_mr.lkey);
                 // post that the chunk is no longer in transit
@@ -647,12 +667,10 @@ static int cq_server_loop_once(struct cvmrdma_context * ctxt, struct ibv_cq * pr
 
 
             } else {
-                get_time(&sem_wait_start_recv);
-                get_time(&sem_wait_end_recv);
-                get_time(&copy_payload);
-                get_time(&remove_write_protection);
-                get_time(&decrypt_payload);
-                get_time(&scatter_or_bypass);
+                wc_copy_payload = wc_decrypt_metadata;   
+                wc_cache_remove_write_protection = wc_decrypt_metadata;
+                wc_decrypt_payload = wc_decrypt_metadata;
+                wc_scatter_or_bypass = wc_decrypt_metadata;
             }
 
             qp->wr_bytes_rcved += notif.chunk_len;
@@ -675,17 +693,11 @@ static int cq_server_loop_once(struct cvmrdma_context * ctxt, struct ibv_cq * pr
                     // from the server
                     struct recv_metadata_entry * recv_info = qp_read_metadata_front(qp->read_metadata);
                     uint64_t recv_wrid = recv_info->wrid;
+                    int send_signaled = recv_info->send_signaled;
                     qp_read_metadata_pop(qp->read_metadata);
                     qp->cur_sge_idx = 0;
                     qp->cur_offt_in_sge = 0;
 
-                    // pop the send entry, because we need to notify the client
-                    // that the read was successful and the data is now available
-                    struct send_metadata_entry * send_info = qp_send_metadata_front(qp->send_metadata);
-                    qp_send_metadata_pop(qp->send_metadata);
-
-                    assert(recv_info->wrid = send_info->wrid);
-                    assert(qp->wr_bytes_rcved == send_info->bytes);
 
                     struct ibv_wc send_wc = {
                         .byte_len = qp->wr_bytes_rcved,
@@ -696,7 +708,7 @@ static int cq_server_loop_once(struct cvmrdma_context * ctxt, struct ibv_cq * pr
                         .wr_id = recv_wrid
                     };
 
-                    if(send_info->send_signaled || qp->user_sq_sig_all) {
+                    if(send_signaled || qp->user_sq_sig_all) {
                         struct cvmrdma_cq * scq = (struct cvmrdma_cq *)qp->user_qp.qp.send_cq;
                         wcq_push(scq->wc_queue, &send_wc);
 
@@ -761,11 +773,9 @@ static int cq_server_loop_once(struct cvmrdma_context * ctxt, struct ibv_cq * pr
 
                     DEBUG("[CQ] Pushing WC, byte_len %zu, imm %x, opcode %d, qp_num %x, status %d, wr_id %lx\n", recv_wc.byte_len, recv_wc.imm_data, recv_wc.opcode, recv_wc.qp_num, recv_wc.status, recv_wc.wr_id);
 
-                    get_time(&last_chunk_prepare_data);
-
+                    // TODO: This might need to adhere to signaled completions
                     wcq_push(rcq->wc_queue, &recv_wc);
 
-                    get_time(&last_chunk_push_wc);
                     //recv_count++;
                     // Pointer to cq struct, see verbs.c:603
                     uint64_t event = (uintptr_t) rcq;
@@ -780,7 +790,9 @@ static int cq_server_loop_once(struct cvmrdma_context * ctxt, struct ibv_cq * pr
                     qp->wr_bytes_rcved = 0;
                 }
             }
-            get_time(&last_chunk);
+            get_time(&wc_notify_user);
+
+skip_chunk_processing:
 
             /* We can notify the remote thay this chunk can be reused for writing
                 XXX: this could be pushed all the way up right after copying into private memory
@@ -800,24 +812,22 @@ static int cq_server_loop_once(struct cvmrdma_context * ctxt, struct ibv_cq * pr
             }
             
 #endif
-            get_time(&end_recv);
+            get_time(&wc_notify_sender);
 
-            add_time_difference(total_time_recv, total_time_recv_counters, start_recv, end_recv);
-            add_time_difference(total_time_recv+1, total_time_recv_counters+1, start_recv, refuel);
-            add_time_difference(total_time_recv+2, total_time_recv_counters+2, refuel, setup);
-            add_time_difference(total_time_recv+3, total_time_recv_counters+3, setup, get_nonce);
-            add_time_difference(total_time_recv+4, total_time_recv_counters+4, get_nonce, decrypt_metadata);
-            add_time_difference(total_time_recv+5, total_time_recv_counters+5, decrypt_metadata, sem_wait_start_recv);
-            add_time_difference(total_time_recv+6, total_time_recv_counters+6, sem_wait_start_recv, sem_wait_end_recv);
-            add_time_difference(total_time_recv+7, total_time_recv_counters+7, sem_wait_end_recv, copy_payload);
-            add_time_difference(total_time_recv+8, total_time_recv_counters+8, copy_payload, remove_write_protection);
-            add_time_difference(total_time_recv+9, total_time_recv_counters+9, remove_write_protection, decrypt_payload);
-            add_time_difference(total_time_recv+10, total_time_recv_counters+10, decrypt_payload, scatter_or_bypass);
-            add_time_difference(total_time_recv+11, total_time_recv_counters+11, scatter_or_bypass, last_chunk_prepare_data);
-            add_time_difference(total_time_recv+12, total_time_recv_counters+12, last_chunk_prepare_data, last_chunk_push_wc);
-            add_time_difference(total_time_recv+13, total_time_recv_counters+13, last_chunk_push_wc, last_chunk);
-            add_time_difference(total_time_recv+14, total_time_recv_counters+14, start_recv, end_recv);
-            add_time_difference(total_time_recv+15, total_time_recv_counters+15, poll_start, poll_end);
+            LOG_STRING("RECV WC times:");
+            LOG_TIME(wc_recv_start);
+            LOG_TIME(wc_refuel);
+            LOG_TIME(wc_calculations);
+            LOG_TIME(wc_get_nonce);
+            LOG_TIME(wc_decrypt_metadata);
+            LOG_TIME(wc_wait_for_sem);
+            LOG_TIME(wc_copy_payload);
+            LOG_TIME(wc_cache_remove_write_protection);
+            LOG_TIME(wc_decrypt_payload);
+            LOG_TIME(wc_scatter_or_bypass);
+            LOG_TIME(wc_notify_user);
+            LOG_TIME(wc_notify_sender);
+
         }
     }
 

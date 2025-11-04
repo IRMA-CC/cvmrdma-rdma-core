@@ -28,6 +28,8 @@
 // therefore this can only work if the application uses less slots than available in the ring
 // #define CVMRDMA_DISABLE_RECV_NOTIFY 0
 
+#define CVMRDMA_GENERATE_PAYLOAD_NONCE 0
+
 #define SKIP_WR_QUEUE 0
 
 
@@ -135,6 +137,7 @@ struct cvmrdma_cq {
 	*/
 	struct ibv_comp_channel *provider_comp_channel;
 	pthread_t provider_comp_channel_thread;
+	pthread_t nonce_thread;
 };
 
 struct cvmrdma_qp {
@@ -245,6 +248,8 @@ struct cvmrdma_qp {
 	QpNonce *nonce_queue;
 	bool nonce_set;
 
+	QpNonce *payload_nonce_queue;
+
 	bool is_loopback;
 
 	RPCClientSession *local_network_client_connection;
@@ -275,16 +280,45 @@ struct chunk_tracking_info {
 };
 
 extern bool cvmrdma_disable_cache;
+
 #ifdef DEBUG_TIMING
-extern struct timespec start_recv, refuel, setup, get_nonce, decrypt_metadata, sem_wait_start_recv, sem_wait_end_recv, copy_payload, remove_write_protection, decrypt_payload, scatter_or_bypass, last_chunk_prepare_data, last_chunk_push_wc, last_chunk, end_recv;
-extern struct timespec start_send_recv, end_send_recv, submit_start, ibv_send, submit_end, recv_get_bounce_metadata, recv_get_send_metadata;
-extern struct timespec poll_start, poll_end;
+typedef struct timespec cvm_time_t;
 #else
-extern uint64_t start_send_recv, end_send_recv, submit_start, ibv_send, submit_end, recv_get_bounce_metadata, recv_get_send_metadata;
-extern uint64_t start_recv, refuel, setup, get_nonce, decrypt_metadata, sem_wait_start_recv, sem_wait_end_recv, copy_payload, remove_write_protection, decrypt_payload, scatter_or_bypass, last_chunk_prepare_data, last_chunk_push_wc, last_chunk, end_recv;
-extern uint64_t poll_start, poll_end;
+typedef uint64_t cvm_time_t;
 #endif
-extern uint64_t total_time_recv[16];
-extern uint64_t total_time_recv_counters[16];
-extern uint64_t total_time_all[7];
-extern uint64_t total_time_all_counters[7];
+
+// These variables are for the send side
+extern cvm_time_t wr_submit_start, wr_submit_end; // This tracks the time that it takes between submission from the user application to when it is actually processed
+extern cvm_time_t wr_calculations; // Tracks time that is needed to process the wr and get all properties needed for sending ready
+extern cvm_time_t wr_metadata_push; // Tracks time taken to push metadata for the write request
+extern cvm_time_t wr_send_nonce; // Tracks time taken to send the nonce for the write request
+extern cvm_time_t wr_wait_for_recv_slot; // Tracks time taken to wait for a receive slot
+extern cvm_time_t wr_wait_for_sem; // Track time that it takes to acquire the semaphore
+extern cvm_time_t wr_cache_atomic_load; // Track time that it takes to do the atomic load for cache checking
+extern cvm_time_t wr_cache_write_protect; // Track time that it takes to write protect the chunk
+extern cvm_time_t wr_cache_atomic_store; // Track time that it takes to do the atomic store for cache marking
+extern cvm_time_t wr_generate_nonce; // Track time it takes to generate a new nonce
+extern cvm_time_t wr_push_chunk_tracking; // Tracks time taken to push chunk tracking information
+extern cvm_time_t wr_encrypt_metadata; // Tracks time taken to encrypt metadata for the write request	
+extern cvm_time_t wr_encrypt_payload; // Tracks time taken to encrypt the payload for the write request
+extern cvm_time_t wr_ibv_post_send; // Tracks time taken to call ibv_post_send
+extern cvm_time_t wc_send_start; // Tracks time taken to receive the WC for the write request
+extern cvm_time_t wc_send_end; // Tracks time taken to process the received WC for the write request
+
+// The variables are for the recv side
+extern cvm_time_t wc_recv_start; // Tracks the inital time when a recv is noticed
+extern cvm_time_t wc_refuel; // Tracks time taken to refuel the recv queue
+extern cvm_time_t wc_calculations; // Tracks time taken to process the recv WC and get all properties needed for receiving
+extern cvm_time_t wc_get_nonce; // Tracks time taken to get the nonce for the
+extern cvm_time_t wc_decrypt_metadata; // Tracks time taken to decrypt the metadata for the recv WC
+extern cvm_time_t wc_wait_for_sem; // Tracks time taken to wait for the semaphore
+extern cvm_time_t wc_copy_payload; // Tracks time taken to copy the payload for the recv WC
+extern cvm_time_t wc_cache_remove_write_protection; // Tracks time taken to remove write protection for the recv WC
+extern cvm_time_t wc_decrypt_payload; // Tracks time taken to decrypt the payload for the recv WC
+extern cvm_time_t wc_scatter_or_bypass; // Tracks time taken to scatter the payload to the user buffers or bypass if possible
+extern cvm_time_t wc_notify_user; // Tracks time taken to notify the user of the received WR
+extern cvm_time_t wc_notify_sender; // Tracks time taken to notify the sender that the recv is done
+
+int post_send_do_bounce(struct cvmrdma_qp *qp,
+                        struct ibv_send_wr *wrs,
+                        struct ibv_send_wr **bad_wr);

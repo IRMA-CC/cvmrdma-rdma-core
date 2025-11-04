@@ -25,7 +25,8 @@ void free_qp_nonce_queue(QpNonce * nonce_queue);
 
 void qp_nonce_queue_push(QpNonce * nonce_queue, struct nonce_entry * entry);
 struct nonce_entry * qp_nonce_queue_front(QpNonce * nonce_queue);
-void qp_nonce_queue_pop(QpNonce * nonce_queue);
+struct nonce_entry * qp_nonce_queue_pop(QpNonce * nonce_queue);
+int qp_nonce_queue_size(QpNonce * nonce_queue);
 
 #ifdef __cplusplus
 }

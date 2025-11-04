@@ -14,7 +14,7 @@ void free_qp_read_metadata(QpReadMetadata * read_metadata)
     delete read_metadata;
 }
 
-void qp_read_metadata_push(QpReadMetadata * read_metadata_manager, uint64_t wrid, struct ibv_sge * sgl, int nsge)
+void qp_read_metadata_push(QpReadMetadata * read_metadata_manager, uint64_t wrid, struct ibv_sge * sgl, int nsge, int signaled)
 {
     // The sgl is a _list_ not an array that simply can be copied. It contains a next pointer after all.
     assert(nsge == 1);
@@ -27,7 +27,8 @@ void qp_read_metadata_push(QpReadMetadata * read_metadata_manager, uint64_t wrid
     struct recv_metadata_entry entry = {
         .wrid = wrid,
         .sgl = sgl_entry,
-        .nsge = nsge
+        .nsge = nsge,
+        .send_signaled = signaled
     };
 
     read_metadata_manager->queue.push(entry);

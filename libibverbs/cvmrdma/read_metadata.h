@@ -24,7 +24,7 @@ typedef struct QpReadMetadata QpReadMetadata;
 QpReadMetadata * alloc_qp_read_metadata(void);
 void free_qp_read_metadata(QpReadMetadata * read_metadata);
 
-void qp_read_metadata_push(QpReadMetadata * read_metadata, uint64_t wrid, struct ibv_sge * sgl, int nsge);
+void qp_read_metadata_push(QpReadMetadata * read_metadata, uint64_t wrid, struct ibv_sge * sgl, int nsge, int signaled);
 struct recv_metadata_entry * qp_read_metadata_front(QpReadMetadata * read_metadata);
 void qp_read_metadata_pop(QpReadMetadata * read_metadata);
 

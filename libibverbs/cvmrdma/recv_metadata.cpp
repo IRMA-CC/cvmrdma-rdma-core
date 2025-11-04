@@ -28,7 +28,8 @@ void qp_recv_metadata_push(QpRecvMetadata * recv_metadata_manager, uint64_t wrid
     struct recv_metadata_entry entry = {
         .wrid = wrid,
         .sgl = sgl_entry,
-        .nsge = nsge
+        .nsge = nsge,
+        .send_signaled = 0
     };
 
     recv_metadata_manager->queue.push(entry);

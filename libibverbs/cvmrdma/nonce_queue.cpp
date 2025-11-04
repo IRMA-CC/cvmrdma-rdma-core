@@ -21,12 +21,17 @@ void qp_nonce_queue_push(QpNonce * nonce_queue, struct nonce_entry * entry)
     nonce_queue->queue.push(entry_copy);
 }
 
-void qp_nonce_queue_pop(QpNonce * nonce_queue)
+struct nonce_entry * qp_nonce_queue_pop(QpNonce * nonce_queue)
 {
-    nonce_queue->queue.pop();
+    return &nonce_queue->queue.pop();
 }
 
 struct nonce_entry * qp_nonce_queue_front(QpNonce * nonce_queue)
 {
     return &nonce_queue->queue.front();
+}
+
+int qp_nonce_queue_size(QpNonce * nonce_queue)
+{
+    return nonce_queue->queue.size();
 }
