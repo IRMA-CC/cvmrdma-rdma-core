@@ -22,13 +22,12 @@
 #include "cvmrdma.h"
 
 // enabling this will disable the secure secondary channel
-// WARNING: This will very likely lead to decryption errors, so this is for testing only!
 // #define CVMRDMA_DISABLE_SECURE_SECONDARY_CHANNEL 0
 // WARNING: This will result in the slots no longer being acked
 // therefore this can only work if the application uses less slots than available in the ring
 // #define CVMRDMA_DISABLE_RECV_NOTIFY 0
 
-#define CVMRDMA_GENERATE_PAYLOAD_NONCE 0
+// #define CVMRDMA_TIMED_SEMAPHORE_WAIT 0
 
 #define SKIP_WR_QUEUE 0
 
@@ -181,7 +180,8 @@ struct cvmrdma_qp {
 	int no_data_message_mr_fd;
 	sem_t no_data_message_sem;
 
-	uint64_t nonce_metadata_cache[cvmrdma_aead_NPUB_WORDS * NONCE_CACHE_SIZE];
+	//uint64_t nonce_metadata_cache[cvmrdma_aead_NPUB_WORDS * NONCE_CACHE_SIZE];
+	uint64_t * nonce_metadata_cache;
 	int nonce_metadata_cache_offset;
 
 	int next_send_slot;
@@ -279,7 +279,9 @@ struct chunk_tracking_info {
 	sem_t in_transit_sem;
 };
 
-extern bool cvmrdma_disable_cache;
+extern bool OPT_cvmrdma_disable_cache;
+extern bool OPT_cvmrdma_disable_payload_nonce_pregeneration;
+extern bool OPT_cvmrdma_enable_decrypt_skip;
 
 #ifdef DEBUG_TIMING
 typedef struct timespec cvm_time_t;
@@ -322,3 +324,6 @@ extern cvm_time_t wc_notify_sender; // Tracks time taken to notify the sender th
 int post_send_do_bounce(struct cvmrdma_qp *qp,
                         struct ibv_send_wr *wrs,
                         struct ibv_send_wr **bad_wr);
+
+
+void cvmrdma_sem_wait(sem_t *sem, char const * error_msg);

@@ -404,7 +404,7 @@ static int cq_server_loop_once(struct cvmrdma_context * ctxt, struct ibv_cq * pr
 
                     // the chunk offset needs to be 0, otherwise the encrypted chunk
                     // saved will not match the state of the chunk in the user memory region
-                    if(notif.chunk_len == cvmrdma_chunk_bytes && notif.chunk_offt == 0){
+                    if(notif.chunk_len == OPT_cvmrdma_chunk_bytes && notif.chunk_offt == 0){
                         decrypted = dest;
                         copy_into_chunk_cache = true;
                     }
@@ -429,7 +429,7 @@ static int cq_server_loop_once(struct cvmrdma_context * ctxt, struct ibv_cq * pr
 
                     // the chunk offset needs to be 0, otherwise the encrypted chunk
                     // saved will not match the state of the chunk in the user memory region
-                    if(notif.chunk_len == cvmrdma_chunk_bytes 
+                    if(notif.chunk_len == OPT_cvmrdma_chunk_bytes 
                         && qp->cur_offt_in_sge + notif.chunk_len <= cur_sge->length && notif.chunk_offt == 0)
                     {
                         /* can write directly to dest! */
@@ -450,31 +450,31 @@ static int cq_server_loop_once(struct cvmrdma_context * ctxt, struct ibv_cq * pr
                 DEBUG("[CQ] notif.chunk_offt 0x%"PRIx64" and notif.chunk_len %zu\n", notif.chunk_offt, notif.chunk_len);
                 DEBUG("[CQ] clen %llu\n", payload_clen);
 
-                size_t chunk_idx = offt / cvmrdma_chunk_bytes;
+                size_t chunk_idx = offt / OPT_cvmrdma_chunk_bytes;
                 unsigned char * payload_start = NULL;
                 struct chunk_tracking_info* chunk_info = &cur_mr->chunk_tracking[chunk_idx];
 
                 // from here on out we will modify the chunk and/or its assoicated user mr
                 // we therefore need to be sure, nobody else is using it
-                sem_wait(&chunk_info->in_transit_sem);
+                cvmrdma_sem_wait(&chunk_info->in_transit_sem, "CQ in transit sem");
                 get_time(&wc_wait_for_sem);
 
                 int cached = false;
-                if (!cvmrdma_disable_cache){
+                if (!OPT_cvmrdma_disable_cache){
                     cached = atomic_load(&chunk_info->cached);
                 }
 
                 // if the chunk is still cached (meaning the user has not modified it since our last send)
                 // and the nonce matches, we don't need to copy and decrypt the payload
-                /*if (cached && memcmp(chunk_info->nonce, notif.payload_nonce, cvmrdma_aead_NPUBBYTES) == 0 && !cvmrdma_disable_cache){
+                if (cached && memcmp(chunk_info->nonce, notif.payload_nonce, cvmrdma_aead_NPUBBYTES) == 0 && !OPT_cvmrdma_disable_cache && OPT_cvmrdma_enable_decrypt_skip){
                     wc_copy_payload = wc_wait_for_sem;
                     wc_cache_remove_write_protection = wc_wait_for_sem;
                     wc_decrypt_payload = wc_wait_for_sem;
                     wc_scatter_or_bypass = wc_wait_for_sem;
                     goto skip_decrypt;
-                }*/
+                }
 
-                if (!copy_into_chunk_cache || cvmrdma_disable_cache)
+                if (!copy_into_chunk_cache || OPT_cvmrdma_disable_cache)
                 {
                     // this happens either because we do not use caching, or because the incoming chunk only contains a part of the full chunk
                     // in this case we cannot copy it into the chunk cache, as this would result in (potentially) old data being present in the chunk cache
@@ -483,7 +483,7 @@ static int cq_server_loop_once(struct cvmrdma_context * ctxt, struct ibv_cq * pr
                     memcpy(payload_start, slot + header_bytes, payload_clen);
                     // if we bypass by decrypting directly to user memory, we need to invalidate the cache
                     // because this new data needs to be encrypted and saved in the chunk cache next time we send.
-                    if (!cvmrdma_disable_cache){
+                    if (!OPT_cvmrdma_disable_cache){
                         atomic_store(&chunk_info->cached, false);
                     }
                 } else {
@@ -499,8 +499,8 @@ static int cq_server_loop_once(struct cvmrdma_context * ctxt, struct ibv_cq * pr
                 // a write protection is only set, if the chunk is cached
                 // therefore we only need (and only can) remove the write protection
                 // if the chunk is cached
-                if (cached && !cvmrdma_disable_cache){
-                    uint64_t aligned_offset = offt - (offt % cvmrdma_chunk_bytes);
+                if (cached && !OPT_cvmrdma_disable_cache){
+                    uint64_t aligned_offset = offt - (offt % OPT_cvmrdma_chunk_bytes);
                     unsigned char * ptxt = cur_mr->user_mr.ibv_mr.addr + aligned_offset;
                     // in the next step the data from the chunk cache or the private memory will be decrypted to the user memory region
                     // we therefore need to make the user memory region writable again
@@ -508,7 +508,7 @@ static int cq_server_loop_once(struct cvmrdma_context * ctxt, struct ibv_cq * pr
                     struct uffdio_writeprotect uffdio_wp = {
                         .range = {
                             .start = ptxt,
-                            .len = cvmrdma_chunk_bytes,
+                            .len = OPT_cvmrdma_chunk_bytes,
                         },
                         .mode = 0,
                     };
@@ -520,7 +520,7 @@ static int cq_server_loop_once(struct cvmrdma_context * ctxt, struct ibv_cq * pr
                 }
                 get_time(&wc_cache_remove_write_protection);
 
-                unsigned long long payload_mlen = cvmrdma_chunk_bytes;
+                unsigned long long payload_mlen = OPT_cvmrdma_chunk_bytes;
                 err = cvmrdma_decrypt(
                     decrypted, &payload_mlen,
                     NULL,
@@ -541,7 +541,7 @@ static int cq_server_loop_once(struct cvmrdma_context * ctxt, struct ibv_cq * pr
                 /* Scatter the plaintext to user memory. If the op is a WRITE, the remote has set the destination address,
                     else the op is a SEND and we must use the next chunk in the current recv request */
 
-                if(!copy_into_chunk_cache || cvmrdma_disable_cache)
+                if(!copy_into_chunk_cache || OPT_cvmrdma_disable_cache)
                 {
                     //fprintf(stderr, "[CQ] NOT bypass scatter\n");
 
@@ -620,7 +620,7 @@ static int cq_server_loop_once(struct cvmrdma_context * ctxt, struct ibv_cq * pr
                     struct uffdio_writeprotect uffdio_wp = {
                         .range = {
                             .start = (unsigned long) decrypted,
-                            .len = cvmrdma_chunk_bytes,
+                            .len = OPT_cvmrdma_chunk_bytes,
                         },
                         .mode = UFFDIO_WRITEPROTECT_MODE_WP,
                     };
@@ -628,7 +628,7 @@ static int cq_server_loop_once(struct cvmrdma_context * ctxt, struct ibv_cq * pr
                         fprintf(stderr, "[CQ] ioctl-UFFDIO_WRITEPROTECT: %d\n", errno);
                         exit(1);
                     }
-                    //fprintf(stderr, "[CQ] Making chunk %llu not writable. addr=%llx, len=%llx\n", chunk_idx, decrypted, cvmrdma_chunk_bytes);
+                    //fprintf(stderr, "[CQ] Making chunk %llu not writable. addr=%llx, len=%llx\n", chunk_idx, decrypted, OPT_cvmrdma_chunk_bytes);
 
                     memcpy(chunk_info->nonce, notif.payload_nonce, cvmrdma_aead_NPUBBYTES);
                     atomic_store(&chunk_info->cached, true);
@@ -963,8 +963,8 @@ void* cvmrdma_cq_wait_completion_event(void* c_cq) {
                 } while(run_again_send);
             }
         } else {
-            cvmrdma_cq_server_run_once_if_idle_recv(context, cq, NULL);
             cvmrdma_cq_server_run_once_if_idle_send(context, cq, NULL);
+            cvmrdma_cq_server_run_once_if_idle_recv(context, cq, NULL);
         }
     }
 

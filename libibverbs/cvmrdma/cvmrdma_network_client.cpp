@@ -37,8 +37,8 @@ kj::Promise<void> notify_nonce_rpc(QPNotificationClient * qnc, uint64_t * nonce)
     auto req = qnc->notifyNonceRequest();
 
     //fprintf(stderr, "Batch send \n");
-    auto nonces = req.initNonces(NONCE_CACHE_SIZE * cvmrdma_aead_NPUB_WORDS);
-    for (int i = 0; i < NONCE_CACHE_SIZE * cvmrdma_aead_NPUB_WORDS; i++){
+    auto nonces = req.initNonces(OPT_cvmrdma_nonce_cache_size * cvmrdma_aead_NPUB_WORDS);
+    for (int i = 0; i < OPT_cvmrdma_nonce_cache_size * cvmrdma_aead_NPUB_WORDS; i++){
         nonces.set(i, nonce[i]);
 
         //fprintf(stderr, "[NC] Sending nonce to remote: 0x%" PRIx64 "\n", nonce[i]);

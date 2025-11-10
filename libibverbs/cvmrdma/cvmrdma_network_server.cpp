@@ -89,10 +89,10 @@ kj::Promise<void> QpNotificationChannel::notifyNonce(NotifyNonceContext context)
 {
     auto p = context.getParams();
 
-    KJ_REQUIRE(p.getNonces().size() == NONCE_CACHE_SIZE * cvmrdma_aead_NPUB_WORDS, "Nonce list size mismatch");
+    KJ_REQUIRE(p.getNonces().size() == OPT_cvmrdma_nonce_cache_size * cvmrdma_aead_NPUB_WORDS, "Nonce list size mismatch");
 
     //fprintf(stderr, "Batch receive \n");
-    for (int j = 0; j < NONCE_CACHE_SIZE; j++){
+    for (int j = 0; j < OPT_cvmrdma_nonce_cache_size; j++){
 
         uint64_t nonce[cvmrdma_aead_NPUB_WORDS];
         for (size_t i = 0; i < cvmrdma_aead_NPUB_WORDS; i++) {

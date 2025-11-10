@@ -7,8 +7,6 @@
 #define PAGE_SIZE 4096
 #define DIVIDE_ROUND_UP(x,y) ((x + y - 1) / y)
 
-#define NONCE_CACHE_SIZE 100
-
 struct cq_server_notification
 {
     uint64_t hca_addr; // 8
@@ -25,14 +23,16 @@ struct cq_server_notification
 #define CVMRDMA_SHARED_KEY_ENV "CVMRDMA_SHARED_KEY"
 
 // Defined in cvmrdma_ops.c
-extern uint64_t cvmrdma_chunk_bytes;
+extern uint64_t OPT_cvmrdma_chunk_bytes;
 extern uint64_t cvmrdma_ring_entries;
 extern uint64_t cvmrdma_ack_threshold;
 
+extern uint64_t OPT_cvmrdma_nonce_cache_size;
+
 static inline uint64_t cvmrdma_ring_slot_bytes(enum sodium_crypto_aead aead)
 {
-	assert(cvmrdma_chunk_bytes != 0);
-	return cvmrdma_chunk_bytes + cvmrdma_ABYTES(aead) 
+	assert(OPT_cvmrdma_chunk_bytes != 0);
+	return OPT_cvmrdma_chunk_bytes + cvmrdma_ABYTES(aead) 
 			+ sizeof(struct cq_server_notification) + cvmrdma_ABYTES(aead);
 }
 
@@ -43,7 +43,7 @@ static inline uint64_t cvmrdma_header_bytes(enum sodium_crypto_aead aead)
 }
 
 // originally 32 * 1048576
-#define CVMRDMA_RING_BUFFER_SIZE (1024 * 1048576) //536870912
+#define CVMRDMA_RING_BUFFER_SIZE (512 * 1048576) //536870912
 // #define CVMRDMA_RING_ENTRIES 64
 
 // This must be smaller than the max_recv_wr/max_send_wr for control_ibqp in cvmrdma_create_qp.

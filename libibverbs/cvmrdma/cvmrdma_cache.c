@@ -39,17 +39,17 @@ int invalidate_chunk(int uffd, struct cvmrdma_mr* mr)
 
     // Mark chunk where this address falls into as dirty
     uint64_t offt = (msg.arg.pagefault.address - mr->hca_va);
-    uint64_t chunk_idx = offt / cvmrdma_chunk_bytes;
+    uint64_t chunk_idx = offt / OPT_cvmrdma_chunk_bytes;
 
-    sem_wait(&mr->chunk_tracking[chunk_idx].in_transit_sem);
+    cvmrdma_sem_wait(&mr->chunk_tracking[chunk_idx].in_transit_sem, "CACHE invalidate chunk");
     DEBUG("[CACHE] chunk_idx = %llu\n", chunk_idx);
     atomic_store(&mr->chunk_tracking[chunk_idx].cached, false);
-    //fprintf(stderr, "[CACHE] Marked chunk %llu as dirty\n", chunk_idx);
+    // fprintf(stderr, "[CACHE] Marking chunk %llu as dirty due to write fault at address %llx (offt=%llx)\n", chunk_idx, msg.arg.pagefault.address, offt);
 
 
     // make all pages of the chunk as writable
-    uint64_t alinged_start = msg.arg.pagefault.address - (offt % cvmrdma_chunk_bytes);
-    size_t wp_len = (alinged_start - (uint64_t)user_mr->addr) + cvmrdma_chunk_bytes > user_mr->length ? user_mr->length - (alinged_start - (uint64_t)user_mr->addr) : cvmrdma_chunk_bytes;
+    uint64_t alinged_start = msg.arg.pagefault.address - (offt % OPT_cvmrdma_chunk_bytes);
+    size_t wp_len = (alinged_start - (uint64_t)user_mr->addr) + OPT_cvmrdma_chunk_bytes > user_mr->length ? user_mr->length - (alinged_start - (uint64_t)user_mr->addr) : OPT_cvmrdma_chunk_bytes;
 
 
     struct uffdio_writeprotect uffdio_wp = {
