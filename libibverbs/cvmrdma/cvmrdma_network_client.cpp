@@ -7,12 +7,8 @@
 #include "debug.h"
 #include "cvmrdma.h"
 
-static int send_counter = 0;
-
 kj::Promise<void> remote_qp_notify_chunk_recv_rpc(QPNotificationClient * qnc)
 {
-    send_counter++;
-    DEBUG("FFF [NC] Notify chunk recv: %d\n", send_counter);
     auto req = qnc->notifyChunkRecvRequest();
 
     return req.send().ignoreResult();

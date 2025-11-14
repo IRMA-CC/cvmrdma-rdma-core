@@ -22,7 +22,7 @@
 #include "cvmrdma.h"
 
 // enabling this will disable the secure secondary channel
-// #define CVMRDMA_DISABLE_SECURE_SECONDARY_CHANNEL 0
+#define CVMRDMA_DISABLE_SECURE_SECONDARY_CHANNEL 0
 // WARNING: This will result in the slots no longer being acked
 // therefore this can only work if the application uses less slots than available in the ring
 // #define CVMRDMA_DISABLE_RECV_NOTIFY 0
@@ -88,13 +88,6 @@ struct cvmrdma_mr {
 
 	/* Encrypted provider shadow region */
 	struct ibv_mr *provider_mr;
-	void *provider_va;
-	int provider_dmabuf_fd;
-
-	/* Array to track information about the chunk.
-	   The array is indexed by the chunk number.
-	 */
-	struct chunk_tracking_info *chunk_tracking;
 
 	pthread_t cache_invalidation_thread;
 	int uffd;
@@ -171,14 +164,21 @@ struct cvmrdma_qp {
 	/* Reserved chunks to gather, encrypt / scatter, decrypt */
 	void *bounce_private_mem;
 	/* Ring buffer associated to this QP exposed as an MR. */
-	struct ibv_mr *ringbuf_mr;
-	void *ringbuf_va;
-	int ringbuf_dmabuf_fd;
+	struct ibv_mr *recv_ringbuf_mr;
+	void *recv_ringbuf_va;
+	int recv_ringbuf_dmabuf_fd;
 
-	struct ibv_mr *no_data_message_mr;
-	void *no_data_message_mr_va;
-	int no_data_message_mr_fd;
-	sem_t no_data_message_sem;
+	struct ibv_mr *send_ringbuf_mr;
+	void *send_ringbuf_va;
+	int send_ringbuf_dmabuf_fd;
+
+	uint64_t send_counter;
+	uint64_t next_send_counter;
+	uint64_t recv_counter;
+	pthread_mutex_t send_counter_lock;
+	pthread_mutex_t recv_counter_lock;
+	pthread_mutex_t ibv_lock;
+	pthread_cond_t ibv_cv;
 
 	//uint64_t nonce_metadata_cache[cvmrdma_aead_NPUB_WORDS * NONCE_CACHE_SIZE];
 	uint64_t * nonce_metadata_cache;
@@ -267,21 +267,7 @@ struct cvmrdma_srq {
 	QpRecvMetadata *recv_metadata;
 };
 
-/* Keep track of the nonce used to encrypt a certain payload chunk
-   and also whether the chunk must be updated since the changed data
-   in the user MR.
-*/
-struct chunk_tracking_info {
-	uint64_t nonce[cvmrdma_aead_NPUB_WORDS]; // 24 bytes
-	/* If the chink is not dirty this is true */
-	_Atomic bool cached; // 1 byte
-
-	sem_t in_transit_sem;
-};
-
-extern bool OPT_cvmrdma_disable_cache;
-extern bool OPT_cvmrdma_disable_payload_nonce_pregeneration;
-extern bool OPT_cvmrdma_enable_decrypt_skip;
+//extern bool OPT_cvmrdma_disable_payload_nonce_pregeneration;
 
 #ifdef DEBUG_TIMING
 typedef struct timespec cvm_time_t;
@@ -295,12 +281,12 @@ extern cvm_time_t wr_calculations; // Tracks time that is needed to process the 
 extern cvm_time_t wr_metadata_push; // Tracks time taken to push metadata for the write request
 extern cvm_time_t wr_send_nonce; // Tracks time taken to send the nonce for the write request
 extern cvm_time_t wr_wait_for_recv_slot; // Tracks time taken to wait for a receive slot
-extern cvm_time_t wr_wait_for_sem; // Track time that it takes to acquire the semaphore
-extern cvm_time_t wr_cache_atomic_load; // Track time that it takes to do the atomic load for cache checking
-extern cvm_time_t wr_cache_write_protect; // Track time that it takes to write protect the chunk
-extern cvm_time_t wr_cache_atomic_store; // Track time that it takes to do the atomic store for cache marking
-extern cvm_time_t wr_generate_nonce; // Track time it takes to generate a new nonce
-extern cvm_time_t wr_push_chunk_tracking; // Tracks time taken to push chunk tracking information
+// extern cvm_time_t wr_wait_for_sem; // Track time that it takes to acquire the semaphore
+// extern cvm_time_t wr_cache_atomic_load; // Track time that it takes to do the atomic load for cache checking
+// extern cvm_time_t wr_cache_write_protect; // Track time that it takes to write protect the chunk
+// extern cvm_time_t wr_cache_atomic_store; // Track time that it takes to do the atomic store for cache marking
+// extern cvm_time_t wr_generate_nonce; // Track time it takes to generate a new nonce
+// extern cvm_time_t wr_push_chunk_tracking; // Tracks time taken to push chunk tracking information
 extern cvm_time_t wr_encrypt_metadata; // Tracks time taken to encrypt metadata for the write request	
 extern cvm_time_t wr_encrypt_payload; // Tracks time taken to encrypt the payload for the write request
 extern cvm_time_t wr_ibv_post_send; // Tracks time taken to call ibv_post_send
@@ -313,9 +299,9 @@ extern cvm_time_t wc_refuel; // Tracks time taken to refuel the recv queue
 extern cvm_time_t wc_calculations; // Tracks time taken to process the recv WC and get all properties needed for receiving
 extern cvm_time_t wc_get_nonce; // Tracks time taken to get the nonce for the
 extern cvm_time_t wc_decrypt_metadata; // Tracks time taken to decrypt the metadata for the recv WC
-extern cvm_time_t wc_wait_for_sem; // Tracks time taken to wait for the semaphore
+// extern cvm_time_t wc_wait_for_sem; // Tracks time taken to wait for the semaphore
 extern cvm_time_t wc_copy_payload; // Tracks time taken to copy the payload for the recv WC
-extern cvm_time_t wc_cache_remove_write_protection; // Tracks time taken to remove write protection for the recv WC
+// extern cvm_time_t wc_cache_remove_write_protection; // Tracks time taken to remove write protection for the recv WC
 extern cvm_time_t wc_decrypt_payload; // Tracks time taken to decrypt the payload for the recv WC
 extern cvm_time_t wc_scatter_or_bypass; // Tracks time taken to scatter the payload to the user buffers or bypass if possible
 extern cvm_time_t wc_notify_user; // Tracks time taken to notify the user of the received WR
@@ -324,6 +310,3 @@ extern cvm_time_t wc_notify_sender; // Tracks time taken to notify the sender th
 int post_send_do_bounce(struct cvmrdma_qp *qp,
                         struct ibv_send_wr *wrs,
                         struct ibv_send_wr **bad_wr);
-
-
-void cvmrdma_sem_wait(sem_t *sem, char const * error_msg);

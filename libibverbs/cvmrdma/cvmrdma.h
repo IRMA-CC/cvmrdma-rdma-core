@@ -13,9 +13,8 @@ struct cq_server_notification
     enum ibv_wr_opcode op; // 16
     uint32_t rkey; // 16
     uint32_t imm; // 24
-	uint64_t payload_nonce[cvmrdma_aead_NPUB_WORDS]; // 48
+	// uint64_t payload_nonce[cvmrdma_aead_NPUB_WORDS]; // 48
 	uint64_t payload_len; // 56
-	uint64_t chunk_offt; // 64
 	uint64_t chunk_len; // 72
     bool last_chunk; // 80
 };
@@ -23,9 +22,11 @@ struct cq_server_notification
 #define CVMRDMA_SHARED_KEY_ENV "CVMRDMA_SHARED_KEY"
 
 // Defined in cvmrdma_ops.c
+extern uint64_t OPT_cvmrdma_ring_buffer_size;
 extern uint64_t OPT_cvmrdma_chunk_bytes;
 extern uint64_t cvmrdma_ring_entries;
 extern uint64_t cvmrdma_ack_threshold;
+extern uint64_t cvmrdma_ack_notify_divider;
 
 extern uint64_t OPT_cvmrdma_nonce_cache_size;
 
@@ -43,7 +44,7 @@ static inline uint64_t cvmrdma_header_bytes(enum sodium_crypto_aead aead)
 }
 
 // originally 32 * 1048576
-#define CVMRDMA_RING_BUFFER_SIZE (512 * 1048576) //536870912
+// #define CVMRDMA_RING_BUFFER_SIZE (512 * 1048576) //536870912
 // #define CVMRDMA_RING_ENTRIES 64
 
 // This must be smaller than the max_recv_wr/max_send_wr for control_ibqp in cvmrdma_create_qp.

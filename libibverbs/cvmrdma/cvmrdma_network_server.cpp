@@ -60,7 +60,7 @@ kj::Promise<void> QpNotificationChannel::notifyChunkRecv(NotifyChunkRecvContext 
     recv_counter++;
     DEBUG("FFF [NS] notifyChunkRecv: %d\n", recv_counter);
     pthread_mutex_lock(m_send_lines_lock_ptr);
-    (*m_send_lines_full_ptr) = (*m_send_lines_full_ptr) - (cvmrdma_ring_entries / 2);
+    (*m_send_lines_full_ptr) = (*m_send_lines_full_ptr) - (cvmrdma_ring_entries / cvmrdma_ack_notify_divider);
     pthread_mutex_unlock(m_send_lines_lock_ptr);
 
     pthread_cond_signal(m_send_lines_avail_cv_ptr);
