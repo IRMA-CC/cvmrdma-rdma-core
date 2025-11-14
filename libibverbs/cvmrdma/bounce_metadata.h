@@ -23,6 +23,7 @@ void bounce_metadata_destroy(PdBounceMetadata * bm);
 
 
 void register_bounce_mr(PdBounceMetadata * metadata, uint32_t mr_id, struct cvmrdma_mr * mr);
+void unregister_bounce_mr(PdBounceMetadata * metadata, uint32_t mr_id);
 struct cvmrdma_mr * get_bounce_metadata_for_rkey(PdBounceMetadata * metadata, uint32_t rkey);
 struct cvmrdma_mr * get_bounce_metadata_for_lkey(PdBounceMetadata * metadata, uint32_t lkey);
 

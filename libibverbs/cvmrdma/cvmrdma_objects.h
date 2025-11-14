@@ -56,8 +56,10 @@ struct cvmrdma_context {
     
         XXX: for now, we only connect a single remote.
     */
-	CapnpEvloopThread *network_evloop;
-	CVMRDMAServer *network_server;
+	// CapnpEvloopThread *network_evloop;
+	// CVMRDMAServer *network_server;
+
+	pthread_t  tcp_server_thread;
 
 	/*RPCClientSession *local_network_client_connection;
 	CVMRDMAClient *local_network_client_cap;
@@ -121,15 +123,6 @@ struct cvmrdma_cq {
 	*/
 	int comp_channel_event_fd;
 	_Atomic bool comp_channel_event_fd_filled;
-
-	/* Provider comp channel
-	   This is used when the application also uses a comp channel,
-	   since then the applications polls on that channel before calling ibv_poll_cq().
-	   Once we receive data on the provider qp/cq we can run the cq_server.
-	*/
-	struct ibv_comp_channel *provider_comp_channel;
-	pthread_t provider_comp_channel_thread;
-	pthread_t nonce_thread;
 };
 
 struct cvmrdma_qp {
@@ -154,9 +147,9 @@ struct cvmrdma_qp {
 	/* This thread consumes entries in the wr_queue.
 	 * Note that the order of WRs is preserved.	
 	 */
-	pthread_t send_server_thread;
+	pthread_t provider_comp_channel_thread;
 
-	/* Protext send_lines_full */
+	/* Protect send_lines_full */
 	pthread_mutex_t send_lines_full_lock;
 	/* Notifies that new send lines are available */
 	pthread_cond_t send_lines_avail;
@@ -242,11 +235,6 @@ struct cvmrdma_qp {
 	/* Information for debugging purposes */
 	u_int64_t lid;
 	uint64_t dlid;
-
-	pthread_mutex_t receive_nonce_lock;
-	pthread_cond_t receive_nonce_cv;
-	QpNonce *nonce_queue;
-	bool nonce_set;
 
 	QpNonce *payload_nonce_queue;
 

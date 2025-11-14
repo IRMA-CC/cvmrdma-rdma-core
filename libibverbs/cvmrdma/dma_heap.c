@@ -25,6 +25,11 @@ int open_system_heap(void)
     return fd;
 }
 
+int close_system_heap(int system_heap_fd)
+{
+    return close(system_heap_fd);
+}
+
 
 int alloc_dma_buf(int system_heap_fd, size_t size)
 {

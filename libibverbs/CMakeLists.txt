@@ -16,18 +16,10 @@ publish_internal_headers(infiniband
   marshall.h
   )
 
-publish_headers(infiniband/cvmrdma
-  cvmrdma/cvmrdma_network_client.h
-  cvmrdma/cvmrdma_network_evloop.h
-  cvmrdma/cvmrdma_network_server.h
-)
 
 publish_internal_headers(infiniband/cvmrdma
   cvmrdma/crypto.h
   cvmrdma/cvmrdma_cq_server.h
-  cvmrdma/cvmrdma_network_client_priv.h
-  cvmrdma/cvmrdma_network_evloop_priv.h
-  cvmrdma/cvmrdma_network_server_priv.h
   cvmrdma/bounce_metadata.h
   cvmrdma/cvmrdma_ops.h
   cvmrdma/qp_metadata_manager.h
@@ -40,6 +32,7 @@ publish_internal_headers(infiniband/cvmrdma
   cvmrdma/wc_queue.h
   cvmrdma/wr_queue.h
   cvmrdma/dma_heap.h
+  cvmrdma/cvmrdma_tcp.h
 )
 
 configure_file("libibverbs.map.in"
@@ -90,9 +83,6 @@ rdma_library(ibverbs "${CMAKE_CURRENT_BINARY_DIR}/libibverbs.map"
 
   cvmrdma/bounce_metadata.cpp
   cvmrdma/cvmrdma_cq_server.c
-  cvmrdma/cvmrdma_network_client.cpp
-  cvmrdma/cvmrdma_network_evloop.cpp
-  cvmrdma/cvmrdma_network_server.cpp
   cvmrdma/cvmrdma_ops.c
   cvmrdma/qp_metadata_manager.cpp
   cvmrdma/recv_metadata.cpp
@@ -104,6 +94,8 @@ rdma_library(ibverbs "${CMAKE_CURRENT_BINARY_DIR}/libibverbs.map"
   cvmrdma/wc_queue.cpp
   cvmrdma/wr_queue.cpp
   cvmrdma/dma_heap.c
+  cvmrdma/cvmrdma_tcp_server.c
+  cvmrdma/cvmrdma_tcp_client.c
 
   
   ${CAPNP_SRCS}

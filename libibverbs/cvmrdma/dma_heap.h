@@ -7,6 +7,7 @@ extern "C" {
 #endif
 
 int open_system_heap(void);
+int close_system_heap(int system_heap_fd);
 
 
 /* return a dma-buf fd, ready to be mmaped and passed to reg_dmabuf_mr */

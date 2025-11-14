@@ -25,6 +25,12 @@ void register_bounce_mr(PdBounceMetadata * metadata, uint32_t mr_id, struct cvmr
     metadata->insert_or_assign(mr_id, mr);
 }
 
+void unregister_bounce_mr(PdBounceMetadata * metadata, uint32_t mr_id)
+{
+    metadata->erase(mr_id);
+}
+
+
 struct cvmrdma_mr * get_bounce_metadata_for_rkey(PdBounceMetadata * metadata, uint32_t rkey)
 {
     if (metadata->exists(rkey)) {

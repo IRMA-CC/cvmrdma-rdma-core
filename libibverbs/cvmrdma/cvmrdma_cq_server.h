@@ -28,6 +28,7 @@ int cvmrdma_cq_server_run_once_if_idle_recv(struct cvmrdma_context * ctxt, struc
 int cvmrdma_cq_server_run_once_if_idle_send(struct cvmrdma_context * ctxt, struct cvmrdma_cq * cq, bool* again);
 
 void* cvmrdma_cq_wait_completion_event(void* c_cq);
+void cvmrdma_cq_server_stop_all();
 
 #ifdef __cplusplus
 }

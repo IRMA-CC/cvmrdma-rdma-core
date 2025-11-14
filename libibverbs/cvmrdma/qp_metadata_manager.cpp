@@ -40,6 +40,21 @@ int qp_metadata_manager_register_qp(QPMetadataManager * qp_metadata_manager, uin
     return 0;
 }
 
+int qp_metadata_manager_unregister_qp(QPMetadataManager * qp_metadata_manager, uint32_t qpn)
+{
+    auto locked = std::scoped_lock{qp_metadata_manager->lock};
+
+    auto present = qp_metadata_manager->qp_for_qpn.find(qpn);
+    if(present == qp_metadata_manager->qp_for_qpn.end())
+    {
+        DEBUG("ERROR: no qp found to unregister for QPN 0x%" PRIx32 "!\n", qpn);
+        return -1;
+    }
+
+    qp_metadata_manager->qp_for_qpn.erase(present);
+    return 0;
+}
+
 struct cvmrdma_qp * qp_metadata_manager_get_qp(QPMetadataManager * qp_metadata_manager, uint32_t qpn)
 {
     auto locked = std::scoped_lock{qp_metadata_manager->lock};

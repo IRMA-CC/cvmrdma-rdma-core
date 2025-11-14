@@ -21,7 +21,7 @@
 
 #include "cvmrdma.h"
 #include "cvmrdma_objects.h"
-#include "cvmrdma_network_evloop_priv.h"
+// #include "cvmrdma_network_evloop_priv.h"
 #include "chunk_queue.h"
 
 // These variables are for the send side
@@ -657,15 +657,15 @@ skip_chunk_processing:
             DEBUG("FFF [CQ] notifying remote that chunk %zu is free\n", this_recv_slot_id);
 
             if (qp->received_lines >= qp->received_lines_threshold){
-                if (qp->is_loopback) {
+                /*if (qp->is_loopback) {
                     remote_qp_notify_chunk_recv(qp->local_addr, ctxt->network_evloop, qp->remote_qnc);
                 } else {
                     remote_qp_notify_chunk_recv(qp->remote_addr, ctxt->network_evloop, qp->remote_qnc);
-                }
+                }*/
 
                 qp->received_lines_threshold += (cvmrdma_ring_entries / cvmrdma_ack_notify_divider);
 
-                /*struct ibv_send_wr send_wrs[1] = {0};
+                struct ibv_send_wr send_wrs[1] = {0};
                 // we don't send a SIGNALED flag, because this wr is internal and on the server side we don't
                 // expect a work completion for it
                 send_wrs[0].opcode = IBV_WR_RDMA_SLOT_ACK;
@@ -677,7 +677,7 @@ skip_chunk_processing:
                 send_wrs[0].next = NULL;
 
                 struct ibv_send_wr * bad_wr = NULL;
-                post_send_do_bounce(qp, send_wrs, &bad_wr);*/
+                post_send_do_bounce(qp, send_wrs, &bad_wr);
             }
             
 #endif
@@ -756,6 +756,8 @@ int cvmrdma_cq_server_run_once_if_idle_send(struct cvmrdma_context * ctxt, struc
 
 // This is used if the actual application uses the completion channel
 
+atomic_int cvmrdma_cq_server_global_stop = 0;
+
 void* cvmrdma_cq_wait_completion_event(void* c_cq) {
     struct cvmrdma_cq * cq = (struct cvmrdma_cq *)c_cq;
     struct cvmrdma_context * context = cvmrdma_get_ctx(cq->user_cq.cq.context);
@@ -768,74 +770,15 @@ void* cvmrdma_cq_wait_completion_event(void* c_cq) {
 
     DEBUG("[CQ] Waiting for CQ event\n");
 
-    for(;;) {
-        // Toggle between busy polling and waiting for event
-        // Since the event waiting seems to have problems (cf. the gam benchmark)
-        // we still busy poll.
-
-        // using notifications results in more interrupts, which we want to avoid in a sev machine
-        if(false) {
-            // verbs.c:632 ibv_get_cq_event
-            // This emulates:
-            // ret = ibv_get_cq_event(cq->provider_comp_channel, &ev_cq, &ev_ctx);
-            // if (ret) {
-            //     fprintf(stderr, "Failed to get CQ event\n");
-            //     exit(1);
-            // }
-
-            /*if (atomic_load(&cq->stop_thread)) {
-                break;
-            }
-
-            ssize_t n = read(cq->provider_comp_channel->fd, &ev, sizeof ev);
-            if (n != sizeof ev) {
-                if (atomic_load(&cq->stop_thread)) {
-                    // read will be woken up and jump here once close() is called on the channel fd
-                    break;
-                }
-                fprintf(stderr, "Failed to read CQ event, read %zd bytes\n", n);
-                exit(1);
-            }*/
-
-            if (read(cq->provider_comp_channel->fd, &ev, sizeof ev) != sizeof ev) {
-                fprintf(stderr, "Failed to read CQ event\n");
-                exit(1);
-            }
-            ev_cq = (struct ibv_cq *) (uintptr_t) ev.cq_handle;
-            ev_ctx = ev_cq->cq_context;
-            context->prov_ops.cq_event(ev_cq);
-
-            DEBUG("[CQ] Got CQ event\n");
-            assert(ev_cq == cq->prov_cq_recv || ev_cq == cq->prov_cq_send);
-
-            // This emulates:
-            // ibv_ack_cq_events(ev_cq, 1);
-            pthread_mutex_lock(&ev_cq->mutex);
-            ev_cq->comp_events_completed += 1;
-            pthread_cond_signal(&ev_cq->cond);
-            pthread_mutex_unlock(&ev_cq->mutex);
-
-            /* Request notification upon the next completion event */
-            ret = context->prov_ops.req_notify_cq(ev_cq, 0);
-            if (ret) {
-                fprintf(stderr, "Couldn't request CQ notification\n");
-                exit(1);
-            }
-
-            if(ev_cq == cq->prov_cq_recv) {
-                do {
-                    cvmrdma_cq_server_run_once_if_idle_recv(context, cq, &run_again_recv);
-                } while(run_again_recv);
-            } else {
-                do {
-                    cvmrdma_cq_server_run_once_if_idle_send(context, cq, &run_again_send);
-                } while(run_again_send);
-            }
-        } else {
-            cvmrdma_cq_server_run_once_if_idle_send(context, cq, NULL);
-            cvmrdma_cq_server_run_once_if_idle_recv(context, cq, NULL);
-        }
+    while(!atomic_load(&cvmrdma_cq_server_global_stop)) {
+        cvmrdma_cq_server_run_once_if_idle_send(context, cq, NULL);
+        cvmrdma_cq_server_run_once_if_idle_recv(context, cq, NULL);
     }
 
     return NULL;
+}
+
+void cvmrdma_cq_server_stop_all()
+{
+    atomic_store(&cvmrdma_cq_server_global_stop, 1);
 }

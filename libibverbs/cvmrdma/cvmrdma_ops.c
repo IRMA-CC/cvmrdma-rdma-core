@@ -28,9 +28,9 @@
 #include "cvmrdma_objects.h"
 #include "bounce_metadata.h"
 #include "cvmrdma_cq_server.h"
-#include "cvmrdma_network_client_priv.h"
-#include "cvmrdma_network_server_priv.h"
-#include "cvmrdma_network_evloop_priv.h"
+//#include "cvmrdma_network_client_priv.h"
+//#include "cvmrdma_network_server_priv.h"
+//#include "cvmrdma_network_evloop_priv.h"
 #include "recv_metadata.h"
 #include "read_metadata.h"
 #include "wc_queue.h"
@@ -38,6 +38,7 @@
 #include "dma_heap.h"
 #include "nonce_queue.h"
 #include "chunk_queue.h"
+#include "cvmrdma_tcp.h"
 
 #include "debug.h"
 
@@ -124,19 +125,7 @@ static struct ibv_pd * cvmrdma_alloc_pd(struct ibv_context * ibcontext)
     pd->bounce_metadata = bounce_metadata;
 	pd->mr_id_ctr = 0;
 
-	// for (uint64_t i = 0; i < 10; i++) {
-	// 	if(ctxt->pd_list[i] == NULL) {
-	// 		ctxt->pd_list[i] = pd;
-	// 		break;
-	// 	} else if (i == 9) {
-	// 		fprintf(stderr, "Failed to allocate PD, no space in pd_list\n");
-	// 		exit(1);
-	// 	}
-	// }
-
 	DEBUG("Allocated PD %p\n", pd);
-
-
 
 	return &pd->user_pd;
 
@@ -176,16 +165,15 @@ static struct ibv_cq *cvmrdma_create_cq(struct ibv_context *ibcontext, int cqe,
 	}
 	// always create a completion channel for the provider cq.
 	// This ensures cvmrdma will always get notifications on arrival.
-	cq->provider_comp_channel = ibv_create_comp_channel_prov(ibcontext);
 	/* Create the recv CQ */
-	struct ibv_cq * ibcq_recv = ctxt->prov_ops.create_cq(ibcontext, 16384, cq->provider_comp_channel, 0);
+	struct ibv_cq * ibcq_recv = ctxt->prov_ops.create_cq(ibcontext, 16384, NULL, 0);
 	if(! ibcq_recv)
 	{
 		fprintf(stderr, "failed to create backend recv CQ for the CQ server\n");
 		exit(1);
 	}
 	/* see ibv_create_cq */
-	verbs_init_cq(ibcq_recv, ibcontext, cq->provider_comp_channel, NULL);
+	verbs_init_cq(ibcq_recv, ibcontext, NULL, NULL);
 	cq->prov_cq_recv = ibcq_recv;
 
 	/*ret = ctxt->prov_ops.req_notify_cq(ibcq_recv, 0);
@@ -196,14 +184,14 @@ static struct ibv_cq *cvmrdma_create_cq(struct ibv_context *ibcontext, int cqe,
 	}*/
 
 	/* Create send CQ */
-	struct ibv_cq * ibcq_send = ctxt->prov_ops.create_cq(ibcontext, 16384, cq->provider_comp_channel, 0);
+	struct ibv_cq * ibcq_send = ctxt->prov_ops.create_cq(ibcontext, 16384, NULL, 0);
 	if(! ibcq_send)
 	{
 		fprintf(stderr, "failed to create backend send CQ for the CQ server\n");
 		exit(1);
 	}
 	/* see ibv_create_cq */
-	verbs_init_cq(ibcq_send, ibcontext, cq->provider_comp_channel, NULL);
+	verbs_init_cq(ibcq_send, ibcontext, NULL, NULL);
 	cq->prov_cq_send = ibcq_send;
 
 	/*ret = ctxt->prov_ops.req_notify_cq(ibcq_send, 0);
@@ -238,24 +226,24 @@ static int attach_qp_to_cq_manager(struct cvmrdma_context * ctxt, struct cvmrdma
 	   No risk of a race: we haven't returned the QPN to the user yet, the remote cannot possibly
 	   know it yet.
 	*/
-	DEBUG("Create QpNotificationChannel cap QNC using notification queue\n");
-	cvmrdma_server_register_qp(
-		ctxt->network_server,
-		qpn,
-		&qp->send_lines_full,
-		&qp->send_lines_full_lock,
-		&qp->send_lines_avail,
-		&qp->remote_ring_rkey,
-		&qp->remote_params_set,
-		&qp->remote_params_lock,
-		&qp->remote_params_set_cv,
-		&qp->receive_nonce_lock,
-		&qp->receive_nonce_cv,
-		&qp->nonce_queue,
-		&qp->nonce_set,
-		&qp->wr_queue,
-		qp
-	);
+
+	register_qp_with_server(qpn, qp);
+
+	return 0;
+}
+
+static int detach_qp_from_cq_manager(struct cvmrdma_context * ctxt, struct cvmrdma_qp * qp)
+{
+	uint32_t qpn = qp->user_qp.qp.qp_num;
+
+	unregister_qp_from_server(qpn);
+
+	int err = qp_metadata_manager_unregister_qp(ctxt->qp_metadata_manager, qpn);
+	if(err)
+	{
+		fprintf(stderr, "failed to unregister QP from CQ server\n");
+		return -1;
+	}
 
 	return 0;
 }
@@ -385,10 +373,10 @@ static struct ibv_qp *cvmrdma_create_qp(struct ibv_pd * ibpd,
 	int err;
 
 	struct cvmrdma_qp * qp = calloc(1, sizeof(struct cvmrdma_qp));
-	qp->wr_queue = alloc_wr_queue();
-	qp->nonce_metadata_cache_offset = 0;
+	// qp->wr_queue = alloc_wr_queue();
+	// qp->nonce_metadata_cache_offset = 0;
 
-	qp->nonce_metadata_cache = calloc(OPT_cvmrdma_nonce_cache_size * cvmrdma_aead_NPUB_WORDS, sizeof(uint64_t));
+	// qp->nonce_metadata_cache = calloc(OPT_cvmrdma_nonce_cache_size * cvmrdma_aead_NPUB_WORDS, sizeof(uint64_t));
 
 	qp->received_lines = 0;
 	qp->received_lines_threshold = cvmrdma_ring_entries / cvmrdma_ack_notify_divider;
@@ -569,22 +557,12 @@ static struct ibv_qp *cvmrdma_create_qp(struct ibv_pd * ibpd,
 
 	// Since the actual application is likely to not poll the cq all the time,
 	// we need another trigger to wake up the cq server.
-	err = pthread_create(&c_cq->provider_comp_channel_thread, NULL, &cvmrdma_cq_wait_completion_event, (void *)c_cq);
+	err = pthread_create(&qp->provider_comp_channel_thread, NULL, &cvmrdma_cq_wait_completion_event, (void *)c_cq);
 	if (err)
 	{
 		fprintf(stderr, "Error creating cvmrdma_cq_wait_completion_event thread: %d\n", err);
 		exit(1);
 	}
-
-	/*if (!OPT_cvmrdma_disable_payload_nonce_pregeneration){
-		qp->payload_nonce_queue = alloc_qp_nonce_queue();
-		err = pthread_create(&c_cq->nonce_thread, NULL, &cvmrdma_pregenerate_nonces_loop, (void *)qp);
-		if (err)
-		{
-			fprintf(stderr, "Error creating cvmrdma_pregenerate_nonces_loop thread: %d\n", err);
-			exit(1);
-		}
-	}*/
 
 	/* We can only get the capability to the remote QP once we know its QPN, this will be done
 	   in modify_qp. We'll also get the rkey to its ring */
@@ -595,21 +573,7 @@ static struct ibv_qp *cvmrdma_create_qp(struct ibv_pd * ibpd,
 	pthread_mutex_init(&qp->remote_params_lock, NULL);
 	pthread_cond_init(&qp->remote_params_set_cv, NULL);
 
-	pthread_mutex_init(&qp->receive_nonce_lock, NULL);
-	pthread_cond_init(&qp->receive_nonce_cv, NULL);
-	qp->nonce_set = false;
-	qp->nonce_queue = alloc_qp_nonce_queue();
-
-#ifdef SKIP_WR_QUEUE
 	fprintf(stderr, "CVMRDMA: Skipping WR queue processing\n");
-#else
-	err = pthread_create(&qp->send_server_thread, NULL, &cvmrdma_do_bounce_loop, (void *)qp);
-	if (err)
-	{
-		fprintf(stderr, "Error creating cvmrdma_cq_wait_completion_event thread: %d\n", err);
-		exit(1);
-	}
-#endif
 
 	char const * local_bind_addr = getenv("CVMRDMA_BIND_ADDR");
 	if(! local_bind_addr)
@@ -705,7 +669,7 @@ static int cvmrdma_modify_qp(struct ibv_qp *ibqp, struct ibv_qp_attr *attr,
 		qp->remote_addr = remote_addr;
 
 		/* Start by connecting to the server if not already connected */
-		if(! qp->remote_network_client_connection && !is_local) {
+		/*if(! qp->remote_network_client_connection && !is_local) {
 			DEBUG("[MODIFY_QP] Connecting to the remote server on address %s\n", qp->remote_addr);
 			qp->remote_network_client_connection = new_client_rpc_session(ctxt->network_evloop, qp->remote_addr);
 			qp->remote_network_client_cap = get_cvmrdma_client(qp->remote_addr, ctxt->network_evloop, qp->remote_network_client_connection);
@@ -715,7 +679,7 @@ static int cvmrdma_modify_qp(struct ibv_qp *ibqp, struct ibv_qp_attr *attr,
 			qp->local_network_client_cap = get_cvmrdma_client(qp->local_addr, ctxt->network_evloop, qp->local_network_client_connection);
 		} else {
 			DEBUG("[MODIFY_QP] Already connected to the server\n");
-		}
+		}*/
 
 
 		switch(ibqp->qp_type)
@@ -729,7 +693,7 @@ static int cvmrdma_modify_qp(struct ibv_qp *ibqp, struct ibv_qp_attr *attr,
 
 				/* Get the qp notifier capability from the remote over the network and share the Tx key with the remote.
 				    */
-				if(is_local) {
+				/*if(is_local) {
 					qp->remote_qnc = get_qp_notification_client(
 						qp->local_addr, ctxt->network_evloop, qp->local_network_client_cap, dest_qpn 
 					);
@@ -741,6 +705,16 @@ static int cvmrdma_modify_qp(struct ibv_qp *ibqp, struct ibv_qp_attr *attr,
 					);
 					set_remote_params(qp->remote_addr, ctxt->network_evloop, qp->remote_qnc,
 									  qp->recv_ringbuf_mr->rkey);
+				}*/
+
+				struct tcp_client_msg msg;
+				msg.qpn = dest_qpn;
+				msg.local_ring_rkey = qp->recv_ringbuf_mr->rkey;
+
+				if (is_local) {
+					connect_to_server(qp->local_addr, &msg);
+				} else {
+					connect_to_server(qp->remote_addr, &msg);
 				}
 
 				break;
@@ -1042,14 +1016,6 @@ int post_send_do_bounce(struct cvmrdma_qp * qp, struct ibv_send_wr *wrs, struct 
 			// we need a second qp_send_metadata to track the read ping operation
 			// WARNING: This currently assumes that between this push and the push above, no other push happens!
 			qp_send_metadata_push(qp->send_metadata, this_wr->wr_id, IBV_WR_RDMA_READ_PING, 0, 0, false, no_data_send);
-
-			/*if (qp->is_loopback) {
-				remote_qp_notify_read(qp->local_addr, ctxt->network_evloop, qp->remote_qnc, remote_addr, total_bytes, rkey);
-			} else {
-				remote_qp_notify_read(qp->remote_addr, ctxt->network_evloop, qp->remote_qnc, remote_addr, total_bytes, rkey);
-			} 
-
-			return 0;*/
 		} else {
 			qp_send_metadata_push(qp->send_metadata, this_wr->wr_id, this_op, total_bytes, total_chunks, send_signaled, no_data_send);
 		}
@@ -1374,6 +1340,7 @@ int post_send_do_bounce(struct cvmrdma_qp * qp, struct ibv_send_wr *wrs, struct 
 
 			pthread_mutex_lock(&qp->ibv_lock);
 			while (nonce_metadata[0] != qp->next_send_counter) {
+				fprintf(stderr, "[SEND QPN %x] Waiting for nonce %lx, got %lx\n", qp->user_qp.qp.qp_num, nonce_metadata[0], qp->next_send_counter);
 				pthread_cond_wait(&qp->ibv_cv, &qp->ibv_lock);
 			}
 
@@ -1474,43 +1441,7 @@ static struct ibv_mr *cvmrdma_reg_mr(struct ibv_pd *ibpd, void *addr, size_t len
 	struct cvmrdma_context * ctxt = cvmrdma_get_ctx(ibctxt);
 	assert(length > 0);
 	
-
-    /* CVM
-		
-		We cannot directly expose the user region to the device. Instead, we will allocate a
-		bounce buffer to encrypt/decrypt the payloads into/from in public memory. To prevent
-		TOCTOU attacks during decryption/encryption, we'll use a secundary bounce buffer in
-		private memory.
-
-		HACKY: libsodium only supports encrypting contiguous blocks of memory into contiguous
-		blocks of memory. To overcome this limitation, we allocate a third buffer where we can
-		gather/scatter the payload before encryption/after decryption.
-
-		On send, we'll chunk up the payload to allow pipelining and to limit the size of the
-		intermediate buffers. This means we need
-
-		- for send:
-			+ 1 page to gather into
-			+ 1 page to encrypt into
-			+ N public pages of ring buffer to copy into
-		- for recv:
-			+ N public pages of ring buffer to recv into
-			+ 1 page to copy into
-			+ 1 page to decrypt into
-
-		The private pages are already allocated on the QP.
-
-		We'll keep track of the mappings (lkey -> MR metadata) and (rkey -> MR metadata), as upon
-		send/recv, the lkey/rkey will be communicated to us by the user and we'll need to access 
-		the user buffer and the 3 intermediate buffers. 
-
-        Allocating in public memory can be done with a dma-heap.
-    */
-
-	// Allocate encrypted provider shadow MR
-	
 	struct cvmrdma_mr * mr = calloc(1, sizeof(struct cvmrdma_mr));
-
 
 	/*
 		The CVMRDMA MR exposes ibv_mr fields to the user containing data (eg the address)
@@ -1542,22 +1473,24 @@ static struct ibv_mr *cvmrdma_reg_mr(struct ibv_pd *ibpd, void *addr, size_t len
 	return &mr->user_mr.ibv_mr;
 }
 
-/*int cvmrdma_destroy_qp(struct ibv_qp *ibqp)
-{
-	struct cvmrdma_qp * qp = (struct cvmrdma_qp *)ibqp;
-	// TODO: find a way to shutdown the server cleanly
-	usleep(100000);
-
-	DEBUG("Dummy destroy QP\n");
-
-	return 0;
-}*/
-
 int cvmrdma_destroy_qp(struct ibv_qp *ibqp)
 {
 	struct cvmrdma_qp * qp = (struct cvmrdma_qp *)ibqp;
 	struct cvmrdma_context * ctxt = cvmrdma_get_ctx(qp->user_qp.qp.context);
 	int ret;
+
+	free(qp->local_addr);
+
+	pthread_cond_destroy(&qp->remote_params_set_cv);
+	pthread_mutex_destroy(&qp->remote_params_lock);
+
+	cvmrdma_cq_server_stop_all();
+	pthread_join(qp->provider_comp_channel_thread, NULL);
+
+	detach_qp_from_cq_manager(ctxt, qp);
+
+	pthread_cond_destroy(&qp->send_lines_avail);
+	pthread_mutex_destroy(&qp->send_lines_full_lock);
 
 	// todo stop threads
 	// TODO detach qp from cq manager
@@ -1584,6 +1517,11 @@ int cvmrdma_destroy_qp(struct ibv_qp *ibqp)
 	free_qp_chunk_queue(qp->chunk_queue);
 	free_qp_read_metadata(qp->read_metadata);
 
+	pthread_cond_destroy(&qp->ibv_cv);
+	pthread_mutex_destroy(&qp->ibv_lock);
+	pthread_mutex_destroy(&qp->send_counter_lock);
+	pthread_mutex_destroy(&qp->recv_counter_lock);
+
 	// TODO: destroy recv_metadata depending on if it is shared or not
 
 	ret = ctxt->prov_ops.destroy_qp(qp->provider_qp);
@@ -1599,10 +1537,12 @@ int cvmrdma_destroy_qp(struct ibv_qp *ibqp)
 
 int cvmrdma_dereg_mr(struct verbs_mr *vmr){
 
-	fprintf(stderr, "Dereg mr\n");
+	struct cvmrdma_mr * mr = (struct cvmrdma_mr *)vmr;
+	struct cvmrdma_pd * pd = (struct cvmrdma_pd *)vmr->ibv_mr.pd;
 
+	unregister_bounce_mr(pd->bounce_metadata, mr->user_mr.ibv_mr.lkey);
+	free(mr);
 	return 0;
-
 }
 
 static struct ibv_srq *cvmrdma_create_srq(struct ibv_pd *ibpd, struct ibv_srq_init_attr *attr)
@@ -1679,41 +1619,24 @@ static int cvmrdma_post_srq_recv(struct ibv_srq *srq, struct ibv_recv_wr *recv_w
 	return 0;
 }
 
-/*static int cvmrdma_destroy_cq(struct ibv_cq *ibcq) {
+static int cvmrdma_destroy_cq(struct ibv_cq *ibcq) {
 
 	struct cvmrdma_cq *cq = (struct cvmrdma_cq *)ibcq;
 	struct cvmrdma_context * ctxt = cvmrdma_get_ctx(cq->user_cq.cq.context);
 
 	int ret;
 
-	// join cq provider channel thread
-	if (cq->provider_comp_channel_thread) {
-		atomic_store(&cq->stop_thread, true);
-		if (cq->provider_comp_channel && cq->provider_comp_channel->fd >= 0) {
-			// this will unblock read if necessary
-			close(cq->provider_comp_channel->fd);
-			cq->provider_comp_channel->fd = -1;
-		}
-		pthread_join(cq->provider_comp_channel_thread, NULL);
-	}
-
 	// destroy recv cq
 	ret = ctxt->prov_ops.destroy_cq(cq->prov_cq_recv);
 	if (ret) {
+		fprintf(stderr, "Failed to destroy recv cq\n");
 		goto out;
 	}
 
 	//destroy send cq
 	ret = ctxt->prov_ops.destroy_cq(cq->prov_cq_send);
 	if (ret) {
-		goto out;
-	}
-
-	free(cq);
-
-	// destroy completion channel after cq, as otherwise channel cannot be destroyed
-	ret = ibv_destroy_comp_channel(cq->provider_comp_channel);
-	if (ret) {
+		fprintf(stderr, "Failed to destroy send cq\n");
 		goto out;
 	}
 
@@ -1725,27 +1648,58 @@ static int cvmrdma_post_srq_recv(struct ibv_srq *srq, struct ibv_recv_wr *recv_w
 		pthread_mutex_unlock(&channel->context->mutex);
 	}
 
+	free(cq);
+
 out:
 	return ret;
-}*/
+}
 
 static int cvmrdma_dealloc_pd(struct ibv_pd *pd) {
-	fprintf(stderr, "Dealloc pd called\n");
+
+	struct cvmrdma_context * ctxt = cvmrdma_get_ctx(pd->context);
+	struct cvmrdma_pd * cpd = (struct cvmrdma_pd *)pd;
+	bounce_metadata_destroy(cpd->bounce_metadata);
+
+	ctxt->prov_ops.dealloc_pd(cpd->provider_pd);
+	free(pd);
+
 	return 0;
 }
 
-static void cvmrdma_free_context(struct ibv_context *context){
+_Atomic bool tcp_server_running = false;
+int allocated_context_count = 0;
 
-	fprintf(stderr, "Free context called\n");
+static void cvmrdma_free_context(struct ibv_context *context)
+{
+	struct cvmrdma_context * ctxt = cvmrdma_get_ctx(context);
+
+#ifndef DUMMY_SYSTEM_HEAP
+	close_system_heap(ctxt->dma_heap);
+#endif
+
+	allocated_context_count--;
+	if (allocated_context_count == 0) {
+		fprintf(stderr, "All contexts freed, stopping TCP server\n");
+
+		if (tcp_server_running) {
+			tcp_server_running = false;
+		}
+		stop_server(&ctxt->tcp_server_thread);
+	}
+
+	ctxt->prov_ops.free_context(context);
+
+	// sodium does not provide a way to free the allocated resources
+
 }
 
 struct verbs_context_ops cvmrdma_ops = {
     .alloc_pd = cvmrdma_alloc_pd,
     .create_cq = cvmrdma_create_cq,
     .create_qp = cvmrdma_create_qp,
-    //.dealloc_pd = cvmrdma_dealloc_pd,
+    .dealloc_pd = cvmrdma_dealloc_pd,
     .dereg_mr = cvmrdma_dereg_mr,
-    // .destroy_cq = cvmrdma_destroy_cq,
+    .destroy_cq = cvmrdma_destroy_cq,
     .destroy_qp = cvmrdma_destroy_qp,
     .free_context = cvmrdma_free_context,
     .modify_qp = cvmrdma_modify_qp,
@@ -1793,9 +1747,10 @@ static void print_process_name_debug() {
     }
 }
 
-_Atomic bool tcp_server_running = false;
-CapnpEvloopThread * evloop_server = NULL;
-CVMRDMAServer * tcp_server = NULL;
+
+// CapnpEvloopThread * evloop_server = NULL;
+// CVMRDMAServer * tcp_server = NULL;
+pthread_t tcp_server_thread = NULL;
 
 uint64_t OPT_cvmrdma_ring_buffer_size = 1024 * 1024 * 512; // 512 MiB
 uint64_t OPT_cvmrdma_chunk_bytes = 1024 * 4;
@@ -1814,15 +1769,6 @@ static struct verbs_context *cvmrdma_alloc_context(struct ibv_device *ibdev,
 
 	DEBUG("cvmrdma_alloc_context\n");
 
-	/* eg 192.4.0.3:3456 */
-	/*char const * remote_addr = getenv("CVMRDMA_REMOTE_ADDR");
-	if(! remote_addr)
-	{
-		fprintf(stderr, "ERROR: No environment variable CVMRDMA_REMOTE_ADDR.\n");
-		goto err;
-	}*/
-
-	/* eg *:3456 */
 	char const * local_bind_addr = getenv("CVMRDMA_BIND_ADDR");
 	if(! local_bind_addr)
 	{
@@ -1896,13 +1842,6 @@ static struct verbs_context *cvmrdma_alloc_context(struct ibv_device *ibdev,
 	}
 	fprintf(stderr, "CVMRDMA_NONCE_CACHE_SIZE set to %lu\n", OPT_cvmrdma_nonce_cache_size);
 
-	/*char const * cvmrdma_disable_payload_nonce_pregeneration_str = getenv("CVMRDMA_DISABLE_PAYLOAD_NONCE_PREGENERATION");
-	if(cvmrdma_disable_payload_nonce_pregeneration_str != NULL)
-	{
-		OPT_cvmrdma_disable_payload_nonce_pregeneration = true;
-	}
-	fprintf(stderr, "CVMRDMA_DISABLE_PAYLOAD_NONCE_PREGENERATION set to %d\n", OPT_cvmrdma_disable_payload_nonce_pregeneration);*/
-
 	/* Initialize cryptographic APIs (can be called multiple times) */
 	if (sodium_init() < 0) {
 		fprintf(stderr, "ERROR: Failed to initialize cryptographic APIs.\n");
@@ -1925,32 +1864,15 @@ static struct verbs_context *cvmrdma_alloc_context(struct ibv_device *ibdev,
 	verbs_set_ops(prov_verbs_context, &verbs_dummy_ops);
 	verbs_set_ops(prov_verbs_context, &cvmrdma_ops);
 
-	print_process_name_debug();
-
 	bool expected = false;
 	bool first = atomic_compare_exchange_strong(&tcp_server_running, &expected, true);
+	allocated_context_count++;
 	if(first)
 	{
-		/* Start a new thread with a capnp event loop running the RPC server */
-		cvmrdma_ctx->network_evloop = create_capnp_event_loop(local_bind_addr, &cvmrdma_ctx->network_server);
-		
-		// wait for server to be up
-		DEBUG("Waiting for server to be up\n");
-		while(!cvmrdma_ctx->network_server)
-		{
-			usleep(1000);
-		}
-		evloop_server = cvmrdma_ctx->network_evloop;
-		tcp_server = cvmrdma_ctx->network_server;
-		DEBUG("Server started on %s\n", local_bind_addr);
-		assert(evloop_server != NULL);
-		assert(tcp_server != NULL);
+		start_server(&cvmrdma_ctx->tcp_server_thread, local_bind_addr);
+		tcp_server_thread = cvmrdma_ctx->tcp_server_thread;
 	} else {
-		DEBUG("Server already running on %s\n", local_bind_addr);
-		assert(evloop_server != NULL);
-		assert(tcp_server != NULL);
-		cvmrdma_ctx->network_evloop = evloop_server;
-		cvmrdma_ctx->network_server = tcp_server;
+		cvmrdma_ctx->tcp_server_thread = tcp_server_thread;
 	}
 
 	// TODO: qp_metadata_manager_destroy(server->qp_metadata_manager); when destroying the context

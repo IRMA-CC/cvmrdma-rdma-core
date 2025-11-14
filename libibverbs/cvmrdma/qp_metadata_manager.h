@@ -19,6 +19,7 @@ void qp_metadata_manager_destroy(QPMetadataManager * qp_metadata_manager);
 struct cvmrdma_qp;
 
 int qp_metadata_manager_register_qp(QPMetadataManager * qp_metadata_manager, uint32_t qpn, struct cvmrdma_qp * qp);
+int qp_metadata_manager_unregister_qp(QPMetadataManager * qp_metadata_manager, uint32_t qpn);
 struct cvmrdma_qp * qp_metadata_manager_get_qp(QPMetadataManager * qp_metadata_manager, uint32_t qpn);
 
 
