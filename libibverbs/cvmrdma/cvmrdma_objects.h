@@ -237,11 +237,6 @@ struct cvmrdma_qp {
 
 	bool is_loopback;
 
-	RPCClientSession *local_network_client_connection;
-	CVMRDMAClient *local_network_client_cap;
-	RPCClientSession *remote_network_client_connection;
-	CVMRDMAClient *remote_network_client_cap;
-
 	char const *local_addr;
 	char const *remote_addr;
 
