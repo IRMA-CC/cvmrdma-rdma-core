@@ -11,7 +11,6 @@
 #include "read_metadata.h"
 #include "send_metadata.h"
 #include "chunk_queue.h"
-#include "cvmrdma_network_client.h"
 #include "cvmrdma_network_server.h"
 #include "cvmrdma_network_evloop.h"
 #include "bounce_metadata.h"
