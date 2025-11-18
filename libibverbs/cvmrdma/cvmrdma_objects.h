@@ -138,9 +138,6 @@ struct cvmrdma_qp {
 	 */
 	uint64_t shared_key[cvmrdma_aead_KEY_WORDS];
 
-	/* Capability of the remote QP to notify on WRITEs */
-	QPNotificationClient *remote_qnc;
-
 	/* This thread consumes entries in the wr_queue.
 	 * Note that the order of WRs is preserved.	
 	 */
