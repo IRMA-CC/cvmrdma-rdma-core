@@ -247,6 +247,8 @@ struct cvmrdma_qp {
 
 	char const *local_addr;
 	char const *remote_addr;
+
+	int client_socket;
 };
 
 struct cvmrdma_srq {

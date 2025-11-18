@@ -38,7 +38,7 @@
 #include "dma_heap.h"
 #include "nonce_queue.h"
 #include "chunk_queue.h"
-#include "cvmrdma_tcp.h"
+#include "cvmrdma_manager_client.h"
 
 #include "debug.h"
 
@@ -126,6 +126,9 @@ static struct ibv_pd * cvmrdma_alloc_pd(struct ibv_context * ibcontext)
 	pd->mr_id_ctr = 0;
 
 	DEBUG("Allocated PD %p\n", pd);
+
+	//fprintf(stderr, "Trying to start manager\n");
+	// try_to_start_manager();
 
 	return &pd->user_pd;
 
@@ -227,16 +230,12 @@ static int attach_qp_to_cq_manager(struct cvmrdma_context * ctxt, struct cvmrdma
 	   know it yet.
 	*/
 
-	register_qp_with_server(qpn, qp);
-
 	return 0;
 }
 
 static int detach_qp_from_cq_manager(struct cvmrdma_context * ctxt, struct cvmrdma_qp * qp)
 {
 	uint32_t qpn = qp->user_qp.qp.qp_num;
-
-	unregister_qp_from_server(qpn);
 
 	int err = qp_metadata_manager_unregister_qp(ctxt->qp_metadata_manager, qpn);
 	if(err)
@@ -396,7 +395,11 @@ static struct ibv_qp *cvmrdma_create_qp(struct ibv_pd * ibpd,
 	attr_ex.send_cq = c_cq->prov_cq_send;
 	attr_ex.recv_cq = c_cq->prov_cq_recv;
 
-	assert(attr->qp_type == IBV_QPT_RC || attr->qp_type == IBV_QPT_UC);
+	if (attr->qp_type != IBV_QPT_RC && attr->qp_type != IBV_QPT_UC) {
+		fprintf(stderr, "Unsupported QP type %d\n", attr->qp_type);
+		exit(1);
+	}
+	
 	attr_ex.qp_type = attr->qp_type;
 
 	/*struct ibv_device_attr dev_attr;
@@ -591,6 +594,8 @@ static struct ibv_qp *cvmrdma_create_qp(struct ibv_pd * ibpd,
 	qp->remote_network_client_connection = NULL;
 	qp->remote_network_client_cap = NULL;
 
+	connect_to_manager(qp->user_qp.qp.qp_num, &qp->client_socket);
+
 	return &qp->user_qp.qp;
 
 dereg_send_ring_mr:
@@ -707,15 +712,16 @@ static int cvmrdma_modify_qp(struct ibv_qp *ibqp, struct ibv_qp_attr *attr,
 									  qp->recv_ringbuf_mr->rkey);
 				}*/
 
-				struct tcp_client_msg msg;
-				msg.qpn = dest_qpn;
-				msg.local_ring_rkey = qp->recv_ringbuf_mr->rkey;
-
+				fprintf(stderr, "[MODIFY_QP] Sending rx key %u to remote QP 0x%" PRIx32 " at address %s\n",
+						qp->recv_ringbuf_mr->rkey, dest_qpn,
+						is_local ? qp->local_addr : qp->remote_addr);
 				if (is_local) {
-					connect_to_server(qp->local_addr, &msg);
+					send_and_wait_for_key(qp->client_socket, qp, qp->local_addr, dest_qpn, qp->recv_ringbuf_mr->rkey);
 				} else {
-					connect_to_server(qp->remote_addr, &msg);
+					send_and_wait_for_key(qp->client_socket, qp, qp->remote_addr, dest_qpn, qp->recv_ringbuf_mr->rkey);
 				}
+
+				disconnect_from_manager(qp->client_socket, qp->user_qp.qp.qp_num);
 
 				break;
 			}
@@ -1666,9 +1672,6 @@ static int cvmrdma_dealloc_pd(struct ibv_pd *pd) {
 	return 0;
 }
 
-_Atomic bool tcp_server_running = false;
-int allocated_context_count = 0;
-
 static void cvmrdma_free_context(struct ibv_context *context)
 {
 	struct cvmrdma_context * ctxt = cvmrdma_get_ctx(context);
@@ -1676,16 +1679,6 @@ static void cvmrdma_free_context(struct ibv_context *context)
 #ifndef DUMMY_SYSTEM_HEAP
 	close_system_heap(ctxt->dma_heap);
 #endif
-
-	allocated_context_count--;
-	if (allocated_context_count == 0) {
-		fprintf(stderr, "All contexts freed, stopping TCP server\n");
-
-		if (tcp_server_running) {
-			tcp_server_running = false;
-		}
-		stop_server(&ctxt->tcp_server_thread);
-	}
 
 	ctxt->prov_ops.free_context(context);
 
@@ -1863,17 +1856,6 @@ static struct verbs_context *cvmrdma_alloc_context(struct ibv_device *ibdev,
 	/* and replace the ops in the user facing context with the CVMRDMA wrapper ops */
 	verbs_set_ops(prov_verbs_context, &verbs_dummy_ops);
 	verbs_set_ops(prov_verbs_context, &cvmrdma_ops);
-
-	bool expected = false;
-	bool first = atomic_compare_exchange_strong(&tcp_server_running, &expected, true);
-	allocated_context_count++;
-	if(first)
-	{
-		start_server(&cvmrdma_ctx->tcp_server_thread, local_bind_addr);
-		tcp_server_thread = cvmrdma_ctx->tcp_server_thread;
-	} else {
-		cvmrdma_ctx->tcp_server_thread = tcp_server_thread;
-	}
 
 	// TODO: qp_metadata_manager_destroy(server->qp_metadata_manager); when destroying the context
 	cvmrdma_ctx->qp_metadata_manager = qp_metadata_manager_alloc();
