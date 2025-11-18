@@ -58,11 +58,6 @@ struct cvmrdma_context {
 
 	pthread_t  tcp_server_thread;
 
-	/*RPCClientSession *local_network_client_connection;
-	CVMRDMAClient *local_network_client_cap;
-	RPCClientSession *remote_network_client_connection;
-	CVMRDMAClient *remote_network_client_cap;*/
-
 	/* Metadata manager maps QPNs to QPs
 	   This is shared between all CQ servers.
 	*/

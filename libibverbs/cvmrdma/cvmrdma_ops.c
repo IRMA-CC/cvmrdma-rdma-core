@@ -569,7 +569,6 @@ static struct ibv_qp *cvmrdma_create_qp(struct ibv_pd * ibpd,
 
 	/* We can only get the capability to the remote QP once we know its QPN, this will be done
 	   in modify_qp. We'll also get the rkey to its ring */
-	qp->remote_qnc = NULL;
 	qp->remote_ring_rkey = 0;
 	memset(qp->rx_nonce, 0, cvmrdma_aead_NPUBBYTES);
 	qp->remote_params_set = false;
@@ -589,10 +588,6 @@ static struct ibv_qp *cvmrdma_create_qp(struct ibv_pd * ibpd,
 	sprintf(qp->local_addr, "127.0.0.1:%s", local_bind_addr + 2);
 
 	qp->remote_addr = NULL;
-	qp->local_network_client_connection = NULL;
-	qp->local_network_client_cap = NULL;
-	qp->remote_network_client_connection = NULL;
-	qp->remote_network_client_cap = NULL;
 
 	connect_to_manager(qp->user_qp.qp.qp_num, &qp->client_socket);
 
@@ -673,19 +668,6 @@ static int cvmrdma_modify_qp(struct ibv_qp *ibqp, struct ibv_qp_attr *attr,
 		/* Only connect to the remote's RPC server when we know that the server is up */
 		qp->remote_addr = remote_addr;
 
-		/* Start by connecting to the server if not already connected */
-		/*if(! qp->remote_network_client_connection && !is_local) {
-			DEBUG("[MODIFY_QP] Connecting to the remote server on address %s\n", qp->remote_addr);
-			qp->remote_network_client_connection = new_client_rpc_session(ctxt->network_evloop, qp->remote_addr);
-			qp->remote_network_client_cap = get_cvmrdma_client(qp->remote_addr, ctxt->network_evloop, qp->remote_network_client_connection);
-		} else if (! qp->local_network_client_connection && is_local) {
-			DEBUG("[MODIFY_QP] Connecting to the local server on address %s\n", qp->local_addr);
-			qp->local_network_client_connection = new_client_rpc_session(ctxt->network_evloop, qp->local_addr);
-			qp->local_network_client_cap = get_cvmrdma_client(qp->local_addr, ctxt->network_evloop, qp->local_network_client_connection);
-		} else {
-			DEBUG("[MODIFY_QP] Already connected to the server\n");
-		}*/
-
 
 		switch(ibqp->qp_type)
 		{
@@ -695,22 +677,6 @@ static int cvmrdma_modify_qp(struct ibv_qp *ibqp, struct ibv_qp_attr *attr,
 				uint32_t dest_qpn = attr->dest_qp_num;
 
 				DEBUG("[MODIFY_QP] Obtain notification channel cap from remote for its QP with QPN 0x%" PRIx32 "\n", dest_qpn);
-
-				/* Get the qp notifier capability from the remote over the network and share the Tx key with the remote.
-				    */
-				/*if(is_local) {
-					qp->remote_qnc = get_qp_notification_client(
-						qp->local_addr, ctxt->network_evloop, qp->local_network_client_cap, dest_qpn 
-					);
-					set_remote_params(qp->local_addr,  ctxt->network_evloop, qp->remote_qnc,
-									  qp->recv_ringbuf_mr->rkey);
-				} else {
-					qp->remote_qnc = get_qp_notification_client(
-						qp->remote_addr, ctxt->network_evloop, qp->remote_network_client_cap, dest_qpn 
-					);
-					set_remote_params(qp->remote_addr, ctxt->network_evloop, qp->remote_qnc,
-									  qp->recv_ringbuf_mr->rkey);
-				}*/
 
 				fprintf(stderr, "[MODIFY_QP] Sending rx key %u to remote QP 0x%" PRIx32 " at address %s\n",
 						qp->recv_ringbuf_mr->rkey, dest_qpn,

@@ -657,11 +657,6 @@ skip_chunk_processing:
             DEBUG("FFF [CQ] notifying remote that chunk %zu is free\n", this_recv_slot_id);
 
             if (qp->received_lines >= qp->received_lines_threshold){
-                /*if (qp->is_loopback) {
-                    remote_qp_notify_chunk_recv(qp->local_addr, ctxt->network_evloop, qp->remote_qnc);
-                } else {
-                    remote_qp_notify_chunk_recv(qp->remote_addr, ctxt->network_evloop, qp->remote_qnc);
-                }*/
 
                 qp->received_lines_threshold += (cvmrdma_ring_entries / cvmrdma_ack_notify_divider);
 
