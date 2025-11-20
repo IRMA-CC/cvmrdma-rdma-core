@@ -233,6 +233,8 @@ struct cvmrdma_qp {
 	char const *remote_addr;
 
 	int client_socket;
+
+	_Atomic int stop_requested;
 };
 
 struct cvmrdma_srq {

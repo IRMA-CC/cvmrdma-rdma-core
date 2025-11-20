@@ -751,21 +751,16 @@ int cvmrdma_cq_server_run_once_if_idle_send(struct cvmrdma_context * ctxt, struc
 
 // This is used if the actual application uses the completion channel
 
-atomic_int cvmrdma_cq_server_global_stop = 0;
 
-void* cvmrdma_cq_wait_completion_event(void* c_cq) {
-    struct cvmrdma_cq * cq = (struct cvmrdma_cq *)c_cq;
+
+void* cvmrdma_cq_wait_completion_event(void* arg) {
+    struct cvmrdma_qp *qp = (struct cvmrdma_qp *)arg;
+    struct cvmrdma_cq * cq = (struct cvmrdma_cq *)qp->provider_qp;
     struct cvmrdma_context * context = cvmrdma_get_ctx(cq->user_cq.cq.context);
-    bool run_again_recv = false;
-    bool run_again_send = false;
-    struct ib_uverbs_comp_event_desc ev;
-    struct ibv_cq *ev_cq;
-    void *ev_ctx;
-    int ret;
 
     DEBUG("[CQ] Waiting for CQ event\n");
 
-    while(!atomic_load(&cvmrdma_cq_server_global_stop)) {
+    while (!atomic_load(&qp->stop_requested)) {
         cvmrdma_cq_server_run_once_if_idle_send(context, cq, NULL);
         cvmrdma_cq_server_run_once_if_idle_recv(context, cq, NULL);
     }
@@ -773,7 +768,7 @@ void* cvmrdma_cq_wait_completion_event(void* c_cq) {
     return NULL;
 }
 
-void cvmrdma_cq_server_stop_all()
+void cvmrdma_stop_cq_thread(struct cvmrdma_qp * qp)
 {
-    atomic_store(&cvmrdma_cq_server_global_stop, 1);
+    atomic_store(&qp->stop_requested, 1);
 }

@@ -364,6 +364,8 @@ static int free_public_mr(struct cvmrdma_context * ctxt, struct ibv_mr * mr, int
 static struct ibv_qp *cvmrdma_create_qp(struct ibv_pd * ibpd,
 				struct ibv_qp_init_attr *attr)
 {
+	fprintf(stderr, "CVMRDMA: create_qp called\n");
+
 	struct cvmrdma_pd * pd = (struct cvmrdma_pd *)ibpd;
 	struct ibv_context * prov_ctxt = pd->user_pd.context;
     struct cvmrdma_context * ctxt = cvmrdma_get_ctx(prov_ctxt);
@@ -560,7 +562,8 @@ static struct ibv_qp *cvmrdma_create_qp(struct ibv_pd * ibpd,
 
 	// Since the actual application is likely to not poll the cq all the time,
 	// we need another trigger to wake up the cq server.
-	err = pthread_create(&qp->provider_comp_channel_thread, NULL, &cvmrdma_cq_wait_completion_event, (void *)c_cq);
+	qp->stop_requested = 0;
+	err = pthread_create(&qp->provider_comp_channel_thread, NULL, &cvmrdma_cq_wait_completion_event, (void *)qp);
 	if (err)
 	{
 		fprintf(stderr, "Error creating cvmrdma_cq_wait_completion_event thread: %d\n", err);
@@ -622,6 +625,8 @@ err:
 static int cvmrdma_modify_qp(struct ibv_qp *ibqp, struct ibv_qp_attr *attr,
 		     int attr_mask)
 {
+	fprintf(stderr, "CVMRDMA: modify_qp called\n");
+
 	struct cvmrdma_qp * qp = (struct cvmrdma_qp *)ibqp;
 	struct ibv_qp * prov_qp = qp->provider_qp;
 
@@ -1447,6 +1452,8 @@ static struct ibv_mr *cvmrdma_reg_mr(struct ibv_pd *ibpd, void *addr, size_t len
 
 int cvmrdma_destroy_qp(struct ibv_qp *ibqp)
 {
+	fprintf(stderr, "Destroying QP\n");
+
 	struct cvmrdma_qp * qp = (struct cvmrdma_qp *)ibqp;
 	struct cvmrdma_context * ctxt = cvmrdma_get_ctx(qp->user_qp.qp.context);
 	int ret;
@@ -1456,7 +1463,7 @@ int cvmrdma_destroy_qp(struct ibv_qp *ibqp)
 	pthread_cond_destroy(&qp->remote_params_set_cv);
 	pthread_mutex_destroy(&qp->remote_params_lock);
 
-	cvmrdma_cq_server_stop_all();
+	cvmrdma_stop_cq_thread(qp);
 	pthread_join(qp->provider_comp_channel_thread, NULL);
 
 	detach_qp_from_cq_manager(ctxt, qp);
@@ -1503,6 +1510,8 @@ int cvmrdma_destroy_qp(struct ibv_qp *ibqp)
 	}
 
 	free(qp);
+
+	fprintf(stderr, "Destroyed QP\n");
 
 	return 0;
 }
