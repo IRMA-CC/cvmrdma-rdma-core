@@ -26,8 +26,7 @@
 
 // #define CVMRDMA_TIMED_SEMAPHORE_WAIT 0
 
-#define SKIP_WR_QUEUE 0
-
+#define DISABLE_SEND_LOOP 0
 
 struct cvmrdma_pd {
 	struct ibv_pd user_pd;
@@ -45,18 +44,6 @@ struct cvmrdma_pd {
 struct cvmrdma_context {
 	/* Save the function pointers to the provider ops here. */
 	struct verbs_context_ops prov_ops;
-
-	/* Server and client for IP based RPCs.
-        The event loop runs the server by default, and later on CVMRDMA layer can
-        open as many sessions as necessary to remote servers on the same event loop.
-        From each session, the CVMRDMA layer can get a CVMRDMA client. 
-    
-        XXX: for now, we only connect a single remote.
-    */
-	// CapnpEvloopThread *network_evloop;
-	// CVMRDMAServer *network_server;
-
-	pthread_t  tcp_server_thread;
 
 	/* Metadata manager maps QPNs to QPs
 	   This is shared between all CQ servers.
@@ -126,6 +113,13 @@ struct cvmrdma_qp {
 	/* Note: multiple cvmrdma_qps can point to the same provider_cq */
 	struct cvmrdma_cq *provider_cq;
 
+	struct ibv_qp *control_qp;
+	struct ibv_cq *control_cq;
+	uint32_t local_control_psn;
+
+	pthread_mutex_t ibv_send_in_transit_lock;
+	uint64_t send_in_transit_counter;
+
 	/* Key shared between all endpoints used to encrypt payloads.
 	   In contrast, the tx_key and rx_key are unique to the endpoints
 	   and are used to encrypt the nonce for the payload. The nonce for this
@@ -137,6 +131,7 @@ struct cvmrdma_qp {
 	 * Note that the order of WRs is preserved.	
 	 */
 	pthread_t provider_comp_channel_thread;
+	pthread_t provider_send_channel_thread;
 
 	/* Protect send_lines_full */
 	pthread_mutex_t send_lines_full_lock;
@@ -153,6 +148,10 @@ struct cvmrdma_qp {
 	struct ibv_mr *send_ringbuf_mr;
 	void *send_ringbuf_va;
 	int send_ringbuf_dmabuf_fd;
+
+	struct ibv_mr *control_buf_mr;
+	void *control_buf_va;
+	int control_dmabuf_fd;
 
 	uint64_t send_counter;
 	uint64_t next_send_counter;
@@ -173,11 +172,14 @@ struct cvmrdma_qp {
 	   the control server
 	*/
 	int send_lines_full;
+	int number_of_acked_lines;
 	/* During recv the server counts the number of slots processed.
 	   If a certain threshold is reached, the server sends an ACK.
 	*/
+
 	uint64_t received_lines;
 	uint64_t received_lines_threshold;
+	uint64_t ack_send_in_transit_counter;
 
 	/* qp specific counter of all send messages*/
 	_Atomic uint64_t cvmrdma_qp_send_wr_id;
@@ -186,11 +188,17 @@ struct cvmrdma_qp {
 	//pthread_t control_server_receive_acks_thread;
 
 	/* Remote params */
-	uint64_t rx_nonce[cvmrdma_aead_NPUB_WORDS];
 	uint32_t remote_ring_rkey;
+	uint32_t remote_control_qpn;
+	uint32_t remote_control_psn;
+	uint32_t remote_control_rkey;
 	bool remote_params_set;
 	pthread_mutex_t remote_params_lock;
 	pthread_cond_t remote_params_set_cv;
+
+	bool control_qp_connected;
+	pthread_mutex_t control_qp_connection_lock;
+	pthread_cond_t control_qp_connection_cv;
 
 	/* Save location of future recvs in FIFO. When recving a SEND, the CQ server will write
 	  chunk-by-chunk. The QP needs to remember where in the RR it has stopped to be able to write

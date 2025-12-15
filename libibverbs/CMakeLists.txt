@@ -33,6 +33,7 @@ publish_internal_headers(infiniband/cvmrdma
   cvmrdma/wr_queue.h
   cvmrdma/dma_heap.h
   cvmrdma/cvmrdma_manager_client.h
+  cvmrdma/cvmrdma_ack.h
 )
 
 configure_file("libibverbs.map.in"
@@ -95,6 +96,7 @@ rdma_library(ibverbs "${CMAKE_CURRENT_BINARY_DIR}/libibverbs.map"
   cvmrdma/wr_queue.cpp
   cvmrdma/dma_heap.c
   cvmrdma/cvmrdma_manager_client.c
+  cvmrdma/cvmrdma_ack.c
 
   
   ${CAPNP_SRCS}

@@ -28,7 +28,6 @@ extern uint64_t cvmrdma_ring_entries;
 extern uint64_t cvmrdma_ack_threshold;
 extern uint64_t cvmrdma_ack_notify_divider;
 
-extern uint64_t OPT_cvmrdma_nonce_cache_size;
 
 static inline uint64_t cvmrdma_ring_slot_bytes(enum sodium_crypto_aead aead)
 {

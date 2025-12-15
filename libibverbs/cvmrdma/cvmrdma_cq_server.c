@@ -23,6 +23,8 @@
 #include "cvmrdma_objects.h"
 // #include "cvmrdma_network_evloop_priv.h"
 #include "chunk_queue.h"
+#include "cvmrdma_ack.h"
+#include "wr_queue.h"
 
 // These variables are for the send side
 cvm_time_t wc_send_start; // Tracks time taken to receive the WC for the write request
@@ -53,7 +55,6 @@ static int cq_server_loop_once(struct cvmrdma_context * ctxt, struct ibv_cq * pr
     enum sodium_crypto_aead aead = ctxt->aead;
 	unsigned long long header_bytes = cvmrdma_header_bytes(aead);
 
-
     int err;
 
     struct ibv_wc wcs[CQ_SERVER_NUM_WCS];
@@ -79,6 +80,12 @@ static int cq_server_loop_once(struct cvmrdma_context * ctxt, struct ibv_cq * pr
         struct cvmrdma_qp * qp = qp_metadata_manager_get_qp(qp_metadata_manager, qpn);
         assert(qp);
 
+        pthread_mutex_lock(&qp->control_qp_connection_lock);
+        while (!qp->control_qp_connected && !atomic_load(&qp->stop_requested)) {
+            pthread_cond_wait(&qp->control_qp_connection_cv, &qp->control_qp_connection_lock);
+        }
+        pthread_mutex_unlock(&qp->control_qp_connection_lock);
+
         struct cvmrdma_pd * pd = (struct cvmrdma_pd *)qp->user_qp.qp.pd;
         assert(pd);
 
@@ -89,6 +96,7 @@ static int cq_server_loop_once(struct cvmrdma_context * ctxt, struct ibv_cq * pr
             //fprintf(stderr, "ibv_wc_loc_prot_error %d, ibv_wc_wr_flush_err %d \n", IBV_WC_LOC_PROT_ERR, IBV_WC_WR_FLUSH_ERR);
             if (status != IBV_WC_WR_FLUSH_ERR){
                 fprintf(stderr, "CQ server WARN: WC reports failure status: %s, vendor err %d\n", ibv_wc_status_str(status), this_wc->vendor_err);
+                fprintf(stderr, "  op %d, wrid 0x%lx, byte_len %u, qp_num %x\n", op, this_wc->wr_id, wc_length, qpn);
             } else 
             {
                 DEBUG("CQ server: WC reports flush status: %d, vendor err %d\n", status, this_wc->vendor_err);
@@ -113,9 +121,23 @@ static int cq_server_loop_once(struct cvmrdma_context * ctxt, struct ibv_cq * pr
             /* This is a send completion (SEND, WRITE, WWI) */
             DEBUG("[CQ] send op %d, wrid: 0x%lx done\n", op, this_wc->wr_id);
 
+            // we track how many wrs are currently in transit, as our underlying nic cannot handle more than 4096
+            pthread_mutex_lock(&qp->ibv_send_in_transit_lock);
+            qp->send_in_transit_counter--;
+            pthread_mutex_unlock(&qp->ibv_send_in_transit_lock);
             qp->wr_chunks_sent++;
 
-            struct send_metadata_entry * send_info = qp_send_metadata_front(qp->send_metadata);
+            struct send_metadata_entry * send_info = NULL;
+            do {
+                send_info = qp_send_metadata_front(qp->send_metadata);
+
+                // this is to make sure the thread can exit cleanly
+                if (atomic_load(&qp->stop_requested)) {
+                    fprintf(stderr, "Stop requested while processing send WC, exiting cq_server_loop_once\n");
+                    return -1;
+                }
+            } while (send_info == NULL);
+
 
             DEBUG("[CQ] send op %d, wrid: 0x%lx done, chunks sent %zu send_info->nchunks %zu\n", op, this_wc->wr_id, qp->wr_chunks_sent, send_info->nchunks);
             
@@ -164,28 +186,23 @@ static int cq_server_loop_once(struct cvmrdma_context * ctxt, struct ibv_cq * pr
             get_time(&wc_send_end);
 
 
-            /*LOG_STRING("SEND WR/WC times:");
+            LOG_STRING("SEND WR/WC times:");
             LOG_TIME(wr_submit_start);
             LOG_TIME(wr_submit_end);
             LOG_TIME(wr_calculations);
             LOG_TIME(wr_metadata_push);
             LOG_TIME(wr_send_nonce);
             LOG_TIME(wr_wait_for_recv_slot);
-            /*LOG_TIME(wr_wait_for_sem);
-            LOG_TIME(wr_cache_atomic_load);
-            LOG_TIME(wr_cache_write_protect);
-            LOG_TIME(wr_cache_atomic_store);
-            LOG_TIME(wr_generate_nonce);
-            LOG_TIME(wr_push_chunk_tracking);
             LOG_TIME(wr_encrypt_metadata);
             LOG_TIME(wr_encrypt_payload);
             LOG_TIME(wr_ibv_post_send);
             LOG_TIME(wc_send_start);
-            LOG_TIME(wc_send_end);*/
+            LOG_TIME(wc_send_end);
         }
         else
         {
             /* A SEND WR has happened : per CVMRDMA procotol, it has to be a WRITE_WITH_IMM of a chunk in the ring buffer */
+            // fprintf(stderr, "CQ server: received recv WC for QPN %x, wrid 0x%lx, len %d\n", qpn, this_wc->wr_id, wc_length);
 
             get_time(&wc_recv_start);
 
@@ -211,8 +228,7 @@ static int cq_server_loop_once(struct cvmrdma_context * ctxt, struct ibv_cq * pr
             get_time(&wc_refuel);
 
 
-            DEBUG("before chunk: rcved 0x%zx bytes of WR\n", qp->wr_bytes_rcved);
-            pthread_mutex_lock(&qp->remote_params_lock);
+            /*pthread_mutex_lock(&qp->remote_params_lock);
             if(!qp->remote_params_set) {
                 DEBUG("WARN: remote params not set for QPN %x\n", qpn);
             }
@@ -221,7 +237,7 @@ static int cq_server_loop_once(struct cvmrdma_context * ctxt, struct ibv_cq * pr
             }
             pthread_mutex_unlock(&qp->remote_params_lock);
             DEBUG("remote params set for QPN %x\n", qpn);
-            assert(qp->remote_params_set);
+            assert(qp->remote_params_set);*/
             uint64_t const * shared_key = qp->shared_key;
 
             unsigned char * ringbuf_in = (unsigned char *)qp->recv_ringbuf_va;
@@ -294,10 +310,10 @@ static int cq_server_loop_once(struct cvmrdma_context * ctxt, struct ibv_cq * pr
             bool is_send = (wr_op == IBV_WR_SEND) || (wr_op == IBV_WR_SEND_WITH_IMM);
             bool is_read_internal = (wr_op == IBV_WR_RDMA_READ_INTERNAL);
             bool is_read_ping = (wr_op == IBV_WR_RDMA_READ_PING);
-            bool is_ack = (wr_op == IBV_WR_RDMA_SLOT_ACK);
 
             if (is_read_ping) {
 
+                // fprintf(stderr, "[CQ] Received READ_PING notif. QPN %x, addr %lx, len %lu, rkey %x\n", qpn, notif.hca_addr, notif.chunk_len, notif.rkey);
                 // for read pings, we have to issue an internal read to fetch the data
                 // and send it back to the requester
                 struct ibv_send_wr send_wrs[1] = {0};
@@ -312,20 +328,15 @@ static int cq_server_loop_once(struct cvmrdma_context * ctxt, struct ibv_cq * pr
                 send_wrs[0].sg_list = send_sgl;
                 send_wrs[0].next = NULL;
 
+                send_ack(ctxt, qp);
                 // fprintf(stderr, "[CQ] Posting internal read WWI for READ_PING. QPN %x, addr %lx, len %lu, rkey %x\n", qpn, send_sgl[0].addr, send_sgl[0].length, send_sgl[0].lkey);
-                struct ibv_send_wr * bad_wr = NULL;
-                post_send_do_bounce(qp, send_wrs, &bad_wr);
+#ifndef DISABLE_SEND_LOOP
+                wrq_push(qp->wr_queue, &send_wrs[0]);
+#else
+                post_send_do_bounce(qp, &send_wrs[0], NULL);
+#endif
                 // skip the whole chunk processing for read pings
                 // and only trigger the code that notifies the other node that chunk slots can be reused
-                goto skip_chunk_processing;
-            }
-
-            if (is_ack) {
-                pthread_mutex_lock(&qp->send_lines_full_lock);
-                qp->send_lines_full -= cvmrdma_ring_entries / cvmrdma_ack_notify_divider;
-                pthread_mutex_unlock(&qp->send_lines_full_lock);
-
-                pthread_cond_signal(&qp->send_lines_avail);
                 goto skip_chunk_processing;
             }
 
@@ -368,12 +379,23 @@ static int cq_server_loop_once(struct cvmrdma_context * ctxt, struct ibv_cq * pr
                     /* The operation is a SEND: we can only bypass the scatter if the next chunk fits
                         in the current sge */
 
+                    //fprintf(stderr, "Waiting to get recv_info for SEND/READ_INTERNAL op\n");
                     struct recv_metadata_entry * recv_info = NULL;
-                    if (is_send) {
-                        recv_info = qp_recv_metadata_front(qp->recv_metadata);
-                    } else if (is_read_internal) {
-                        recv_info = qp_read_metadata_front(qp->read_metadata);
-                    }
+                    do {
+                        if (is_send) {
+                            recv_info = qp_recv_metadata_front(qp->recv_metadata);
+                        } else if (is_read_internal) {
+                            recv_info = qp_read_metadata_front(qp->read_metadata);
+                        }
+
+                        // this is to make sure the thread can exit cleanly
+                        if (atomic_load(&qp->stop_requested)) {
+                            fprintf(stderr, "Stop requested while processing send WC, exiting cq_server_loop_once\n");
+                            return -1;
+                        }
+                    } while (recv_info == NULL);
+                    // fprintf(stderr, "Got recv_info for SEND/READ_INTERNAL op\n");
+                    
                     
                     struct ibv_sge * rcv_sgl = recv_info->sgl;
                     struct ibv_sge * cur_sge = &rcv_sgl[qp->cur_sge_idx];
@@ -442,11 +464,19 @@ static int cq_server_loop_once(struct cvmrdma_context * ctxt, struct ibv_cq * pr
                         /* The operation is a SEND: use the next chunk on the current recv request */
 
                         struct recv_metadata_entry * recv_info = NULL;
-                        if (is_send) {
-                            recv_info = qp_recv_metadata_front(qp->recv_metadata);
-                        } else if (is_read_internal) {
-                            recv_info = qp_read_metadata_front(qp->read_metadata);
-                        }
+                        do {
+                            if (is_send) {
+                                recv_info = qp_recv_metadata_front(qp->recv_metadata);
+                            } else if (is_read_internal) {
+                                recv_info = qp_read_metadata_front(qp->read_metadata);
+                            }
+
+                            // this is to make sure the thread can exit cleanly
+                            if (atomic_load(&qp->stop_requested)) {
+                                fprintf(stderr, "Stop requested while processing send WC, exiting cq_server_loop_once\n");
+                                return -1;
+                            }
+                        } while (recv_info == NULL);
 
                         struct ibv_sge * rcv_sgl = recv_info->sgl;
                         int rcv_nsge = recv_info->nsge;
@@ -502,11 +532,20 @@ static int cq_server_loop_once(struct cvmrdma_context * ctxt, struct ibv_cq * pr
                     if (is_send || is_read_internal) {
                         /* Record in the QP the number of bytes written during the decrypt (directly to dest) */
                         struct recv_metadata_entry * recv_info = NULL;
-                        if (is_send) {
-                            recv_info = qp_recv_metadata_front(qp->recv_metadata);
-                        } else if (is_read_internal) {
-                            recv_info = qp_read_metadata_front(qp->read_metadata);
-                        }
+
+                        do {
+                            if (is_send) {
+                                recv_info = qp_recv_metadata_front(qp->recv_metadata);
+                            } else if (is_read_internal) {
+                                recv_info = qp_read_metadata_front(qp->read_metadata);
+                            }
+
+                            // this is to make sure the thread can exit cleanly
+                            if (atomic_load(&qp->stop_requested)) {
+                                fprintf(stderr, "Stop requested while processing send WC, exiting cq_server_loop_once\n");
+                                return -1;
+                            }
+                        } while (recv_info == NULL);
 
                         struct ibv_sge * rcv_sgl = recv_info->sgl;
                         struct ibv_sge * cur_sge = &rcv_sgl[qp->cur_sge_idx];
@@ -546,7 +585,17 @@ static int cq_server_loop_once(struct cvmrdma_context * ctxt, struct ibv_cq * pr
                     // get and pop the read entry, because we handeled it
                     // this entry was needed so the client nows where to place the data when it arrives
                     // from the server
-                    struct recv_metadata_entry * recv_info = qp_read_metadata_front(qp->read_metadata);
+                    
+                    struct recv_metadata_entry * recv_info = NULL;
+                    do {
+                        recv_info = qp_read_metadata_front(qp->read_metadata);
+
+                        // this is to make sure the thread can exit cleanly
+                        if (atomic_load(&qp->stop_requested)) {
+                            fprintf(stderr, "Stop requested while processing send WC, exiting cq_server_loop_once\n");
+                            return -1;
+                        }
+                    } while (recv_info == NULL);
                     uint64_t recv_wrid = recv_info->wrid;
                     int send_signaled = recv_info->send_signaled;
                     qp_read_metadata_pop(qp->read_metadata);
@@ -588,8 +637,16 @@ static int cq_server_loop_once(struct cvmrdma_context * ctxt, struct ibv_cq * pr
                     /* SEND(_WITH_IMM) and WRITE_WITH_IMM consume an RR: recover its wrid and move to the next one */
                     struct cvmrdma_cq * rcq = (struct cvmrdma_cq *)qp->user_qp.qp.recv_cq;
 
-            
-                    struct recv_metadata_entry * recv_info = qp_recv_metadata_front(qp->recv_metadata);
+                    struct recv_metadata_entry * recv_info = NULL;
+                    do {
+                        recv_info = qp_recv_metadata_front(qp->recv_metadata);
+
+                        // this is to make sure the thread can exit cleanly
+                        if (atomic_load(&qp->stop_requested)) {
+                            fprintf(stderr, "Stop requested while processing send WC, exiting cq_server_loop_once\n");
+                            return -1;
+                        }
+                    } while (recv_info == NULL);
                     uint64_t recv_wrid = recv_info->wrid;
                     qp_recv_metadata_pop(qp->recv_metadata);
                     qp->cur_sge_idx = 0;
@@ -629,6 +686,7 @@ static int cq_server_loop_once(struct cvmrdma_context * ctxt, struct ibv_cq * pr
                     DEBUG("[CQ] Pushing WC, byte_len %zu, imm %x, opcode %d, qp_num %x, status %d, wr_id %lx\n", recv_wc.byte_len, recv_wc.imm_data, recv_wc.opcode, recv_wc.qp_num, recv_wc.status, recv_wc.wr_id);
 
                     // TODO: This might need to adhere to signaled completions
+                    //fprintf(stderr, "[CQ] RECV WC: byte_len %zu, imm %x, opcode %d, qp_num %x, status %d, wr_id %lx\n", recv_wc.byte_len, recv_wc.imm_data, recv_wc.opcode, recv_wc.qp_num, recv_wc.status, recv_wc.wr_id);
                     wcq_push(rcq->wc_queue, &recv_wc);
 
                     //recv_count++;
@@ -647,35 +705,12 @@ static int cq_server_loop_once(struct cvmrdma_context * ctxt, struct ibv_cq * pr
             }
             get_time(&wc_notify_user);
 
-skip_chunk_processing:
-
             /* We can notify the remote thay this chunk can be reused for writing
                 XXX: this could be pushed all the way up right after copying into private memory
                 But what about failures to decrypt?*/
 
-#ifndef CVMRDMA_DISABLE_RECV_NOTIFY
-            DEBUG("FFF [CQ] notifying remote that chunk %zu is free\n", this_recv_slot_id);
-
-            if (qp->received_lines >= qp->received_lines_threshold){
-
-                qp->received_lines_threshold += (cvmrdma_ring_entries / cvmrdma_ack_notify_divider);
-
-                struct ibv_send_wr send_wrs[1] = {0};
-                // we don't send a SIGNALED flag, because this wr is internal and on the server side we don't
-                // expect a work completion for it
-                send_wrs[0].opcode = IBV_WR_RDMA_SLOT_ACK;
-                send_wrs[0].num_sge = 0;
-                send_wrs[0].imm_data = 0;
-                // wr_id is not used in this case, but we set it to 0 for consistency        
-                send_wrs[0].wr_id = 0;
-                send_wrs[0].sg_list = NULL;
-                send_wrs[0].next = NULL;
-
-                struct ibv_send_wr * bad_wr = NULL;
-                post_send_do_bounce(qp, send_wrs, &bad_wr);
-            }
-            
-#endif
+            send_ack(ctxt, qp);
+skip_chunk_processing:
             get_time(&wc_notify_sender);
 
             LOG_STRING("RECV WC times:");
@@ -755,7 +790,7 @@ int cvmrdma_cq_server_run_once_if_idle_send(struct cvmrdma_context * ctxt, struc
 
 void* cvmrdma_cq_wait_completion_event(void* arg) {
     struct cvmrdma_qp *qp = (struct cvmrdma_qp *)arg;
-    struct cvmrdma_cq * cq = (struct cvmrdma_cq *)qp->provider_qp;
+    struct cvmrdma_cq * cq = (struct cvmrdma_cq *)qp->provider_cq;
     struct cvmrdma_context * context = cvmrdma_get_ctx(cq->user_cq.cq.context);
 
     DEBUG("[CQ] Waiting for CQ event\n");
@@ -771,4 +806,12 @@ void* cvmrdma_cq_wait_completion_event(void* arg) {
 void cvmrdma_stop_cq_thread(struct cvmrdma_qp * qp)
 {
     atomic_store(&qp->stop_requested, 1);
+
+    // make sure the cq thread is not blocked on the parameters condition variable
+    pthread_mutex_lock(&qp->remote_params_lock);
+    if (!qp->remote_params_set) {
+        qp->remote_params_set = true; /* or leave false and just broadcast */
+        pthread_cond_broadcast(&qp->remote_params_set_cv);
+    }
+    pthread_mutex_unlock(&qp->remote_params_lock);
 }

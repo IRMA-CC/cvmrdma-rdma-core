@@ -21,15 +21,20 @@ public:
             // the waiting thread only to block again (see notify_one for details)
         }
 
-        m_queue_has_data_cv.notify_one();
+        // m_queue_has_data_cv.notify_one();
     }
 
     T & front()
     {
         auto locked = std::unique_lock{m_lock};
-        while(m_queue.empty())
+        /*while(m_queue.empty())
         {
             m_queue_has_data_cv.wait(locked);
+        }*/
+
+        if (m_queue.empty())
+        {
+            return *(T *)nullptr;
         }
 
         /* Reference stays valid even without lock because there is a

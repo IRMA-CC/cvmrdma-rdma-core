@@ -3,13 +3,17 @@
 
 int try_to_start_manager();
 int connect_to_manager(uint32_t qpn, int* client_socket);
-int send_and_wait_for_key(int client_socket, struct cvmrdma_qp *qp, char* server_ip, uint64_t dest_qpn, uint64_t rkey);
-int disconnect_from_manager(int client_socket, uint32_t qpn);
+int send_and_wait_for_key(int client_socket, struct cvmrdma_qp *qp, char* server_ip, uint32_t dest_qpn, uint32_t rkey, uint32_t control_rkey, uint32_t control_qpn, uint32_t control_psn);
+// int disconnect_from_manager(int client_socket, uint32_t qpn);
+void start_socket_server(pthread_t* thread, int client_socket, struct cvmrdma_qp* qp);
 
 
 struct tcp_client_msg {
     uint32_t qpn;
-    uint64_t local_ring_rkey;
+    uint32_t local_ring_rkey;
+    uint32_t control_rkey;
+    uint32_t control_qpn;
+    uint32_t control_psn;
 };
 
 enum manager_wr_type {
@@ -33,5 +37,10 @@ struct manager_wr {
         struct manager_wr_qpn qpn;
         struct manager_wr_tcp tcp;
     } u;
+};
+
+struct server_socket_info {
+    int client_socket;
+    struct cvmrdma_qp* qp;
 };
 

@@ -39,25 +39,9 @@
 #include "nonce_queue.h"
 #include "chunk_queue.h"
 #include "cvmrdma_manager_client.h"
+#include "cvmrdma_ack.h"
 
 #include "debug.h"
-
-void cvmrdma_pregenerate_nonces_loop(void* c_qp){
-
-	struct cvmrdma_qp * qp = (struct cvmrdma_qp *)c_qp;
-
-	for (;;) {
-		if (qp_nonce_queue_size(qp->payload_nonce_queue) < 50) {
-			while (qp_nonce_queue_size(qp->payload_nonce_queue) <= 100) {
-				struct nonce_entry new_nonce_entry = {0};
-				randombytes_buf(new_nonce_entry.nonce, sizeof(new_nonce_entry.nonce));
-				qp_nonce_queue_push(qp->payload_nonce_queue, &new_nonce_entry);
-			}
-		} else {
-			usleep(100); // Sleep for 100 microseconds to avoid busy-waiting
-		}
-	}
-}
 
 
 static char * lookup_ip_by_lid(uint64_t lid)
@@ -361,263 +345,106 @@ static int free_public_mr(struct cvmrdma_context * ctxt, struct ibv_mr * mr, int
 }
 
 
-static struct ibv_qp *cvmrdma_create_qp(struct ibv_pd * ibpd,
-				struct ibv_qp_init_attr *attr)
+struct start_args {
+    struct cvmrdma_qp *qp;
+	uint16_t dlid;
+    uint8_t  port_num;
+};
+
+
+
+void *start_control_queue(void *args)
 {
-	fprintf(stderr, "CVMRDMA: create_qp called\n");
+	struct start_args * start_args = (struct start_args *)args;
+	struct cvmrdma_qp * qp = start_args->qp;
+	uint16_t dlid = start_args->dlid;
+    uint8_t port_num = start_args->port_num;
 
-	struct cvmrdma_pd * pd = (struct cvmrdma_pd *)ibpd;
-	struct ibv_context * prov_ctxt = pd->user_pd.context;
-    struct cvmrdma_context * ctxt = cvmrdma_get_ctx(prov_ctxt);
-	// TODO: in theory we could have different CQs for send and recv, but we don't support that yet
-	struct cvmrdma_cq * c_cq = (struct cvmrdma_cq *)attr->send_cq;
-	int err;
+    struct cvmrdma_context * ctxt = cvmrdma_get_ctx(qp->user_qp.qp.context);
+    int ret = 0;
 
-	struct cvmrdma_qp * qp = calloc(1, sizeof(struct cvmrdma_qp));
-	// qp->wr_queue = alloc_wr_queue();
-	// qp->nonce_metadata_cache_offset = 0;
-
-	// qp->nonce_metadata_cache = calloc(OPT_cvmrdma_nonce_cache_size * cvmrdma_aead_NPUB_WORDS, sizeof(uint64_t));
-
-	qp->received_lines = 0;
-	qp->received_lines_threshold = cvmrdma_ring_entries / cvmrdma_ack_notify_divider;
-
-	qp->send_counter = 0;
-	qp->next_send_counter = 0;
-	qp->recv_counter = 0;
-	pthread_mutex_init(&qp->send_counter_lock, NULL);
-	pthread_mutex_init(&qp->recv_counter_lock, NULL);
-	pthread_mutex_init(&qp->ibv_lock, NULL);
-	pthread_cond_init(&qp->ibv_cv, NULL);
-
-	/* Create the provider QP */
-	struct ibv_qp_init_attr_ex attr_ex = {0};
-	attr_ex.sq_sig_all = 1;
-	/* Direct send and recv WCs to the CQ server */
-	attr_ex.send_cq = c_cq->prov_cq_send;
-	attr_ex.recv_cq = c_cq->prov_cq_recv;
-
-	if (attr->qp_type != IBV_QPT_RC && attr->qp_type != IBV_QPT_UC) {
-		fprintf(stderr, "Unsupported QP type %d\n", attr->qp_type);
-		exit(1);
+	pthread_mutex_lock(&qp->remote_params_lock);
+	while (!qp->remote_params_set) {
+		pthread_cond_wait(&qp->remote_params_set_cv, &qp->remote_params_lock);
 	}
-	
-	attr_ex.qp_type = attr->qp_type;
+	pthread_mutex_unlock(&qp->remote_params_lock);
 
-	/*struct ibv_device_attr dev_attr;
-	err = ibv_query_device(ctxt, &dev_attr);
-	if (err) {
-		fprintf(stderr, "ibv_query_device() failed\n");
-		exit(1);
-	}*/
+	// fprintf(stderr, "Remote params: ring rkey %u, control QPN %u, control rkey %u, control PSN %u\n", qp->remote_ring_rkey, qp->remote_control_qpn, qp->remote_control_rkey, qp->remote_control_psn);
 
-	/* Don't keep the user set QP capacity */
-	attr_ex.cap.max_recv_sge = 30; /* max supported by device */
-	attr_ex.cap.max_recv_wr = 4096; /* max supported by device */
-	attr_ex.cap.max_send_sge = 30; /* max supported by device */
-	attr_ex.cap.max_send_wr = 4096; /* max supported by device */
-	attr_ex.cap.max_inline_data = 0; /* we're not using inline */
 
-	fprintf(stderr, "Creating QP with max_send_wr %u max_recv_wr %u\n", attr_ex.cap.max_send_wr, attr_ex.cap.max_recv_wr);
-	fprintf(stderr, "Creating QP with max_send_sge %u max_recv_sge %u\n", attr_ex.cap.max_send_sge, attr_ex.cap.max_recv_sge);
+    struct ibv_qp_attr control_qp_attr = {0};
+    control_qp_attr.qp_state = IBV_QPS_RTR;
+    control_qp_attr.ah_attr.is_global = 0;
+    control_qp_attr.ah_attr.dlid = dlid;
+    control_qp_attr.ah_attr.port_num = port_num;
+    control_qp_attr.path_mtu = IBV_MTU_4096;
+    control_qp_attr.dest_qp_num = qp->remote_control_qpn;
+    control_qp_attr.rq_psn = qp->remote_control_psn;
 
-	attr_ex.pd = pd->provider_pd;
-	attr_ex.send_ops_flags = IBV_QP_EX_WITH_RDMA_WRITE_WITH_IMM;
-	attr_ex.comp_mask = IBV_QP_INIT_ATTR_PD | IBV_QP_INIT_ATTR_SEND_OPS_FLAGS;
+    int control_qp_attr_mask = IBV_QP_STATE;
+    control_qp_attr_mask |= IBV_QP_AV | IBV_QP_PATH_MTU | IBV_QP_DEST_QPN | IBV_QP_RQ_PSN;
 
-    struct ibv_qp * ibqp = ctxt->prov_ops.create_qp_ex(prov_ctxt, &attr_ex);
-    if(! ibqp)
-    {
-		fprintf(stderr, "Unable to create provider QP (%d:%s)\n", errno, strerror(errno));
-        goto err;
+    control_qp_attr.max_dest_rd_atomic = 1;
+    control_qp_attr.min_rnr_timer = 12;
+    control_qp_attr.timeout = 21;
+
+    control_qp_attr_mask |= IBV_QP_MAX_DEST_RD_ATOMIC | IBV_QP_MIN_RNR_TIMER;
+
+    ret = ctxt->prov_ops.modify_qp(qp->control_qp, &control_qp_attr, control_qp_attr_mask);
+    if(ret) {
+        fprintf(stderr, "Failed to modify control QP to RTR (%d)\n", ret);
+        exit(1);
     }
 
-	qp->provider_qp = ibqp;
-	qp->provider_cq = c_cq;
-
-	/* Initialize user visible fields */
-	qp->user_qp.qp.context = prov_ctxt;
-	qp->user_qp.qp.qp_context = attr->qp_context;
-	qp->user_qp.qp.pd = ibpd;
-	qp->user_qp.qp.qp_num = ibqp->qp_num;
-	qp->user_qp.qp.qp_type = ibqp->qp_type;
-	/* user-qp send/recv CQ are the cvmrdma-CQ where the CQ server will push notifications */
-	qp->user_qp.qp.recv_cq = attr->recv_cq;
-	qp->user_qp.qp.send_cq = attr->send_cq;
-
-
-	QpRecvMetadata * recv_metadata = NULL;
-	if (attr->srq)
-	{
-		struct cvmrdma_srq * csrq = (struct cvmrdma_srq *)attr->srq;
-		assert(csrq->recv_metadata);
-		recv_metadata = csrq->recv_metadata;
-	} else {
-		recv_metadata = alloc_qp_recv_metadata();
-		if(! recv_metadata)
-		{
-			fprintf(stderr, "Failed to allocated recv metadata storage.\n");
-			goto free_qp;
-		}
-	}
-	qp->recv_metadata = recv_metadata;
-	
-	qp->cur_sge_idx = 0;
-	qp->cur_offt_in_sge = 0;
-	qp->wr_bytes_rcved = 0;
-
-	// this might not be needed, if we send the metadata over ip again?
-	QpSendMetadata * send_metadata = alloc_qp_send_metadata();
-	if(! send_metadata)
-	{
-		fprintf(stderr, "Failed to allocated send metadata storage.\n");
-		goto free_recv_metadata;
-	}
-	qp->send_metadata = send_metadata;
-	qp->wr_chunks_sent = 0;
-
-	QpChunk * chunk_queue = alloc_qp_chunk_queue();
-	if (! chunk_queue)
-	{
-		fprintf(stderr, "Failed to allocated chunk queue storage.\n");
-		goto free_send_metadata;
-	}
-	qp->chunk_queue = chunk_queue;
-
-	QpReadMetadata * read_metadata = alloc_qp_read_metadata();
-	if(! read_metadata)
-	{
-		fprintf(stderr, "Failed to allocated read metadata storage.\n");
-		goto free_chunk_queue;
-	}
-	qp->read_metadata = read_metadata;
-
-
-	/* Allocate the bounce regions and ring buffer for this QP */
-	DEBUG("Allocating bounce regions with size %zu for QP %" PRIx32 "\n",  (uint64_t) cvmrdma_priv_bounce_total_bytes(ctxt->aead) / (1024*1024), ibqp->qp_num);
-	void * bounce_private_mem = mmap(0, cvmrdma_priv_bounce_total_bytes(ctxt->aead), PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
-	if (bounce_private_mem == MAP_FAILED) {
-		err = errno;
-		fprintf(stderr, "Failed to mmap bounce buffer %d\n", err);
-		goto free_read_metadata;
-	}
-	qp->bounce_private_mem = bounce_private_mem;
-
-
-
-    /* To perform the bounce, we'll need to read and write the ring buffers */
-	size_t all_rings_bytes = cvmrdma_ring_slot_bytes(ctxt->aead) * cvmrdma_ring_entries;
-
-	int recv_dmabuf_fd = -1;
-	void * recv_ringbuf_va = NULL;
-	DEBUG("Allocating ring buffer with size %zu for QP %" PRIx32 "\n",  (uint64_t) all_rings_bytes / (1024*1024), ibqp->qp_num);
-	struct ibv_mr * recv_ringbuf_mr = alloc_public_mr(ctxt, pd, all_rings_bytes, &recv_dmabuf_fd, &recv_ringbuf_va);
-    if(! recv_ringbuf_mr)
-    {
-        goto dereg_send_ring_mr;
+    for (int i = 0; i < 4096; i++) {
+		// Post some dummy recv WRs to be able to receive control messages
+		// we can't submit empty WRs, as then post_recv fails
+        struct ibv_sge dummy_sge = {
+            .addr   = (uintptr_t)qp->control_buf_va + 1 * sizeof(struct control_metadata),          /* any valid MR addr */
+            .length = 1,                                      /* minimal non-zero length */
+            .lkey   = qp->control_buf_mr->lkey
+        };
+        struct ibv_recv_wr recv_wr = {
+            .wr_id   = 0,
+            .sg_list = &dummy_sge,
+            .num_sge = 1,
+            .next    = NULL
+        };
+        struct ibv_recv_wr * bad_wr = NULL;
+        ret = ctxt->prov_ops.post_recv(qp->control_qp, &recv_wr, &bad_wr);
+        if(ret) {
+            fprintf(stderr, "Failed to post recv initial RR for control QP (%d)\n", ret);
+            exit(1);
+        }
     }
 
-	qp->recv_ringbuf_mr = recv_ringbuf_mr;
-	qp->recv_ringbuf_dmabuf_fd = recv_dmabuf_fd;
-	qp->recv_ringbuf_va = recv_ringbuf_va;
+    control_qp_attr_mask = IBV_QP_STATE | IBV_QP_SQ_PSN;
+    control_qp_attr = (struct ibv_qp_attr){
+        .qp_state = IBV_QPS_RTS,
+        .sq_psn = 0,
+    };
+    control_qp_attr.sq_psn = qp->local_control_psn;
+    control_qp_attr_mask |= IBV_QP_SQ_PSN;
 
-	int send_dmabuf_fd = -1;
-	void * send_ringbuf_va = NULL;
-	struct ibv_mr * send_ringbuf_mr = alloc_public_mr(ctxt, pd, all_rings_bytes, &send_dmabuf_fd, &send_ringbuf_va);
-	if(! send_ringbuf_mr)
-	{
-		goto free_bounce_private;
-	}
+    control_qp_attr.timeout = 14;
+    control_qp_attr.retry_cnt = 7;
+    control_qp_attr.rnr_retry = 7;
+    control_qp_attr.max_dest_rd_atomic = 1;
 
-	qp->send_ringbuf_mr = send_ringbuf_mr;
-	qp->send_ringbuf_dmabuf_fd = send_dmabuf_fd;
-	qp->send_ringbuf_va = send_ringbuf_va;
+    control_qp_attr_mask |= IBV_QP_MAX_QP_RD_ATOMIC | IBV_QP_RETRY_CNT | IBV_QP_RNR_RETRY | IBV_QP_TIMEOUT;
 
-	qp->next_send_slot = 0;
-	qp->next_recv_slot = 0;
-	qp->send_lines_full = 0;
+    ret = ctxt->prov_ops.modify_qp(qp->control_qp, &control_qp_attr, control_qp_attr_mask);
+    if(ret) {
+        fprintf(stderr, "Failed to modify control QP to RTS (%d)\n", ret);
+        exit(1);
+    }
 
-	qp->user_sq_sig_all = attr->sq_sig_all;
+	pthread_mutex_lock(&qp->control_qp_connection_lock);
+	qp->control_qp_connected = true;
+	pthread_cond_signal(&qp->control_qp_connection_cv);
+	pthread_mutex_unlock(&qp->control_qp_connection_lock);
 
-	/* Initialize the mutex */
-	err = pthread_mutex_init(&qp->send_lines_full_lock, NULL);
-	if(err)
-	{
-		fprintf(stderr, "Failed to initialize the CVMRDMA send_lines_full_lock mutex %d\n", err);
-		goto dereg_send_ring_mr;
-	}
-	err = pthread_cond_init(&qp->send_lines_avail, NULL);
-	if(err)
-	{
-		fprintf(stderr, "Failed to initialize the CVMRDMA send_lines_avail cond var %d\n", err);
-		goto dereg_send_ring_mr;
-	}
-
-	err = attach_qp_to_cq_manager(ctxt, qp);
-	if(err)
-	{
-		fprintf(stderr, "Failed to attach QP %" PRIx32 " to its recv cq (%d)\n", ibqp->qp_num, err);
-		goto dereg_send_ring_mr;
-	}
-
-	// Since the actual application is likely to not poll the cq all the time,
-	// we need another trigger to wake up the cq server.
-	qp->stop_requested = 0;
-	err = pthread_create(&qp->provider_comp_channel_thread, NULL, &cvmrdma_cq_wait_completion_event, (void *)qp);
-	if (err)
-	{
-		fprintf(stderr, "Error creating cvmrdma_cq_wait_completion_event thread: %d\n", err);
-		exit(1);
-	}
-
-	/* We can only get the capability to the remote QP once we know its QPN, this will be done
-	   in modify_qp. We'll also get the rkey to its ring */
-	qp->remote_ring_rkey = 0;
-	memset(qp->rx_nonce, 0, cvmrdma_aead_NPUBBYTES);
-	qp->remote_params_set = false;
-	pthread_mutex_init(&qp->remote_params_lock, NULL);
-	pthread_cond_init(&qp->remote_params_set_cv, NULL);
-
-	fprintf(stderr, "CVMRDMA: Skipping WR queue processing\n");
-
-	char const * local_bind_addr = getenv("CVMRDMA_BIND_ADDR");
-	if(! local_bind_addr)
-	{
-		fprintf(stderr, "ERROR: No environment variable CVMRDMA_BIND_ADDR.\n");
-		goto err;
-	}
-
-	qp->local_addr = calloc(1, 20);
-	sprintf(qp->local_addr, "127.0.0.1:%s", local_bind_addr + 2);
-
-	qp->remote_addr = NULL;
-
-	connect_to_manager(qp->user_qp.qp.qp_num, &qp->client_socket);
-
-	return &qp->user_qp.qp;
-
-dereg_send_ring_mr:
-	ctxt->prov_ops.dereg_mr(verbs_get_mr(send_ringbuf_mr));
-	close(send_dmabuf_fd);
-dereg_recv_ring_mr:
-	ctxt->prov_ops.dereg_mr(verbs_get_mr(recv_ringbuf_mr));
-	close(recv_dmabuf_fd);
-free_bounce_private:
-	munmap(bounce_private_mem, cvmrdma_priv_bounce_total_bytes(ctxt->aead));
-free_read_metadata:
-	free_qp_read_metadata(read_metadata);
-free_chunk_queue:
-	free_qp_chunk_queue(qp->chunk_queue);
-free_send_metadata:
-	free_qp_send_metadata(send_metadata);
-free_recv_metadata:
-	free_qp_recv_metadata(recv_metadata);
-free_qp:
-	ctxt->prov_ops.destroy_qp(ibqp);
-err:
 	return NULL;
-
-
 }
 
 
@@ -625,13 +452,14 @@ err:
 static int cvmrdma_modify_qp(struct ibv_qp *ibqp, struct ibv_qp_attr *attr,
 		     int attr_mask)
 {
-	fprintf(stderr, "CVMRDMA: modify_qp called\n");
-
 	struct cvmrdma_qp * qp = (struct cvmrdma_qp *)ibqp;
 	struct ibv_qp * prov_qp = qp->provider_qp;
 
     struct cvmrdma_context * ctxt = cvmrdma_get_ctx(qp->user_qp.qp.context);
     int ret = 0;
+
+	attr->qp_access_flags |= IBV_ACCESS_REMOTE_READ | IBV_ACCESS_REMOTE_WRITE | IBV_ACCESS_LOCAL_WRITE;
+	attr_mask |= IBV_QP_ACCESS_FLAGS;
 
     ret = ctxt->prov_ops.modify_qp(prov_qp, attr, attr_mask);
     if(ret)
@@ -641,6 +469,36 @@ static int cvmrdma_modify_qp(struct ibv_qp *ibqp, struct ibv_qp_attr *attr,
 
 	/* Update the state on the user-visible qp fields */
 	qp->user_qp.qp.state = prov_qp->state;
+
+	if((attr_mask & IBV_QP_STATE) && (attr->qp_state == IBV_QPS_INIT)){
+		if (qp->control_qp->state != IBV_QPS_RESET)
+		{
+			fprintf(stderr, "control QP to init is not in RESET state!\n");
+			goto err;
+		}
+
+
+		assert(attr_mask & IBV_QP_PORT);
+		uint8_t myport = attr->port_num;
+		DEBUG("control QP to INIT on port %d\n", myport);
+
+		int qp_attr_mask = IBV_QP_STATE | IBV_QP_PKEY_INDEX | IBV_QP_PORT;
+		struct ibv_qp_attr control_qp_attrs = {
+			.qp_state = IBV_QPS_INIT,
+			.pkey_index = 0,
+			.port_num = myport,
+		};
+		control_qp_attrs.qp_access_flags = IBV_ACCESS_REMOTE_READ | IBV_ACCESS_REMOTE_WRITE;
+		qp_attr_mask |= IBV_QP_ACCESS_FLAGS;
+
+		ret = ctxt->prov_ops.modify_qp(qp->control_qp, &control_qp_attrs, qp_attr_mask);
+		if(ret)
+		{
+			fprintf(stderr, "Failed to modify control QP to INIT\n");
+			goto err;
+		}
+	}
+
 
 	/* The RPC object need to be connected to send, but this is not required for receive (the RPC server
 	   is already running). However, since the user passes the QPN in the INIT->RTR transition,
@@ -673,6 +531,8 @@ static int cvmrdma_modify_qp(struct ibv_qp *ibqp, struct ibv_qp_attr *attr,
 		/* Only connect to the remote's RPC server when we know that the server is up */
 		qp->remote_addr = remote_addr;
 
+		qp->local_control_psn = lrand48() & 0xFFFFFF;
+		// fprintf(stderr, "[MODIFY_QP] local control PSN %u\n", qp->local_control_psn);
 
 		switch(ibqp->qp_type)
 		{
@@ -683,16 +543,37 @@ static int cvmrdma_modify_qp(struct ibv_qp *ibqp, struct ibv_qp_attr *attr,
 
 				DEBUG("[MODIFY_QP] Obtain notification channel cap from remote for its QP with QPN 0x%" PRIx32 "\n", dest_qpn);
 
-				fprintf(stderr, "[MODIFY_QP] Sending rx key %u to remote QP 0x%" PRIx32 " at address %s\n",
-						qp->recv_ringbuf_mr->rkey, dest_qpn,
-						is_local ? qp->local_addr : qp->remote_addr);
+				/*fprintf(stderr, "[MODIFY_QP] Sending connection request to remote QPN %" PRIx32 " with values: local ring rkey %u, local control rkey %u, local control QPN 0x%" PRIx32 ", local control PSN %u\n",
+						dest_qpn,
+						qp->recv_ringbuf_mr->rkey,
+						qp->control_buf_mr->rkey,
+						qp->control_qp->qp_num,
+						qp->local_control_psn);*/
+
+				pthread_t client_thread;
+				start_socket_server(&client_thread, qp->client_socket, qp);
 				if (is_local) {
-					send_and_wait_for_key(qp->client_socket, qp, qp->local_addr, dest_qpn, qp->recv_ringbuf_mr->rkey);
+					send_and_wait_for_key(qp->client_socket, qp, qp->local_addr, dest_qpn, qp->recv_ringbuf_mr->rkey, qp->control_buf_mr->rkey, qp->control_qp->qp_num, qp->local_control_psn);
 				} else {
-					send_and_wait_for_key(qp->client_socket, qp, qp->remote_addr, dest_qpn, qp->recv_ringbuf_mr->rkey);
+					send_and_wait_for_key(qp->client_socket, qp, qp->remote_addr, dest_qpn, qp->recv_ringbuf_mr->rkey, qp->control_buf_mr->rkey, qp->control_qp->qp_num, qp->local_control_psn);
 				}
 
-				disconnect_from_manager(qp->client_socket, qp->user_qp.qp.qp_num);
+				// disconnect_from_manager(qp->client_socket, qp->user_qp.qp.qp_num);
+
+				/*fprintf(stderr, "[MODIFY_QP] Received remote ring rkey %u, remote control rkey %u, remote control QPN 0x%" PRIx32 ", remote control PSN %u\n",
+						qp->remote_ring_rkey,
+						qp->remote_control_rkey,
+						qp->remote_control_qpn,
+						qp->remote_control_psn);*/
+
+				// start control queue
+				pthread_t control_thread;
+				struct start_args * start_args = calloc(1, sizeof(struct start_args));
+				start_args->qp = qp;
+				start_args->dlid = attr->ah_attr.dlid;
+				start_args->port_num = attr->ah_attr.port_num;
+				pthread_create(&control_thread, NULL, start_control_queue, (void *)start_args);
+				pthread_detach(control_thread);
 
 				break;
 			}
@@ -807,6 +688,97 @@ static int cvmrdma_post_recv(struct ibv_qp *ibqp, struct ibv_recv_wr *wr,
 	return 0;
 }
 
+int wait_for_slot(struct cvmrdma_context * ctxt, struct cvmrdma_qp *qp){
+	/* LOCK */
+	pthread_mutex_lock(&qp->send_lines_full_lock);
+
+	int counter = 0;
+	while(qp->send_lines_full >= cvmrdma_ring_entries)
+	{
+		/*counter++;
+		if (counter == 1){
+			fprintf(stderr, "All send slots full, waiting for ack...\n");
+		}*/
+		poll_for_ack_once(ctxt, qp, true);
+
+		if (atomic_load(&qp->stop_requested)) {
+			fprintf(stderr, "Stop requested while polling for send line, exiting save_send\n");
+			return -1;
+		}
+	}
+
+	/*if (counter > 1){
+		fprintf(stderr, "Got send slot after %d polls\n", counter);
+	}*/
+
+	// qp->next_send_slot = (slot_id + 1) % cvmrdma_ring_entries;
+	qp->send_lines_full++;
+	pthread_mutex_unlock(&qp->send_lines_full_lock);
+
+	return 0;
+}
+
+int save_send(struct cvmrdma_context * ctxt, struct cvmrdma_qp * qp, struct ibv_qp_ex * prov_qpx,
+		uint64_t send_offt,
+		uint32_t remote_ring_rkey,
+		uint32_t local_provider_lkey,
+		uint32_t size){
+
+	int err = 0;
+
+	// try to dequeue if we have too many sends in transit
+	// and only submit again when we have space
+	// int retry = 0;
+	while (qp->send_in_transit_counter >= 4096) {
+		/*if (retry == 0) {
+			fprintf(stderr, "Too many sends in transit, try to dequeue...\n");
+			retry = 1;
+		}*/
+		cvmrdma_cq_server_run_once_if_idle_send(ctxt, qp->provider_cq, NULL);
+
+		if (atomic_load(&qp->stop_requested)) {
+			fprintf(stderr, "Stop requested while save send, exiting save_send\n");
+			return 0;
+		}
+	}
+
+	ibv_wr_start(prov_qpx);
+	ibv_wr_rdma_write_imm(prov_qpx,
+		remote_ring_rkey,
+		send_offt,
+		0
+	);
+	ibv_wr_set_sge(prov_qpx,
+		local_provider_lkey,
+		send_offt,
+		size
+	);
+
+	err = ibv_wr_complete(prov_qpx);
+	if (!err) {
+		pthread_mutex_lock(&qp->ibv_send_in_transit_lock);
+		qp->send_in_transit_counter += 1;
+		pthread_mutex_unlock(&qp->ibv_send_in_transit_lock);
+	} else 
+	{
+		if (err == EINVAL) {
+            struct ibv_qp_attr qa = {0};
+            struct ibv_qp_init_attr qia = {0};
+            ctxt->prov_ops.query_qp(qp->provider_qp, &qa, IBV_QP_STATE, &qia);
+            fprintf(stderr,
+                "[SEND QPN %x] EINVAL posting WWI: qp_state=%d type=%d len=%u lkey=0x%x "
+                "remote_offt=0x%lx rkey=0x%x mr_base=%p mr_len=%zu\n",
+                qp->user_qp.qp.qp_num, qa.qp_state, qp->provider_qp->qp_type, size, local_provider_lkey,
+                (unsigned long)send_offt, remote_ring_rkey,
+                qp->send_ringbuf_mr->addr, qp->send_ringbuf_mr->length);
+        }
+        fprintf(stderr, "Failed to post RDMA WRITE WITH IMM in save_send (%d)\n", err);
+        exit(1);
+	}
+
+	return err;
+}
+
 
 
 _Atomic uint64_t cvmrdma_global_send_wr_id = 0;
@@ -875,9 +847,8 @@ int post_send_do_bounce(struct cvmrdma_qp * qp, struct ibv_send_wr *wrs, struct 
 		bool is_read_ping = (this_op == IBV_WR_RDMA_READ); 
 		// this is an interal read performed by the server, to write data from the server to the client, emulating a read.
 		bool is_read_internal = (this_op == IBV_WR_RDMA_READ_INTERNAL);
-		bool is_ack = (this_op == IBV_WR_RDMA_SLOT_ACK);
 
-		if(! (is_send || is_write || is_read_ping || is_read_internal || is_ack))
+		if(! (is_send || is_write || is_read_ping || is_read_internal))
 		{
 			fprintf(stderr, "ERROR: unsupported infiniband operation %d\n", this_op);
 			exit(1);
@@ -948,13 +919,6 @@ int post_send_do_bounce(struct cvmrdma_qp * qp, struct ibv_send_wr *wrs, struct 
 			size_t sge_chunks = DIVIDE_ROUND_UP(sgl[i].length, OPT_cvmrdma_chunk_bytes);
 			total_chunks += sge_chunks;
 		}
-		/*if (total_chunks > 1){
-			fprintf(stderr, "Send more than one chunks: %d\n", total_chunks);
-		}
-		total_chunks_send += total_chunks;
-		if (total_chunks_send % REPORT == 0){
-			fprintf(stderr, "Send %d chunks\n", total_chunks_send);
-		}*/
 
 		/*if (total_bytes > max_send_size){
 			max_send_size = total_bytes;
@@ -1006,7 +970,7 @@ int post_send_do_bounce(struct cvmrdma_qp * qp, struct ibv_send_wr *wrs, struct 
 #endif
 
 		while(cur_sge_idx < nsge && !no_data_send)
-		{		// generate new metadata nonce for each metadata 
+		{
 
 			uint64_t nonce_metadata[cvmrdma_aead_NPUB_WORDS] = {0};
 			pthread_mutex_lock(&qp->send_counter_lock);
@@ -1080,29 +1044,10 @@ int post_send_do_bounce(struct cvmrdma_qp * qp, struct ibv_send_wr *wrs, struct 
 			*/
 			int slot_id = (nonce_metadata[0]/2) % cvmrdma_ring_entries;
 			{
-				/* LOCK */
-				pthread_mutex_lock(&qp->send_lines_full_lock);
-
-				while(qp->send_lines_full >= cvmrdma_ring_entries)
-				{
-					fprintf(stderr, "[SEND QPN %x] Waiting for send slot\n", qp->user_qp.qp.qp_num);
-					pthread_cond_wait(&qp->send_lines_avail, &qp->send_lines_full_lock);
+				int ret = wait_for_slot(ctxt, qp);
+				if (ret < 0) {
+					return 0;
 				}
-
-				// slot_id = qp->next_send_slot;
-
-				/*if (slot_id == cvmrdma_ring_entries - 1){
-					fprintf(stderr, "Used all slots!!!\n");
-				}*/
-
-				qp->next_send_slot = (slot_id + 1) % cvmrdma_ring_entries;
-				
-				qp->send_lines_full++;
-				DEBUG("[SEND QPN %x] slot_id %d\n", qp->user_qp.qp.qp_num, slot_id);
-				DEBUG("[SEND QPN %x] send_lines_full %d\n", qp->user_qp.qp.qp_num, qp->send_lines_full);
-
-				pthread_mutex_unlock(&qp->send_lines_full_lock);
-				/*  UNLOCK */
 			}
 			get_time(&wr_wait_for_recv_slot);
 
@@ -1158,52 +1103,37 @@ int post_send_do_bounce(struct cvmrdma_qp * qp, struct ibv_send_wr *wrs, struct 
 			uint32_t local_provider_lkey = qp->send_ringbuf_mr->lkey;
 			uint32_t remote_ring_rkey = qp->remote_ring_rkey;
 			assert(remote_ring_rkey != 0);
+
 			uint64_t send_offt = slot_id * cvmrdma_ring_slot_bytes(ctxt->aead);
 			prov_qpx->wr_id = cvmrdma_global_send_wr_id++;
 
-			pthread_mutex_lock(&qp->ibv_lock);
 			while (nonce_metadata[0] - 1 != qp->next_send_counter) {
-				pthread_cond_wait(&qp->ibv_cv, &qp->ibv_lock);
+				// this is needed to ensure send exits when stop is requested
+				if (atomic_load(&qp->stop_requested)) {
+					fprintf(stderr, "Stop requested while waiting for order, exiting save_send\n");
+					return 0;
+				}
+				// pthread_cond_wait(&qp->ibv_cv, &qp->ibv_lock);
 			}
+			pthread_mutex_lock(&qp->ibv_lock);
 
-			ibv_wr_start(prov_qpx);
-			ibv_wr_rdma_write_imm(prov_qpx,
-				remote_ring_rkey,
-				slot_id * cvmrdma_ring_slot_bytes(ctxt->aead),
-				0
-			);
-			ibv_wr_set_sge(prov_qpx,
-				local_provider_lkey,
-				send_offt,
-				(uint32_t) cvmrdma_ring_slot_bytes(ctxt->aead) /* includes mac */
-			);
 
-			err = ibv_wr_complete(prov_qpx);
-			if(err)
-			{
-				fprintf(stderr, "Failed to post WWI for a chunk (%d)\n", err);
-				exit(1);
+			// only send the encrypted metadata + encrypted payload
+			// the rest of the chunk is left uninitialized and not sent
+			// this saves bandwidth and reduces the amount of data that needs to be encrypted
+			int ret = save_send(ctxt, qp, prov_qpx, send_offt, remote_ring_rkey, local_provider_lkey, (uint32_t) cvmrdma_ring_slot_bytes(ctxt->aead));
+			if (ret < 0) {
+				return -1;
 			}
 
 			qp->next_send_counter += 2;
-			pthread_cond_broadcast(&qp->ibv_cv);
 			pthread_mutex_unlock(&qp->ibv_lock);
+			// pthread_cond_broadcast(&qp->ibv_cv);
 
 			get_time(&wr_ibv_post_send);
 
 			bytes_sent += true_payload_bytes;
 			chunks_in_wr++;
-
-			/* try to dequeue some RECV WC from the CQ (if no other thread is polling the CQ) */
-			/*if(qp->send_lines_full >= cvmrdma_ring_entries / cvmrdma_ack_notify_divider)
-			{
-				err = cvmrdma_cq_server_run_once_if_idle_recv(ctxt, qp->provider_cq, NULL);
-				if(err < 0)
-				{
-					fprintf(stderr, "Polling the CQ after a post_send failed %d\n", err);
-					exit(1);
-				}
-			}*/
 		}
 
 		assert(bytes_sent == total_bytes);
@@ -1264,25 +1194,10 @@ int post_send_do_bounce(struct cvmrdma_qp * qp, struct ibv_send_wr *wrs, struct 
 
 			int slot_id = (nonce_metadata[0]/2) % cvmrdma_ring_entries;
 			{
-				/* LOCK */
-				pthread_mutex_lock(&qp->send_lines_full_lock);
-
-				while(qp->send_lines_full >= cvmrdma_ring_entries)
-				{
-					fprintf(stderr, "[SEND QPN %x] Waiting for send slot\n", qp->user_qp.qp.qp_num);
-					pthread_cond_wait(&qp->send_lines_avail, &qp->send_lines_full_lock);
+				int ret = wait_for_slot(ctxt, qp);
+				if (ret < 0) {
+					return 0;
 				}
-
-				// slot_id = qp->next_send_slot;
-
-				qp->next_send_slot = (slot_id + 1) % cvmrdma_ring_entries;
-				
-				qp->send_lines_full++;
-				DEBUG("[SEND QPN %x] slot_id %d\n", qp->user_qp.qp.qp_num, slot_id);
-				DEBUG("[SEND QPN %x] send_lines_full %d\n", qp->user_qp.qp.qp_num, qp->send_lines_full);
-
-				pthread_mutex_unlock(&qp->send_lines_full_lock);
-				/*  UNLOCK */
 			}
 
 			get_time(&wr_wait_for_recv_slot);
@@ -1315,51 +1230,35 @@ int post_send_do_bounce(struct cvmrdma_qp * qp, struct ibv_send_wr *wrs, struct 
 			prov_qpx->wr_id = cvmrdma_global_send_wr_id++;
 			uint64_t send_offt = slot_id * cvmrdma_ring_slot_bytes(ctxt->aead);
 
-			pthread_mutex_lock(&qp->ibv_lock);
 			while (nonce_metadata[0] != qp->next_send_counter) {
-				fprintf(stderr, "[SEND QPN %x] Waiting for nonce %lx, got %lx\n", qp->user_qp.qp.qp_num, nonce_metadata[0], qp->next_send_counter);
-				pthread_cond_wait(&qp->ibv_cv, &qp->ibv_lock);
+				// fprintf(stderr, "[SEND QPN %x] Waiting for nonce %lx, got %lx\n", qp->user_qp.qp.qp_num, nonce_metadata[0], qp->next_send_counter);
+				if (atomic_load(&qp->stop_requested)) {
+					fprintf(stderr, "Stop requested while waiting for order, exiting save_send\n");
+					return 0;
+				}
+				// pthread_cond_wait(&qp->ibv_cv, &qp->ibv_lock);
 			}
+			pthread_mutex_lock(&qp->ibv_lock);
 
-			ibv_wr_start(prov_qpx);
-			ibv_wr_rdma_write_imm(prov_qpx,
-				remote_ring_rkey,
-				slot_id * cvmrdma_ring_slot_bytes(ctxt->aead),
-				0
-			);
-			ibv_wr_set_sge(prov_qpx,
-				local_provider_lkey,
-				send_offt,
-				(uint32_t) notif_clen
-			);
-
-			err = ibv_wr_complete(prov_qpx);
-			if(err)
-			{
-				fprintf(stderr, "Failed to post WWI for a chunk (%d)\n", err);
-				exit(1);
+			int ret = save_send(ctxt, qp, prov_qpx, send_offt, remote_ring_rkey, local_provider_lkey, (uint32_t) cvmrdma_ring_slot_bytes(ctxt->aead));
+			if (ret < 0) {
+				return -1;
 			}
 
 			qp->next_send_counter += 2;
-			pthread_cond_broadcast(&qp->ibv_cv);
 			pthread_mutex_unlock(&qp->ibv_lock);
+			// pthread_cond_broadcast(&qp->ibv_cv);
 
 			get_time(&wr_ibv_post_send);
-
-			/* try to dequeue some RECV WC from the CQ (if no other thread is polling the CQ) */
-			/*if(qp->send_lines_full >= cvmrdma_ring_entries / cvmrdma_ack_notify_divider)
-			{
-				err = cvmrdma_cq_server_run_once_if_idle_recv(ctxt, qp->provider_cq, NULL);
-				if(err < 0)
-				{
-					fprintf(stderr, "Polling the CQ after a post_send failed %d\n", err);
-					exit(1);
-				}
-			}*/
+			
 		}
 	}
 
-
+	/* try to dequeue some ACKs if we have many send lines full */
+	if(qp->send_lines_full >= cvmrdma_ring_entries / cvmrdma_ack_notify_divider)
+	{
+		poll_for_ack_once(ctxt, qp, false);
+	}
 	return 0;
 }
 
@@ -1374,6 +1273,12 @@ static int cvmrdma_post_send(struct ibv_qp *ibqp, struct ibv_send_wr *wr,
 	struct cvmrdma_qp * qp = (struct cvmrdma_qp *)ibqp;
 	int ret = 0;
 
+	pthread_mutex_lock(&qp->control_qp_connection_lock);
+	while (!qp->control_qp_connected) {
+		pthread_cond_wait(&qp->control_qp_connection_cv, &qp->control_qp_connection_lock);
+	}
+	pthread_mutex_unlock(&qp->control_qp_connection_lock);
+
 	get_time(&wr_submit_end);
 	for(struct ibv_send_wr * this_wr = wr ; this_wr != NULL ; this_wr = this_wr->next)
 	{
@@ -1382,7 +1287,11 @@ static int cvmrdma_post_send(struct ibv_qp *ibqp, struct ibv_send_wr *wr,
 			return EINVAL;
 		}
 
+#ifndef DISABLE_SEND_LOOP
+		wrq_push(qp->wr_queue, this_wr);
+#else
 		ret = post_send_do_bounce(qp, this_wr, bad_wr);
+#endif
 	}
 	return ret;
 }
@@ -1450,29 +1359,399 @@ static struct ibv_mr *cvmrdma_reg_mr(struct ibv_pd *ibpd, void *addr, size_t len
 	return &mr->user_mr.ibv_mr;
 }
 
+#ifndef DISABLE_SEND_LOOP
+int loop_send_do_bounce(void* arg) {
+    struct cvmrdma_qp *qp = (struct cvmrdma_qp *)arg;
+
+	while (!atomic_load(&qp->stop_requested)) {
+		struct ibv_send_wr * wrs = wrq_front(qp->wr_queue);
+		if(! wrs)
+		{
+			continue;
+		}
+
+		int err = post_send_do_bounce(qp, wrs, NULL);
+		if(err)
+		{
+			fprintf(stderr, "post_send_do_bounce exited (%d)\n", err);
+			break;
+		}
+		wrq_pop(qp->wr_queue);
+	}
+	return 0;
+}
+#endif
+
+static struct ibv_qp *cvmrdma_create_qp(struct ibv_pd * ibpd,
+				struct ibv_qp_init_attr *attr)
+{
+
+	struct cvmrdma_pd * pd = (struct cvmrdma_pd *)ibpd;
+	struct ibv_context * prov_ctxt = pd->user_pd.context;
+    struct cvmrdma_context * ctxt = cvmrdma_get_ctx(prov_ctxt);
+	// TODO: in theory we could have different CQs for send and recv, but we don't support that yet
+	struct cvmrdma_cq * c_cq = (struct cvmrdma_cq *)attr->send_cq;
+	int err;
+
+	struct cvmrdma_qp * qp = calloc(1, sizeof(struct cvmrdma_qp));
+
+
+	qp->received_lines = 0;
+	qp->received_lines_threshold = cvmrdma_ring_entries / cvmrdma_ack_notify_divider;
+
+	qp->send_counter = 0;
+	qp->next_send_counter = 0;
+	qp->recv_counter = 0;
+	pthread_mutex_init(&qp->send_counter_lock, NULL);
+	pthread_mutex_init(&qp->recv_counter_lock, NULL);
+	pthread_mutex_init(&qp->ibv_lock, NULL);
+	pthread_cond_init(&qp->ibv_cv, NULL);
+
+	/* Create the provider QP */
+	struct ibv_qp_init_attr_ex attr_ex = {0};
+	attr_ex.sq_sig_all = 1;
+	/* Direct send and recv WCs to the CQ server */
+	attr_ex.send_cq = c_cq->prov_cq_send;
+	attr_ex.recv_cq = c_cq->prov_cq_recv;
+
+	if (attr->qp_type != IBV_QPT_RC && attr->qp_type != IBV_QPT_UC) {
+		fprintf(stderr, "Unsupported QP type %d\n", attr->qp_type);
+		exit(1);
+	}
+	
+	attr_ex.qp_type = attr->qp_type;
+
+	/*struct ibv_device_attr dev_attr;
+	err = ibv_query_device(ctxt, &dev_attr);
+	if (err) {
+		fprintf(stderr, "ibv_query_device() failed\n");
+		exit(1);
+	}*/
+
+	/* Don't keep the user set QP capacity */
+	attr_ex.cap.max_recv_sge = 30; /* max supported by device */
+	attr_ex.cap.max_recv_wr = 4096; /* max supported by device */
+	attr_ex.cap.max_send_sge = 30; /* max supported by device */
+	attr_ex.cap.max_send_wr = 4096; /* max supported by device */
+	attr_ex.cap.max_inline_data = 0; /* we're not using inline */
+
+	attr_ex.pd = pd->provider_pd;
+	attr_ex.send_ops_flags = IBV_QP_EX_WITH_RDMA_WRITE_WITH_IMM;
+	attr_ex.comp_mask = IBV_QP_INIT_ATTR_PD | IBV_QP_INIT_ATTR_SEND_OPS_FLAGS;
+
+    struct ibv_qp * ibqp = ctxt->prov_ops.create_qp_ex(prov_ctxt, &attr_ex);
+    if(! ibqp)
+    {
+		fprintf(stderr, "Unable to create provider QP (%d:%s)\n", errno, strerror(errno));
+        goto err;
+    }
+
+	qp->provider_qp = ibqp;
+	qp->provider_cq = c_cq;
+
+
+	/* Create the control Completion Queue */
+	struct ibv_cq * control_ibcq = ctxt->prov_ops.create_cq(prov_ctxt, 16384, NULL, 0);
+	if(!control_ibcq)
+	{
+		fprintf(stderr, "failed to create backend CQ for the control CQ\n");
+		exit(1);
+	}
+	/* see ibv_create_cq */
+	verbs_init_cq(control_ibcq, prov_ctxt, NULL, NULL);
+	qp->control_cq = control_ibcq;
+
+	/* Create the control Queue Pair */
+	struct ibv_qp_init_attr_ex control_attr_ex = {0};
+	control_attr_ex.sq_sig_all = 1;
+	control_attr_ex.send_cq = qp->control_cq;
+	control_attr_ex.recv_cq = qp->control_cq;
+
+	control_attr_ex.qp_type = IBV_QPT_RC;
+
+	control_attr_ex.cap.max_recv_sge = 16;
+	control_attr_ex.cap.max_recv_wr = 4096;
+	control_attr_ex.cap.max_send_sge = 16;
+	control_attr_ex.cap.max_send_wr = 4096;
+	control_attr_ex.cap.max_inline_data = 0; /* we're not using inline */
+
+	control_attr_ex.pd = pd->provider_pd;
+	control_attr_ex.send_ops_flags = IBV_QP_EX_WITH_RDMA_WRITE_WITH_IMM;
+	control_attr_ex.comp_mask = IBV_QP_INIT_ATTR_PD | IBV_QP_INIT_ATTR_SEND_OPS_FLAGS;
+
+    struct ibv_qp * control_qp = ctxt->prov_ops.create_qp_ex(prov_ctxt, &control_attr_ex);
+    if(! control_qp)
+    {
+		fprintf(stderr, "Unable to create control provider QP (%d:%s)\n", errno, strerror(errno));
+        goto err;
+    }
+
+	qp->control_qp = control_qp;
+
+
+	/* Initialize user visible fields */
+	qp->user_qp.qp.context = prov_ctxt;
+	qp->user_qp.qp.qp_context = attr->qp_context;
+	qp->user_qp.qp.pd = ibpd;
+	qp->user_qp.qp.qp_num = ibqp->qp_num;
+	qp->user_qp.qp.qp_type = ibqp->qp_type;
+	/* user-qp send/recv CQ are the cvmrdma-CQ where the CQ server will push notifications */
+	qp->user_qp.qp.recv_cq = attr->recv_cq;
+	qp->user_qp.qp.send_cq = attr->send_cq;
+
+	WRQueue * wr_queue = alloc_wr_queue();
+	if(! wr_queue)
+	{
+		fprintf(stderr, "Failed to allocated WR queue storage.\n");
+		goto free_qp;
+	}
+	qp->wr_queue = wr_queue;
+
+	QpRecvMetadata * recv_metadata = NULL;
+	if (attr->srq)
+	{
+		struct cvmrdma_srq * csrq = (struct cvmrdma_srq *)attr->srq;
+		assert(csrq->recv_metadata);
+		recv_metadata = csrq->recv_metadata;
+	} else {
+		recv_metadata = alloc_qp_recv_metadata();
+		if(! recv_metadata)
+		{
+			fprintf(stderr, "Failed to allocated recv metadata storage.\n");
+			goto free_wr_queue;
+		}
+	}
+	qp->recv_metadata = recv_metadata;
+	
+	qp->cur_sge_idx = 0;
+	qp->cur_offt_in_sge = 0;
+	qp->wr_bytes_rcved = 0;
+
+	// this might not be needed, if we send the metadata over ip again?
+	QpSendMetadata * send_metadata = alloc_qp_send_metadata();
+	if(! send_metadata)
+	{
+		fprintf(stderr, "Failed to allocated send metadata storage.\n");
+		goto free_recv_metadata;
+	}
+	qp->send_metadata = send_metadata;
+	qp->wr_chunks_sent = 0;
+
+	QpChunk * chunk_queue = alloc_qp_chunk_queue();
+	if (! chunk_queue)
+	{
+		fprintf(stderr, "Failed to allocated chunk queue storage.\n");
+		goto free_send_metadata;
+	}
+	qp->chunk_queue = chunk_queue;
+
+	QpReadMetadata * read_metadata = alloc_qp_read_metadata();
+	if(! read_metadata)
+	{
+		fprintf(stderr, "Failed to allocated read metadata storage.\n");
+		goto free_chunk_queue;
+	}
+	qp->read_metadata = read_metadata;
+
+
+	/* Allocate the bounce regions and ring buffer for this QP */
+	DEBUG("Allocating bounce regions with size %zu for QP %" PRIx32 "\n",  (uint64_t) cvmrdma_priv_bounce_total_bytes(ctxt->aead) / (1024*1024), ibqp->qp_num);
+	void * bounce_private_mem = mmap(0, cvmrdma_priv_bounce_total_bytes(ctxt->aead), PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
+	if (bounce_private_mem == MAP_FAILED) {
+		err = errno;
+		fprintf(stderr, "Failed to mmap bounce buffer %d\n", err);
+		goto free_read_metadata;
+	}
+	qp->bounce_private_mem = bounce_private_mem;
+
+
+
+    /* To perform the bounce, we'll need to read and write the ring buffers */
+	size_t all_rings_bytes = cvmrdma_ring_slot_bytes(ctxt->aead) * cvmrdma_ring_entries;
+
+	int recv_dmabuf_fd = -1;
+	void * recv_ringbuf_va = NULL;
+	DEBUG("Allocating ring buffer with size %zu for QP %" PRIx32 "\n",  (uint64_t) all_rings_bytes / (1024*1024), ibqp->qp_num);
+	struct ibv_mr * recv_ringbuf_mr = alloc_public_mr(ctxt, pd, all_rings_bytes, &recv_dmabuf_fd, &recv_ringbuf_va);
+    if(! recv_ringbuf_mr)
+    {
+        goto dereg_send_ring_mr;
+    }
+
+	qp->recv_ringbuf_mr = recv_ringbuf_mr;
+	qp->recv_ringbuf_dmabuf_fd = recv_dmabuf_fd;
+	qp->recv_ringbuf_va = recv_ringbuf_va;
+
+	// fprintf(stderr, "QP %" PRIx32 " recv ring buffer rkey 0x%x, lkey 0x%x\n", ibqp->qp_num, recv_ringbuf_mr->rkey, recv_ringbuf_mr->lkey);
+
+	int send_dmabuf_fd = -1;
+	void * send_ringbuf_va = NULL;
+	struct ibv_mr * send_ringbuf_mr = alloc_public_mr(ctxt, pd, all_rings_bytes, &send_dmabuf_fd, &send_ringbuf_va);
+	if(! send_ringbuf_mr)
+	{
+		goto free_bounce_private;
+	}
+
+	qp->send_ringbuf_mr = send_ringbuf_mr;
+	qp->send_ringbuf_dmabuf_fd = send_dmabuf_fd;
+	qp->send_ringbuf_va = send_ringbuf_va;
+
+	// fprintf(stderr, "QP %" PRIx32 " send ring buffer rkey 0x%x, lkey 0x%x\n", ibqp->qp_num, send_ringbuf_mr->rkey, send_ringbuf_mr->lkey);
+
+	size_t control_buf_size = PAGE_SIZE;
+	int control_dmabuf_fd = -1;
+	void * control_buf_va = NULL;
+	struct ibv_mr * control_buf_mr = alloc_public_mr(ctxt, pd, control_buf_size, &control_dmabuf_fd, &control_buf_va);
+	if(! control_buf_mr)
+	{
+		goto dereg_send_ring_mr;
+	}
+
+	qp->control_buf_mr = control_buf_mr;
+	qp->control_dmabuf_fd = control_dmabuf_fd;
+	qp->control_buf_va = control_buf_va;
+
+
+	qp->next_send_slot = 0;
+	qp->next_recv_slot = 0;
+	qp->send_lines_full = 0;
+	qp->number_of_acked_lines = 0;
+
+	qp->send_in_transit_counter = 0;
+	qp->ack_send_in_transit_counter = 0;
+	pthread_mutex_init(&qp->ibv_send_in_transit_lock, NULL);
+
+	qp->user_sq_sig_all = attr->sq_sig_all;
+
+	/* Initialize the mutex */
+	err = pthread_mutex_init(&qp->send_lines_full_lock, NULL);
+	if(err)
+	{
+		fprintf(stderr, "Failed to initialize the CVMRDMA send_lines_full_lock mutex %d\n", err);
+		goto dereg_control_mr;
+	}
+	err = pthread_cond_init(&qp->send_lines_avail, NULL);
+	if(err)
+	{
+		fprintf(stderr, "Failed to initialize the CVMRDMA send_lines_avail cond var %d\n", err);
+		goto dereg_control_mr;
+	}
+
+	err = attach_qp_to_cq_manager(ctxt, qp);
+	if(err)
+	{
+		fprintf(stderr, "Failed to attach QP %" PRIx32 " to its recv cq (%d)\n", ibqp->qp_num, err);
+		goto dereg_control_mr;
+	}
+
+	// Since the actual application is likely to not poll the cq all the time,
+	// we need another trigger to wake up the cq server.
+	qp->stop_requested = 0;
+	err = pthread_create(&qp->provider_comp_channel_thread, NULL, &cvmrdma_cq_wait_completion_event, (void *)qp);
+	if (err)
+	{
+		fprintf(stderr, "Error creating cvmrdma_cq_wait_completion_event thread: %d\n", err);
+		exit(1);
+	}
+
+#ifndef DISABLE_SEND_LOOP
+	err = pthread_create(&qp->provider_send_channel_thread, NULL, &loop_send_do_bounce, (void *)qp);
+	if (err)
+	{
+		fprintf(stderr, "Error creating cvmrdma_cq_wait_send_event thread: %d\n", err);
+		exit(1);
+	}
+#endif
+
+	/* We can only get the capability to the remote QP once we know its QPN, this will be done
+	   in modify_qp. We'll also get the rkey to its ring */
+	qp->remote_ring_rkey = 0;
+	qp->remote_control_qpn = 0;
+	qp->remote_control_rkey = 0;
+	qp->remote_control_psn = 0;
+	qp->remote_params_set = false;
+	pthread_mutex_init(&qp->remote_params_lock, NULL);
+	pthread_cond_init(&qp->remote_params_set_cv, NULL);
+
+	qp->control_qp_connected = false;
+	pthread_mutex_init(&qp->control_qp_connection_lock, NULL);
+	pthread_cond_init(&qp->control_qp_connection_cv, NULL);
+
+	char const * local_bind_addr = getenv("CVMRDMA_BIND_ADDR");
+	if(! local_bind_addr)
+	{
+		fprintf(stderr, "ERROR: No environment variable CVMRDMA_BIND_ADDR.\n");
+		goto err;
+	} 
+
+	qp->local_addr = calloc(1, 20);
+	sprintf(qp->local_addr, "127.0.0.1:%s", local_bind_addr + 2);
+
+	qp->remote_addr = NULL;
+
+	connect_to_manager(qp->user_qp.qp.qp_num, &qp->client_socket);
+
+	return &qp->user_qp.qp;
+
+dereg_control_mr:
+	free_public_mr(ctxt, control_buf_mr, control_dmabuf_fd, control_buf_va);
+dereg_send_ring_mr:
+	free_public_mr(ctxt, send_ringbuf_mr, send_dmabuf_fd, send_ringbuf_va);
+dereg_recv_ring_mr:
+	free_public_mr(ctxt, recv_ringbuf_mr, recv_dmabuf_fd, recv_ringbuf_va);
+free_bounce_private:
+	munmap(bounce_private_mem, cvmrdma_priv_bounce_total_bytes(ctxt->aead));
+free_read_metadata:
+	free_qp_read_metadata(read_metadata);
+free_chunk_queue:
+	free_qp_chunk_queue(qp->chunk_queue);
+free_send_metadata:
+	free_qp_send_metadata(send_metadata);
+free_recv_metadata:
+	free_qp_recv_metadata(recv_metadata);
+free_wr_queue:
+	free_wr_queue(wr_queue);
+free_qp:
+	ctxt->prov_ops.destroy_qp(ibqp);
+err:
+	return NULL;
+}
+
 int cvmrdma_destroy_qp(struct ibv_qp *ibqp)
 {
-	fprintf(stderr, "Destroying QP\n");
 
 	struct cvmrdma_qp * qp = (struct cvmrdma_qp *)ibqp;
 	struct cvmrdma_context * ctxt = cvmrdma_get_ctx(qp->user_qp.qp.context);
 	int ret;
+
+	cvmrdma_stop_cq_thread(qp);
+#ifndef DISABLE_SEND_LOOP
+	fprintf(stderr, "Joining provider send channel thread\n");
+	pthread_join(qp->provider_send_channel_thread, NULL);
+	fprintf(stderr, "Joined provider send channel thread\n");
+#endif
+	pthread_join(qp->provider_comp_channel_thread, NULL);
 
 	free(qp->local_addr);
 
 	pthread_cond_destroy(&qp->remote_params_set_cv);
 	pthread_mutex_destroy(&qp->remote_params_lock);
 
-	cvmrdma_stop_cq_thread(qp);
-	pthread_join(qp->provider_comp_channel_thread, NULL);
+	pthread_cond_destroy(&qp->control_qp_connection_cv);
+	pthread_mutex_destroy(&qp->control_qp_connection_lock);
 
 	detach_qp_from_cq_manager(ctxt, qp);
 
 	pthread_cond_destroy(&qp->send_lines_avail);
 	pthread_mutex_destroy(&qp->send_lines_full_lock);
 
-	// todo stop threads
-	// TODO detach qp from cq manager
+	// TODO detach qp from cq 
+	
+	ret = free_public_mr(ctxt, qp->control_buf_mr, qp->control_dmabuf_fd, qp->control_buf_va);
+	if (ret) {
+		fprintf(stderr, "Failed to free control_buf_mr\n");
+		return ret;
+	}
 
 	ret = free_public_mr(ctxt, qp->recv_ringbuf_mr, qp->recv_ringbuf_dmabuf_fd, qp->recv_ringbuf_va);
 	if (ret) {
@@ -1492,6 +1771,7 @@ int cvmrdma_destroy_qp(struct ibv_qp *ibqp)
 		return ret;
 	}
 
+	free_wr_queue(qp->wr_queue);
 	free_qp_send_metadata(qp->send_metadata);
 	free_qp_chunk_queue(qp->chunk_queue);
 	free_qp_read_metadata(qp->read_metadata);
@@ -1509,9 +1789,19 @@ int cvmrdma_destroy_qp(struct ibv_qp *ibqp)
 		return ret;
 	}
 
-	free(qp);
+	ret = ctxt->prov_ops.destroy_qp(qp->control_qp);
+	if (ret) {
+		fprintf(stderr, "Failed to destroy control QP\n");
+		return ret;
+	}
 
-	fprintf(stderr, "Destroyed QP\n");
+	ret = ctxt->prov_ops.destroy_cq(qp->control_cq);
+	if (ret) {
+		fprintf(stderr, "Failed to destroy control CQ\n");
+		return ret;
+	}
+
+	free(qp);
 
 	return 0;
 }
@@ -1716,16 +2006,11 @@ static void print_process_name_debug() {
 }
 
 
-// CapnpEvloopThread * evloop_server = NULL;
-// CVMRDMAServer * tcp_server = NULL;
-pthread_t tcp_server_thread = NULL;
-
 uint64_t OPT_cvmrdma_ring_buffer_size = 1024 * 1024 * 512; // 512 MiB
 uint64_t OPT_cvmrdma_chunk_bytes = 1024 * 4;
 uint64_t cvmrdma_ring_entries = -1;
-uint64_t cvmrdma_ack_notify_divider = 2;
+uint64_t cvmrdma_ack_notify_divider = 16;
 uint64_t cvmrdma_ack_threshold = -1;
-uint64_t OPT_cvmrdma_nonce_cache_size = 1;
 // bool OPT_cvmrdma_disable_payload_nonce_pregeneration = false;
 // it should always hold (OPT_cvmrdma_chunk_bytes * cvmrdma_ring_entries) < 64 * 2048 * 4096 = 536870912 bytes = 512 MiB
 static struct verbs_context *cvmrdma_alloc_context(struct ibv_device *ibdev,
@@ -1781,6 +2066,8 @@ static struct verbs_context *cvmrdma_alloc_context(struct ibv_device *ibdev,
 		}
 	} 
 
+	fprintf(stderr, "CVMRDMA_CHUNK_BYTES set to %lu\n", OPT_cvmrdma_chunk_bytes);
+
 	char const * cvmrdma_ring_buffer_size_str = getenv("CVMRDMA_RING_BUFFER_SIZE");
 	if(cvmrdma_ring_buffer_size_str != NULL)
 	{
@@ -1795,20 +2082,8 @@ static struct verbs_context *cvmrdma_alloc_context(struct ibv_device *ibdev,
 	// the size of our ring buffer is limited to 512 MiB
 	// we need to claculate how many entries we can fit into the ring buffer depending on the chunk size
 	cvmrdma_ring_entries = OPT_cvmrdma_ring_buffer_size / (OPT_cvmrdma_chunk_bytes);
-	fprintf(stderr, "CVMRDMA_CHUNK_BYTES set to %lu, ring entries set to %lu\n", OPT_cvmrdma_chunk_bytes, cvmrdma_ring_entries);
+	// fprintf(stderr, "CVMRDMA_CHUNK_BYTES set to %lu, ring entries set to %lu\n", OPT_cvmrdma_chunk_bytes, cvmrdma_ring_entries);
 	cvmrdma_ack_threshold = DIVIDE_ROUND_UP(cvmrdma_ring_entries, 2);
-
-	char const * cvmrdma_nonce_cache_size_str = getenv("CVMRDMA_NONCE_CACHE_SIZE");
-	if(cvmrdma_nonce_cache_size_str != NULL)
-	{
-		OPT_cvmrdma_nonce_cache_size = atoi(cvmrdma_nonce_cache_size_str);
-		if (OPT_cvmrdma_nonce_cache_size == 0)
-		{
-			fprintf(stderr, "ERROR: CVMRDMA_NONCE_CACHE_SIZE must be a positive integer\n");
-			goto err;
-		}
-	}
-	fprintf(stderr, "CVMRDMA_NONCE_CACHE_SIZE set to %lu\n", OPT_cvmrdma_nonce_cache_size);
 
 	/* Initialize cryptographic APIs (can be called multiple times) */
 	if (sodium_init() < 0) {
@@ -1834,6 +2109,10 @@ static struct verbs_context *cvmrdma_alloc_context(struct ibv_device *ibdev,
 
 	// TODO: qp_metadata_manager_destroy(server->qp_metadata_manager); when destroying the context
 	cvmrdma_ctx->qp_metadata_manager = qp_metadata_manager_alloc();
+
+	fprintf(stderr, "Actual chunk size (including overhead) is %lu\n", cvmrdma_ring_slot_bytes(cvmrdma_ctx->aead));
+	fprintf(stderr, "Needs %lu MTUs without metadata per chunk\n", DIVIDE_ROUND_UP(OPT_cvmrdma_chunk_bytes, 4096));
+	fprintf(stderr, "Needs %lu MTUs per chunk\n", DIVIDE_ROUND_UP(cvmrdma_ring_slot_bytes(cvmrdma_ctx->aead), 4096));
 
 #ifndef DUMMY_SYSTEM_HEAP
 	int system_heap_fd = open_system_heap();
