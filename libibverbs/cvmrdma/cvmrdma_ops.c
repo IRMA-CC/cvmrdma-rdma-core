@@ -2071,7 +2071,7 @@ static struct verbs_context *cvmrdma_alloc_context(struct ibv_device *ibdev,
 	char const * cvmrdma_ring_buffer_size_str = getenv("CVMRDMA_RING_BUFFER_SIZE");
 	if(cvmrdma_ring_buffer_size_str != NULL)
 	{
-		OPT_cvmrdma_ring_buffer_size = atoi(cvmrdma_ring_buffer_size_str);
+		OPT_cvmrdma_ring_buffer_size = (uint64_t)atoi(cvmrdma_ring_buffer_size_str) * 1024 * 1024;
 		if (OPT_cvmrdma_ring_buffer_size == 0)
 		{
 			fprintf(stderr, "ERROR: CVMRDMA_RING_BUFFER_SIZE must be a positive integer\n");
