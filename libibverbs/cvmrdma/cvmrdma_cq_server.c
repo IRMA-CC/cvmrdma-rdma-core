@@ -369,7 +369,7 @@ static int cq_server_loop_once(struct cvmrdma_context * ctxt, struct ibv_cq * pr
 
                     // the chunk offset needs to be 0, otherwise the encrypted chunk
                     // saved will not match the state of the chunk in the user memory region
-                    if(notif.chunk_len == OPT_cvmrdma_chunk_bytes){
+                    if(notif.chunk_len == OPT_cvmrdma_chunk_bytes && !OPT_disable_skip_scatter){
                         decrypted = dest;
                         skip_scatter = true;
                     }
@@ -406,7 +406,7 @@ static int cq_server_loop_once(struct cvmrdma_context * ctxt, struct ibv_cq * pr
                     // the chunk offset needs to be 0, otherwise the encrypted chunk
                     // saved will not match the state of the chunk in the user memory region
                     if(notif.chunk_len == OPT_cvmrdma_chunk_bytes 
-                        && qp->cur_offt_in_sge + notif.chunk_len <= cur_sge->length)
+                        && qp->cur_offt_in_sge + notif.chunk_len <= cur_sge->length && !OPT_disable_skip_scatter)
                     {
                         /* can write directly to dest! */
                         unsigned char * mr_addr = cur_mr->user_mr.ibv_mr.addr;
@@ -754,7 +754,11 @@ int cvmrdma_cq_server_run_once_if_idle_recv(struct cvmrdma_context * ctxt, struc
 		/* And bring it down */
 		atomic_store(&cq->is_running_recv, false);
         if (again != NULL) {
-            *again = false;
+            if (ret > 0) {
+                *again = true;
+            } else {
+                *again = false;
+            }
         }
 	} else if(again != NULL) {
         *again = true;
@@ -774,7 +778,11 @@ int cvmrdma_cq_server_run_once_if_idle_send(struct cvmrdma_context * ctxt, struc
 		/* And bring it down */
 		atomic_store(&cq->is_running_send, false);
         if (again != NULL) {
-            *again = false;
+            if (ret > 0) {
+                *again = true;
+            } else {
+                *again = false;
+            }
         }
 	} else {
         if(again != NULL) {
@@ -795,10 +803,89 @@ void* cvmrdma_cq_wait_completion_event(void* arg) {
 
     DEBUG("[CQ] Waiting for CQ event\n");
 
-    while (!atomic_load(&qp->stop_requested)) {
-        cvmrdma_cq_server_run_once_if_idle_send(context, cq, NULL);
-        cvmrdma_cq_server_run_once_if_idle_recv(context, cq, NULL);
+    if (OPT_disable_polling) {
+        // Event-based polling using libibverbs completion events
+        struct ib_uverbs_comp_event_desc ev;
+        struct ibv_cq *ev_cq;
+        void *ev_ctx;
+        bool run_again_recv = false;
+        bool run_again_send = false;
+        int ret;
+
+        while (!atomic_load(&qp->stop_requested)) {
+            // Wait for completion event on the completion channel with a timeout
+            // so we can check stop_requested periodically
+            struct pollfd pfd = {
+                .fd = cq->comp_channel->fd,
+                .events = POLLIN,
+            };
+            
+            //fprintf(stderr, "[CQ] Polling on completion channel fd %d\n", cq->comp_channel->fd);
+            int poll_ret = poll(&pfd, 1, 100); // 100ms timeout
+            if (poll_ret < 0) {
+                fprintf(stderr, "poll() failed\n");
+                exit(1);
+            }
+            
+            // Check if we should stop before trying to read
+            if (atomic_load(&qp->stop_requested)) {
+                break;
+            }
+            
+            // If timeout occurred, loop back to check stop_requested again
+            if (poll_ret == 0) {
+                continue;
+            }
+            
+            //fprintf(stderr, "[CQ] Blocking on completion channel fd %d\n", cq->comp_channel->fd);
+            if (read(cq->comp_channel->fd, &ev, sizeof ev) != sizeof ev) {
+                fprintf(stderr, "Failed to read CQ event\n");
+                exit(1);
+            }
+            //fprintf(stderr, "[CQ] Received CQ event for cq_handle %lx\n", ev.cq_handle);
+
+            ev_cq = (struct ibv_cq *) (uintptr_t) ev.cq_handle;
+            ev_ctx = ev_cq->cq_context;
+            context->prov_ops.cq_event(ev_cq);
+
+            DEBUG("[CQ] Got CQ event\n");
+            assert(ev_cq == cq->prov_cq_recv || ev_cq == cq->prov_cq_send);
+
+
+            pthread_mutex_lock(&ev_cq->mutex);
+            ev_cq->comp_events_completed += 1;
+            pthread_cond_signal(&ev_cq->cond);
+            pthread_mutex_unlock(&ev_cq->mutex);
+
+            ret = context->prov_ops.req_notify_cq(ev_cq, 0);
+            if (ret) {
+                fprintf(stderr, "Couldn't request CQ notification\n");
+                exit(1);
+            }
+
+            // fprintf(stderr, "[CQ] Processing CQ event for cq_handle %lx\n", ev.cq_handle);
+            
+
+            if(ev_cq == cq->prov_cq_recv) {
+                do {
+                    cvmrdma_cq_server_run_once_if_idle_recv(context, cq, &run_again_recv);
+                } while(run_again_recv);
+            } else {
+                do {
+                    cvmrdma_cq_server_run_once_if_idle_send(context, cq, &run_again_send);
+                } while(run_again_send);
+            }
+            //fprintf(stderr, "[CQ] Finished processing CQ event for cq_handle %lx\n", ev.cq_handle);
+        }
+    } else {
+        // Busy polling mode (original behavior)
+        while (!atomic_load(&qp->stop_requested)) {
+            cvmrdma_cq_server_run_once_if_idle_send(context, cq, NULL);
+            cvmrdma_cq_server_run_once_if_idle_recv(context, cq, NULL);
+        }
     }
+
+    // fprintf(stderr, "[CQ] Exiting CQ completion event thread\n");
 
     return NULL;
 }

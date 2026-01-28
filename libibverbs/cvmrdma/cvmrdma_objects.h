@@ -83,6 +83,9 @@ struct cvmrdma_cq {
 	struct ibv_cq * prov_cq_recv;
 	struct ibv_cq * prov_cq_send;
 
+	/* Completion channel for event-based polling */
+	struct ibv_comp_channel *comp_channel;
+
 	/* The incomming WRITE_WITH_IMM need to be written to the user_mr in the
 	 * they arrive. E.g. when we emulate a SEND, we slowly copy segment by segment
 	 * to the address the user specified in the RECV.

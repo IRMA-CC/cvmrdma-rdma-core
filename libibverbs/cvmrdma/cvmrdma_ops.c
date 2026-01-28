@@ -152,8 +152,18 @@ static struct ibv_cq *cvmrdma_create_cq(struct ibv_context *ibcontext, int cqe,
 	}
 	// always create a completion channel for the provider cq.
 	// This ensures cvmrdma will always get notifications on arrival.
+	cq->comp_channel = NULL;
+	if (OPT_disable_polling) {
+		cq->comp_channel = ibv_create_comp_channel_prov(ibcontext);
+		if(!cq->comp_channel) {
+			fprintf(stderr, "Failed to create completion channel for provider CQ\n");
+			exit(1);
+		}
+	}
+
+	
 	/* Create the recv CQ */
-	struct ibv_cq * ibcq_recv = ctxt->prov_ops.create_cq(ibcontext, 16384, NULL, 0);
+	struct ibv_cq * ibcq_recv = ctxt->prov_ops.create_cq(ibcontext, 16384, cq->comp_channel, 0);
 	if(! ibcq_recv)
 	{
 		fprintf(stderr, "failed to create backend recv CQ for the CQ server\n");
@@ -163,15 +173,17 @@ static struct ibv_cq *cvmrdma_create_cq(struct ibv_context *ibcontext, int cqe,
 	verbs_init_cq(ibcq_recv, ibcontext, NULL, NULL);
 	cq->prov_cq_recv = ibcq_recv;
 
-	/*ret = ctxt->prov_ops.req_notify_cq(ibcq_recv, 0);
-	if(ret)
-	{
-		fprintf(stderr, "Failed to request CQ notifications for recv %d\n", ret);
-		exit(1);
-	}*/
+	if (OPT_disable_polling) {
+		ret = ctxt->prov_ops.req_notify_cq(ibcq_recv, 0);
+		if(ret)
+		{
+			fprintf(stderr, "Failed to request CQ notifications for recv %d\n", ret);
+			exit(1);
+		}
+	}
 
 	/* Create send CQ */
-	struct ibv_cq * ibcq_send = ctxt->prov_ops.create_cq(ibcontext, 16384, NULL, 0);
+	struct ibv_cq * ibcq_send = ctxt->prov_ops.create_cq(ibcontext, 16384, cq->comp_channel, 0);
 	if(! ibcq_send)
 	{
 		fprintf(stderr, "failed to create backend send CQ for the CQ server\n");
@@ -181,12 +193,14 @@ static struct ibv_cq *cvmrdma_create_cq(struct ibv_context *ibcontext, int cqe,
 	verbs_init_cq(ibcq_send, ibcontext, NULL, NULL);
 	cq->prov_cq_send = ibcq_send;
 
-	/*ret = ctxt->prov_ops.req_notify_cq(ibcq_send, 0);
-	if(ret)
-	{
-		fprintf(stderr, "Failed to request CQ notifications for send %d\n", ret);
-		exit(1);
-	}*/
+	if (OPT_disable_polling) {
+		ret = ctxt->prov_ops.req_notify_cq(ibcq_send, 0);
+		if(ret)
+		{
+			fprintf(stderr, "Failed to request CQ notifications for send %d\n", ret);
+			exit(1);
+		}
+	}
 
 	return &cq->user_cq.cq;
 }
@@ -1259,6 +1273,18 @@ int post_send_do_bounce(struct cvmrdma_qp * qp, struct ibv_send_wr *wrs, struct 
 	{
 		poll_for_ack_once(ctxt, qp, false);
 	}
+
+	if (OPT_disable_pipelining) {
+		while (qp->send_in_transit_counter > 0) {
+			cvmrdma_cq_server_run_once_if_idle_send(ctxt, qp->provider_cq, NULL);
+
+			if (atomic_load(&qp->stop_requested)) {
+				fprintf(stderr, "Stop requested while waiting for pipelining, exiting save_send\n");
+				return 0;
+			}
+		}
+	}
+
 	return 0;
 }
 
@@ -1911,6 +1937,15 @@ static int cvmrdma_destroy_cq(struct ibv_cq *ibcq) {
 		goto out;
 	}
 
+	// destroy the completion channel
+	if (cq->comp_channel && OPT_disable_polling) {
+		ret = ibv_destroy_comp_channel(cq->comp_channel);
+		if (ret) {
+			fprintf(stderr, "Failed to destroy completion channel\n");
+			goto out;
+		}
+	}
+
 	// emulate ibv_destroy_cq for the channel provided by
 	struct ibv_comp_channel *channel = cq->user_cq.cq.channel;
 	if (channel) {
@@ -2004,6 +2039,11 @@ static void print_process_name_debug() {
         DEBUG("Could not read process name\n");
     }
 }
+
+// optimization options
+bool OPT_disable_skip_scatter = false;
+bool OPT_disable_pipelining = false;
+bool OPT_disable_polling = false;
 
 
 uint64_t OPT_cvmrdma_ring_buffer_size = 1024 * 1024 * 512; // 512 MiB
@@ -2110,6 +2150,48 @@ static struct verbs_context *cvmrdma_alloc_context(struct ibv_device *ibdev,
 		}
 		fprintf(stderr, "CVMRDMA_ACK_BATCH_SIZE set to %lu\n", OPT_ack_batch_size);
 	}*/
+
+	char const * cvmrdma_disable_skip_scatter = getenv("CVMRDMA_DISABLE_SKIP_SCATTER");
+	if (cvmrdma_disable_skip_scatter != NULL) {
+		OPT_disable_skip_scatter = (uint64_t)atoi(cvmrdma_disable_skip_scatter);
+		if (OPT_disable_skip_scatter == 0) {
+			OPT_disable_skip_scatter = false;
+			fprintf(stderr, "Skip scatter: enabled\n");
+		} else {
+			OPT_disable_skip_scatter = true;
+			fprintf(stderr, "Skip scatter: disabled\n");
+		}
+	} else {
+		fprintf(stderr, "Skip scatter: enabled (default)\n");
+	}
+
+	char const * cvmrdma_disable_pipelining = getenv("CVMRDMA_DISABLE_PIPELINING");
+	if (cvmrdma_disable_pipelining != NULL) {
+		OPT_disable_pipelining = (uint64_t)atoi(cvmrdma_disable_pipelining);
+		if (OPT_disable_pipelining == 0) {
+			OPT_disable_pipelining = false;
+			fprintf(stderr, "Pipelining: enabled\n");
+		} else {
+			OPT_disable_pipelining = true;
+			fprintf(stderr, "Pipelining: disabled\n");
+		}
+	} else {
+		fprintf(stderr, "Pipelining: enabled (default)\n");
+	}
+
+	char const * cvmrdma_disable_polling = getenv("CVMRDMA_DISABLE_POLLING");
+	if (cvmrdma_disable_polling != NULL) {
+		OPT_disable_polling = (uint64_t)atoi(cvmrdma_disable_polling);
+		if (OPT_disable_polling == 0) {
+			OPT_disable_polling = false;
+			fprintf(stderr, "Polling: enabled\n");
+		} else {
+			OPT_disable_polling = true;
+			fprintf(stderr, "Polling: disabled\n");
+		}
+	} else {
+		fprintf(stderr, "Polling: enabled (default)\n");
+	}
 
 	/* Initialize cryptographic APIs (can be called multiple times) */
 	if (sodium_init() < 0) {

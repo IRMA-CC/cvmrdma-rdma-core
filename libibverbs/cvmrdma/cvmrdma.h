@@ -21,6 +21,10 @@ struct cq_server_notification
 
 #define CVMRDMA_SHARED_KEY_ENV "CVMRDMA_SHARED_KEY"
 
+extern bool OPT_disable_skip_scatter;
+extern bool OPT_disable_pipelining;
+extern bool OPT_disable_polling;
+
 // Defined in cvmrdma_ops.c
 extern uint64_t OPT_cvmrdma_ring_buffer_size;
 extern uint64_t OPT_cvmrdma_chunk_bytes;
