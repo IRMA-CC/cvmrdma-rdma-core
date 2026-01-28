@@ -428,8 +428,8 @@ static int cq_server_loop_once(struct cvmrdma_context * ctxt, struct ibv_cq * pr
                 unsigned char * payload_start = NULL;
 
                 // copy payload to private memory
-                payload_start = private + header_bytes;
-                memcpy(payload_start, slot + header_bytes, payload_clen);
+                // payload_start = private + header_bytes;
+                // memcpy(payload_start, slot + header_bytes, payload_clen);
 
                 get_time(&wc_copy_payload);
 
@@ -439,7 +439,7 @@ static int cq_server_loop_once(struct cvmrdma_context * ctxt, struct ibv_cq * pr
                 err = cvmrdma_decrypt(
                     decrypted, &payload_mlen,
                     NULL,
-                    payload_start, payload_clen,
+                    slot+header_bytes, payload_clen,
                     NULL, 0,
                     (unsigned char const *)nonce_metadata,
                     (unsigned char const *)shared_key,

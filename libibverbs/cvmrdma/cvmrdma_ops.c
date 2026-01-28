@@ -67,7 +67,7 @@ static char * lookup_ip_by_lid(uint64_t lid)
 			}
 			strncpy(ip, file_ip, ip_len);
 			ip[ip_len] = '\0'; // Null-terminate the string
-			DEBUG(stderr, "Found IP for LID %d: %s\n", lid, ip);
+			fprintf(stderr, "Found IP for LID %d: %s\n", lid, ip);
 			return ip;
         }
     }
@@ -2068,6 +2068,14 @@ static struct verbs_context *cvmrdma_alloc_context(struct ibv_device *ibdev,
 
 	fprintf(stderr, "CVMRDMA_CHUNK_BYTES set to %lu\n", OPT_cvmrdma_chunk_bytes);
 
+	if (OPT_cvmrdma_chunk_bytes > 262144) {
+		fprintf(stderr, "Chunk size larger than 256 KiB, using AEGIS128X4 AEAD\n");
+		aead = LIBAEGIS_AEAD_AEGIS128X4;
+	} else {
+		fprintf(stderr, "Chunk size 256 KiB or smaller, using AEGIS128L AEAD\n");
+		aead = SODIUM_AEAD_AEGIS128L;
+	}
+
 	char const * cvmrdma_ring_buffer_size_str = getenv("CVMRDMA_RING_BUFFER_SIZE");
 	if(cvmrdma_ring_buffer_size_str != NULL)
 	{
@@ -2083,7 +2091,25 @@ static struct verbs_context *cvmrdma_alloc_context(struct ibv_device *ibdev,
 	// we need to claculate how many entries we can fit into the ring buffer depending on the chunk size
 	cvmrdma_ring_entries = OPT_cvmrdma_ring_buffer_size / (OPT_cvmrdma_chunk_bytes);
 	// fprintf(stderr, "CVMRDMA_CHUNK_BYTES set to %lu, ring entries set to %lu\n", OPT_cvmrdma_chunk_bytes, cvmrdma_ring_entries);
-	cvmrdma_ack_threshold = DIVIDE_ROUND_UP(cvmrdma_ring_entries, 2);
+	// cvmrdma_ack_threshold = DIVIDE_ROUND_UP(cvmrdma_ring_entries, 2);
+
+	/*char const * cvmrdma_ack_batch_size_str = getenv("CVMRDMA_ACK_BATCH_SIZE");
+	if(cvmrdma_ack_batch_size_str != NULL)
+	{
+		OPT_ack_batch_size = (uint64_t)atoi(cvmrdma_ack_batch_size_str);
+		if (OPT_ack_batch_size == 0)
+		{
+			fprintf(stderr, "ERROR: CVMRDMA_ACK_BATCH_SIZE must be a positive integer\n");
+			goto err;
+		}
+
+		if (OPT_ack_batch_size > DIVIDE_ROUND_UP(cvmrdma_ring_entries, 2))
+		{
+			OPT_ack_batch_size = DIVIDE_ROUND_UP(cvmrdma_ring_entries, 2);
+			fprintf(stderr, "CVMRDMA_ACK_BATCH_SIZE too large, capping to %lu\n", OPT_ack_batch_size);
+		}
+		fprintf(stderr, "CVMRDMA_ACK_BATCH_SIZE set to %lu\n", OPT_ack_batch_size);
+	}*/
 
 	/* Initialize cryptographic APIs (can be called multiple times) */
 	if (sodium_init() < 0) {
