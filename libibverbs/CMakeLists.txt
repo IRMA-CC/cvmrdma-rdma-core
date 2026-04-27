@@ -28,7 +28,6 @@ publish_internal_headers(infiniband/cvmrdma
   cvmrdma/nonce_queue.h
   cvmrdma/chunk_queue.h
   cvmrdma/send_metadata.h
-  cvmrdma/taskset_wrapper.h
   cvmrdma/wc_queue.h
   cvmrdma/wr_queue.h
   cvmrdma/dma_heap.h
@@ -38,11 +37,6 @@ publish_internal_headers(infiniband/cvmrdma
 
 configure_file("libibverbs.map.in"
   "${CMAKE_CURRENT_BINARY_DIR}/libibverbs.map" @ONLY)
-
-
-capnp_generate_cpp(CAPNP_SRCS CAPNP_HDRS cvmrdma/cvmrdma.capnp)
-add_custom_target(generate_capnp DEPENDS ${CAPNP_SRCS} ${CAPNP_HDRS})
-get_filename_component(CAPNP_HDRS_DIR ${CAPNP_HDRS} DIRECTORY)
 
 
 rdma_library(ibverbs "${CMAKE_CURRENT_BINARY_DIR}/libibverbs.map"
@@ -91,24 +85,14 @@ rdma_library(ibverbs "${CMAKE_CURRENT_BINARY_DIR}/libibverbs.map"
   cvmrdma/nonce_queue.cpp
   cvmrdma/chunk_queue.cpp
   cvmrdma/send_metadata.cpp
-  cvmrdma/taskset_wrapper.cpp
   cvmrdma/wc_queue.cpp
   cvmrdma/wr_queue.cpp
   cvmrdma/dma_heap.c
   cvmrdma/cvmrdma_manager_client.c
   cvmrdma/cvmrdma_ack.c
 
-  
-  ${CAPNP_SRCS}
   )
 
-add_dependencies(ibverbs generate_capnp)
-
-
-target_include_directories(ibverbs
-PRIVATE
-  ${CAPNP_HDRS_DIR}
-)
 
 
 target_link_libraries(ibverbs PRIVATE
@@ -117,7 +101,6 @@ target_link_libraries(ibverbs PRIVATE
   ${CMAKE_DL_LIBS}
   kern-abi
 
-  CapnProto::capnp-rpc
   Sodium::sodium
   aegis
   )
