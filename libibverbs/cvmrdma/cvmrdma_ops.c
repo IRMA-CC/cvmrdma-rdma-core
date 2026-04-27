@@ -9,6 +9,7 @@
 
 #include <sys/mman.h>
 #include <sys/ioctl.h>
+#include <sys/stat.h>
 
 #include <linux/userfaultfd.h>
 #include <unistd.h>
@@ -259,6 +260,17 @@ static struct ibv_mr * alloc_public_mr(struct cvmrdma_context * ctxt, struct cvm
 		goto err;
 	}
 
+	/*fprintf(stderr, "alloc_public_mr: dma-buf allocated fd=%d size=%zu\n", dma_buf, size);
+	{
+		struct stat st = {0};
+		if (fstat(dma_buf, &st) == 0) {
+			fprintf(stderr, "alloc_public_mr: fd=%d fstat size=%lld mode=0%o\n",
+				dma_buf, (long long)st.st_size, st.st_mode);
+		} else {
+			fprintf(stderr, "alloc_public_mr: fstat failed for fd=%d errno=%d (%s)\n",
+				dma_buf, errno, strerror(errno));
+		}
+	}*/
 
 	/* WARN: MUST attach+dma_map to dma-buf before mmap !! In our hacky implementation, the actual
 	   allocation is done in dma_map */
@@ -284,6 +296,20 @@ static struct ibv_mr * alloc_public_mr(struct cvmrdma_context * ctxt, struct cvm
 		goto dereg_mr;
 	}
 
+	/*if (size > 0) {
+		volatile unsigned char *probe = (volatile unsigned char *)va;
+		unsigned char first = probe[0];
+		unsigned char last = probe[size - 1];
+		probe[0] = (unsigned char)(first ^ 0xA5);
+		probe[size - 1] = (unsigned char)(last ^ 0x5A);
+		probe[0] = first;
+		probe[size - 1] = last;
+		fprintf(stderr,
+			"alloc_public_mr: mmap/probe ok fd=%d va=%p size=%zu first=0x%02x last=0x%02x\n",
+			dma_buf, va, size, first, last);
+	} else {
+		fprintf(stderr, "alloc_public_mr: mmap ok fd=%d va=%p size=%zu\n", dma_buf, va, size);
+	}*/
 
 	mr->addr = (void *)(uintptr_t)offt; /* oddity in libibverb, follow */
 
@@ -328,6 +354,9 @@ dereg_mr:
 	// TODO: dereg mr on failure ...
 #ifndef DUMMY_SYSTEM_HEAP
 free_dma_buf:
+	fprintf(stderr,
+		"alloc_public_mr: closing dma-buf fd=%d due to setup failure\n",
+		dma_buf);
 	close(dma_buf);
 #endif
 err:
@@ -358,119 +387,46 @@ static int free_public_mr(struct cvmrdma_context * ctxt, struct ibv_mr * mr, int
 	return 0;
 }
 
-
-struct start_args {
-    struct cvmrdma_qp *qp;
-	uint16_t dlid;
-    uint8_t  port_num;
-};
-
-
-
-void *start_control_queue(void *args)
-{
-	struct start_args * start_args = (struct start_args *)args;
-	struct cvmrdma_qp * qp = start_args->qp;
-	uint16_t dlid = start_args->dlid;
-    uint8_t port_num = start_args->port_num;
-
-    struct cvmrdma_context * ctxt = cvmrdma_get_ctx(qp->user_qp.qp.context);
-    int ret = 0;
-
-	pthread_mutex_lock(&qp->remote_params_lock);
-	while (!qp->remote_params_set) {
-		pthread_cond_wait(&qp->remote_params_set_cv, &qp->remote_params_lock);
-	}
-	pthread_mutex_unlock(&qp->remote_params_lock);
-
-	// fprintf(stderr, "Remote params: ring rkey %u, control QPN %u, control rkey %u, control PSN %u\n", qp->remote_ring_rkey, qp->remote_control_qpn, qp->remote_control_rkey, qp->remote_control_psn);
-
-
-    struct ibv_qp_attr control_qp_attr = {0};
-    control_qp_attr.qp_state = IBV_QPS_RTR;
-    control_qp_attr.ah_attr.is_global = 0;
-    control_qp_attr.ah_attr.dlid = dlid;
-    control_qp_attr.ah_attr.port_num = port_num;
-    control_qp_attr.path_mtu = IBV_MTU_4096;
-    control_qp_attr.dest_qp_num = qp->remote_control_qpn;
-    control_qp_attr.rq_psn = qp->remote_control_psn;
-
-    int control_qp_attr_mask = IBV_QP_STATE;
-    control_qp_attr_mask |= IBV_QP_AV | IBV_QP_PATH_MTU | IBV_QP_DEST_QPN | IBV_QP_RQ_PSN;
-
-    control_qp_attr.max_dest_rd_atomic = 1;
-    control_qp_attr.min_rnr_timer = 12;
-    control_qp_attr.timeout = 21;
-
-    control_qp_attr_mask |= IBV_QP_MAX_DEST_RD_ATOMIC | IBV_QP_MIN_RNR_TIMER;
-
-    ret = ctxt->prov_ops.modify_qp(qp->control_qp, &control_qp_attr, control_qp_attr_mask);
-    if(ret) {
-        fprintf(stderr, "Failed to modify control QP to RTR (%d)\n", ret);
-        exit(1);
-    }
-
-    for (int i = 0; i < 4096; i++) {
-		// Post some dummy recv WRs to be able to receive control messages
-		// we can't submit empty WRs, as then post_recv fails
-        struct ibv_sge dummy_sge = {
-            .addr   = (uintptr_t)qp->control_buf_va + 1 * sizeof(struct control_metadata),          /* any valid MR addr */
-            .length = 1,                                      /* minimal non-zero length */
-            .lkey   = qp->control_buf_mr->lkey
-        };
-        struct ibv_recv_wr recv_wr = {
-            .wr_id   = 0,
-            .sg_list = &dummy_sge,
-            .num_sge = 1,
-            .next    = NULL
-        };
-        struct ibv_recv_wr * bad_wr = NULL;
-        ret = ctxt->prov_ops.post_recv(qp->control_qp, &recv_wr, &bad_wr);
-        if(ret) {
-            fprintf(stderr, "Failed to post recv initial RR for control QP (%d)\n", ret);
-            exit(1);
-        }
-    }
-
-    control_qp_attr_mask = IBV_QP_STATE | IBV_QP_SQ_PSN;
-    control_qp_attr = (struct ibv_qp_attr){
-        .qp_state = IBV_QPS_RTS,
-        .sq_psn = 0,
-    };
-    control_qp_attr.sq_psn = qp->local_control_psn;
-    control_qp_attr_mask |= IBV_QP_SQ_PSN;
-
-    control_qp_attr.timeout = 14;
-    control_qp_attr.retry_cnt = 7;
-    control_qp_attr.rnr_retry = 7;
-    control_qp_attr.max_dest_rd_atomic = 1;
-
-    control_qp_attr_mask |= IBV_QP_MAX_QP_RD_ATOMIC | IBV_QP_RETRY_CNT | IBV_QP_RNR_RETRY | IBV_QP_TIMEOUT;
-
-    ret = ctxt->prov_ops.modify_qp(qp->control_qp, &control_qp_attr, control_qp_attr_mask);
-    if(ret) {
-        fprintf(stderr, "Failed to modify control QP to RTS (%d)\n", ret);
-        exit(1);
-    }
-
-	pthread_mutex_lock(&qp->control_qp_connection_lock);
-	qp->control_qp_connected = true;
-	pthread_cond_signal(&qp->control_qp_connection_cv);
-	pthread_mutex_unlock(&qp->control_qp_connection_lock);
-
-	return NULL;
-}
-
-
-
 static int cvmrdma_modify_qp(struct ibv_qp *ibqp, struct ibv_qp_attr *attr,
-		     int attr_mask)
+			     int attr_mask)
 {
-	struct cvmrdma_qp * qp = (struct cvmrdma_qp *)ibqp;
-	struct ibv_qp * prov_qp = qp->provider_qp;
+	fprintf(stderr,
+		"lib %s: Modifying QP %u to state %d (INIT = %d, RTR = %d, RTS = %d, ERR = %d)\n",
+		lib_get_application_name(), ibqp->qp_num, attr->qp_state,
+		IBV_QPS_INIT, IBV_QPS_RTR, IBV_QPS_RTS, IBV_QPS_ERR);
 
-    struct cvmrdma_context * ctxt = cvmrdma_get_ctx(qp->user_qp.qp.context);
-    int ret = 0;
+	struct cvmrdma_qp *qp = (struct cvmrdma_qp *)ibqp;
+	struct ibv_qp *prov_qp = qp->provider_qp;
+
+	struct cvmrdma_context *ctxt = cvmrdma_get_ctx(qp->user_qp.qp.context);
+	int ret = 0;
+
+	/*if ((attr_mask & IBV_QP_STATE) &&
+		attr->qp_state == IBV_QPS_RTS &&
+		(ibqp->qp_type == IBV_QPT_RC || ibqp->qp_type == IBV_QPT_UC)) {
+		attr->timeout = 14;
+		attr->retry_cnt = 3;
+		attr->rnr_retry = 3;
+		attr_mask |= IBV_QP_TIMEOUT | IBV_QP_RETRY_CNT | IBV_QP_RNR_RETRY;
+	}*/
+
+	if (attr->qp_state == IBV_QPS_ERR) {
+		fprintf(stderr, "Modifying QP %u to ERR state\n",
+			qp->user_qp.qp.qp_num);
+
+		ret = ctxt->prov_ops.modify_qp(prov_qp, attr, attr_mask);
+		if (ret) {
+			return ret;
+		}
+
+		cvmrdma_stop_cq_thread(qp);
+
+		ret = ctxt->prov_ops.modify_qp(qp->control_qp, attr, attr_mask);
+		if (ret) {
+			return ret;
+		}
+		return ret;
+	}
 
 	attr->qp_access_flags |= IBV_ACCESS_REMOTE_READ | IBV_ACCESS_REMOTE_WRITE | IBV_ACCESS_LOCAL_WRITE;
 	attr_mask |= IBV_QP_ACCESS_FLAGS;
@@ -532,7 +488,8 @@ static int cvmrdma_modify_qp(struct ibv_qp *ibqp, struct ibv_qp_attr *attr,
 		DEBUG(stderr, "[MODIFY_QP] local lid %d\n", qp->lid);
 		qp->dlid = attr->ah_attr.dlid;
 		DEBUG(stderr, "[MODIFY_QP] remote lid %d\n", qp->dlid);
-		srand48(time(NULL));
+		srand48(time(NULL) ^ ((long)getpid() << 16) ^
+			(long)(uintptr_t)qp);
 		qp->is_loopback = is_local;
 
 		char * remote_addr = lookup_ip_by_lid(qp->dlid);
@@ -557,37 +514,47 @@ static int cvmrdma_modify_qp(struct ibv_qp *ibqp, struct ibv_qp_attr *attr,
 
 				DEBUG("[MODIFY_QP] Obtain notification channel cap from remote for its QP with QPN 0x%" PRIx32 "\n", dest_qpn);
 
-				/*fprintf(stderr, "[MODIFY_QP] Sending connection request to remote QPN %" PRIx32 " with values: local ring rkey %u, local control rkey %u, local control QPN 0x%" PRIx32 ", local control PSN %u\n",
+			pthread_t client_thread;
+			// start_socket_server(&client_thread, qp->client_socket, qp);
+
+			/*fprintf(stderr, "lib %s: Send key from QPN %u to remote QPN %u at %s (is_local=%d) with remote ring key %u, control buf rkey %u, control QP num %u, local control PSN %u\n",
+						lib_get_application_name(),
+						qp->user_qp.qp.qp_num,
 						dest_qpn,
+						is_local ? "local" : qp->remote_addr,
+						is_local,
 						qp->recv_ringbuf_mr->rkey,
 						qp->control_buf_mr->rkey,
 						qp->control_qp->qp_num,
-						qp->local_control_psn);*/
+						qp->local_control_psn
+					);*/
 
-				pthread_t client_thread;
-				start_socket_server(&client_thread, qp->client_socket, qp);
-				if (is_local) {
-					send_and_wait_for_key(qp->client_socket, qp, qp->local_addr, dest_qpn, qp->recv_ringbuf_mr->rkey, qp->control_buf_mr->rkey, qp->control_qp->qp_num, qp->local_control_psn);
-				} else {
-					send_and_wait_for_key(qp->client_socket, qp, qp->remote_addr, dest_qpn, qp->recv_ringbuf_mr->rkey, qp->control_buf_mr->rkey, qp->control_qp->qp_num, qp->local_control_psn);
-				}
+			// it is important that we send the data BEFORE starting the server. Otherwise, the server might terminate
+			// the socket connection before we send our data.
+			if (is_local) {
+				send_and_wait_for_key(qp->client_socket, qp,
+						      qp->local_addr, dest_qpn,
+						      qp->recv_ringbuf_mr->rkey,
+						      qp->control_buf_mr->rkey,
+						      qp->control_qp->qp_num,
+						      qp->local_control_psn);
+			} else {
+				send_and_wait_for_key(qp->client_socket, qp,
+						      qp->remote_addr, dest_qpn,
+						      qp->recv_ringbuf_mr->rkey,
+						      qp->control_buf_mr->rkey,
+						      qp->control_qp->qp_num,
+						      qp->local_control_psn);
+			}
 
-				// disconnect_from_manager(qp->client_socket, qp->user_qp.qp.qp_num);
-
-				/*fprintf(stderr, "[MODIFY_QP] Received remote ring rkey %u, remote control rkey %u, remote control QPN 0x%" PRIx32 ", remote control PSN %u\n",
-						qp->remote_ring_rkey,
-						qp->remote_control_rkey,
-						qp->remote_control_qpn,
-						qp->remote_control_psn);*/
-
-				// start control queue
-				pthread_t control_thread;
-				struct start_args * start_args = calloc(1, sizeof(struct start_args));
-				start_args->qp = qp;
-				start_args->dlid = attr->ah_attr.dlid;
-				start_args->port_num = attr->ah_attr.port_num;
-				pthread_create(&control_thread, NULL, start_control_queue, (void *)start_args);
-				pthread_detach(control_thread);
+			// it is important that this is using a thread.
+			// otherwise this might block further progress of the application
+			// e.g. we cannot assume that the remote calls RTR at the same moment as we do.
+			// if we block here, we might deadlock waiting for the remote to call RTR
+			// while the remote is blocked waiting for us to call RTR.
+			start_socket_server(&client_thread, qp->client_socket,
+					    qp, attr->ah_attr.dlid,
+					    attr->ah_attr.port_num);
 
 				break;
 			}
@@ -731,6 +698,84 @@ int wait_for_slot(struct cvmrdma_context * ctxt, struct cvmrdma_qp *qp){
 
 	return 0;
 }
+
+static size_t cvmrdma_chunk_size_bucket_count(void)
+{
+	size_t bucket_count = 0;
+	size_t chunk_bytes = OPT_cvmrdma_chunk_bytes;
+
+	while (chunk_bytes > 0) {
+		bucket_count++;
+		chunk_bytes >>= 1;
+	}
+
+	return bucket_count + 1;
+}
+
+static size_t cvmrdma_chunk_size_bucket_index(size_t payload_bytes)
+{
+	size_t bucket_count = cvmrdma_chunk_size_bucket_count();
+	size_t last_bucket = bucket_count > 0 ? bucket_count - 1 : 0;
+	size_t upper_bound = 1;
+	size_t bucket = 0;
+
+	if (bucket_count == 0) {
+		return 0;
+	}
+
+	if (payload_bytes >= OPT_cvmrdma_chunk_bytes) {
+		return last_bucket;
+	}
+
+	while (upper_bound < payload_bytes && bucket < last_bucket) {
+		upper_bound = (upper_bound << 1) | 1;
+		bucket++;
+	}
+
+	return bucket;
+}
+
+static void cvmrdma_record_chunk_fullness(struct cvmrdma_qp *qp,
+						  size_t payload_bytes)
+{
+	size_t bucket;
+
+	if (!qp->size_buckets) {
+		return;
+	}
+
+	bucket = cvmrdma_chunk_size_bucket_index(payload_bytes);
+	qp->size_buckets[bucket]++;
+}
+
+static void cvmrdma_print_chunk_size_buckets(struct cvmrdma_qp *qp)
+{
+	size_t bucket_count = cvmrdma_chunk_size_bucket_count();
+
+	if (!qp->size_buckets || bucket_count == 0) {
+		return;
+	}
+
+	fprintf(stderr,
+		"QP %u chunk fullness histogram (payload bytes per chunk):\n",
+		qp->user_qp.qp.qp_num);
+	for (size_t bucket = bucket_count; bucket-- > 0;) {
+		size_t count = qp->size_buckets[bucket];
+
+		if (bucket == bucket_count - 1) {
+			fprintf(stderr, "  bucket %zu [full=%zu]: %d\n", bucket,
+				OPT_cvmrdma_chunk_bytes, count);
+			continue;
+		}
+
+		size_t low = (bucket == 0) ? 0 : ((size_t)1 << bucket);
+		size_t high = (bucket == 0) ? 1 : (((size_t)1 << (bucket + 1)) - 1);
+		fprintf(stderr, "  bucket %zu [%zu-%zu]: %d\n", bucket, high,
+			low, count);
+	}
+}
+
+// int first_send = 1;
 
 int save_send(struct cvmrdma_context * ctxt, struct cvmrdma_qp * qp, struct ibv_qp_ex * prov_qpx,
 		uint64_t send_offt,
@@ -1025,6 +1070,8 @@ int post_send_do_bounce(struct cvmrdma_qp * qp, struct ibv_send_wr *wrs, struct 
 				cur_sge_idx++;
 				cur_sge_offt = 0;
 			}
+
+			cvmrdma_record_chunk_fullness(qp, true_payload_bytes);
 
 			unsigned long long notif_clen;
 			struct cq_server_notification notif = {0};
@@ -1474,7 +1521,12 @@ static struct ibv_qp *cvmrdma_create_qp(struct ibv_pd * ibpd,
 
 	qp->provider_qp = ibqp;
 	qp->provider_cq = c_cq;
-
+	qp->size_buckets = calloc(cvmrdma_chunk_size_bucket_count(),
+				  sizeof(*qp->size_buckets));
+	if (!qp->size_buckets) {
+		fprintf(stderr, "Failed to allocate chunk fullness histogram\n");
+		goto free_qp;
+	}
 
 	/* Create the control Completion Queue */
 	struct ibv_cq * control_ibcq = ctxt->prov_ops.create_cq(prov_ctxt, 16384, NULL, 0);
@@ -1738,6 +1790,7 @@ free_recv_metadata:
 free_wr_queue:
 	free_wr_queue(wr_queue);
 free_qp:
+	free(qp->size_buckets);
 	ctxt->prov_ops.destroy_qp(ibqp);
 err:
 	return NULL;
@@ -1801,6 +1854,8 @@ int cvmrdma_destroy_qp(struct ibv_qp *ibqp)
 	free_qp_send_metadata(qp->send_metadata);
 	free_qp_chunk_queue(qp->chunk_queue);
 	free_qp_read_metadata(qp->read_metadata);
+	cvmrdma_print_chunk_size_buckets(qp);
+	free(qp->size_buckets);
 
 	pthread_cond_destroy(&qp->ibv_cv);
 	pthread_mutex_destroy(&qp->ibv_lock);
@@ -1957,6 +2012,7 @@ static int cvmrdma_destroy_cq(struct ibv_cq *ibcq) {
 	free(cq);
 
 out:
+	// valkey does not porperly deallocate with out patches, just use // return 0 in this case.
 	return ret;
 }
 

@@ -246,6 +246,8 @@ struct cvmrdma_qp {
 	int client_socket;
 
 	_Atomic int stop_requested;
+
+	int * size_buckets;
 };
 
 struct cvmrdma_srq {

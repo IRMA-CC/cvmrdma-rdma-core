@@ -1,5 +1,8 @@
 #pragma once
 
+#include <unistd.h>
+#include <limits.h>
+
 #include <stdio.h>
 #ifdef NDEBUG
     #define _PRINT_DEBUGS_BOOL 0
@@ -157,3 +160,15 @@ static inline void print_percentage(uint64_t t1, uint64_t t2, uint64_t start, ui
 #define print_timings(a,b,c) ((void)0)
 #define print_percentage(a,b,c,d,e) ((void)0)
 #endif
+
+#define PATH_MAX 4096
+static const char *lib_get_application_name(void)
+{
+    static char path[PATH_MAX];
+    ssize_t len = readlink("/proc/self/exe", path, sizeof(path) - 1);
+    if (len != -1) {
+        path[len] = '\0';
+        return path;
+    }
+    return "unknown";
+}
